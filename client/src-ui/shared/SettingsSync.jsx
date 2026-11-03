@@ -6,6 +6,7 @@ import { useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { useStatus } from '../App.jsx';
+import { Row } from './ui.jsx';
 import { api } from './api.js';
 import { relativeTime } from './time.js';
 import { Card, ErrorNote, Switch, useAction, useLoad } from './ui.jsx';
@@ -66,23 +67,10 @@ export function SyncCard() {
 
   return (
     <Card title={t('sync.title')}>
-      <div className="stack" style={{ gap: 10 }}>
-        <div className="between" style={{ flexWrap: 'nowrap', gap: 12 }}>
-          <span>
-            <b>{t('sync.toggle')}</b>
-            <span className="small muted" style={{ display: 'block' }}>
-              {t('sync.lead')}
-            </span>
-          </span>
-          <Switch checked={on} disabled={busy || !data} onChange={set} label={t('sync.toggle')} />
-        </div>
-        {data && (
-          <p className="small muted" style={{ margin: 0 }} title={on && peers.length > 0 ? peers.map((p) => peerLine(t, p)).join('\n') : undefined}>
-            {state}
-          </p>
-        )}
-        <ErrorNote error={error ?? loadError} />
-      </div>
+      <Row label={t('sync.toggle')} hint={data ? <span title={on && peers.length > 0 ? peers.map((p) => peerLine(t, p)).join('\n') : undefined}>{state}</span> : t('sync.lead')}>
+        <Switch checked={on} disabled={busy || !data} onChange={set} label={t('sync.toggle')} />
+      </Row>
+      <ErrorNote error={error ?? loadError} />
     </Card>
   );
 }

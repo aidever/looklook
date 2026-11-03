@@ -111,15 +111,17 @@ export function Switch({ checked, onChange, disabled, label }) {
   return <button type="button" role="switch" className="switch" aria-checked={checked} aria-label={label} disabled={disabled} onClick={() => onChange(!checked)} />;
 }
 
-export function Card({ id, title, actions, children, className = '' }) {
+/** 卡片：标题 + 可选的一行说明（sub）+ 右上角操作。说明只写一行，多的放 More 里。 */
+export function Card({ id, title, sub, actions, children, className = '' }) {
   return (
     <section id={id} className={`card ${className}`}>
       {(title || actions) && (
-        <header className="card-head">
+        <header className={`card-head ${sub ? 'card-head-sub' : ''}`}>
           {title && <h2>{title}</h2>}
           {actions && <div className="card-actions">{actions}</div>}
         </header>
       )}
+      {sub && <p className="card-sub">{sub}</p>}
       {children}
     </section>
   );
@@ -445,5 +447,31 @@ export function Seg({ value, options, onChange, label }) {
         </button>
       ))}
     </div>
+  );
+}
+
+/** 一个设置项：左边名字和一行说明，右边开关 / 按钮；控件太宽时（stack）放到下面（shared/page.jsx）。 */
+export function Row({ label, hint, children, stack = false, id, className = '' }) {
+  return (
+    <div id={id} className={`srow2 ${stack ? 'srow2-stack' : ''} ${className}`}>
+      <div className="srow2-text">
+        <div className="srow2-label">{label}</div>
+        {hint && <div className="srow2-hint">{hint}</div>}
+      </div>
+      {children && <div className="srow2-ctl">{children}</div>}
+    </div>
+  );
+}
+
+/** 收起来的次要内容（高级选项、原理说明），默认不展开。 */
+export function More({ summary, children, open = false }) {
+  return (
+    <details className="more" open={open || undefined}>
+      <summary>
+        <span className="grow">{summary}</span>
+        <ChevronDown size={16} aria-hidden="true" className="more-chev" />
+      </summary>
+      <div className="more-body">{children}</div>
+    </details>
   );
 }

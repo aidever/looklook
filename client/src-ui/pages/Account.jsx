@@ -7,7 +7,7 @@ import { useTranslation } from 'react-i18next';
 import { Initial, useLogout, useStatus } from '../App.jsx';
 import { api } from '../shared/api.js';
 import { platform } from '../shared/platform.js';
-import { Button, Card, CopyButton, ErrorNote, Field, Modal, PasswordInput, Skeleton, Time, useAction, useLoad, useToast } from '../shared/ui.jsx';
+import { Button, Card, CopyButton, ErrorNote, Field, Modal, PasswordInput, Row, Skeleton, Time, useAction, useLoad, useToast } from '../shared/ui.jsx';
 import { SourceTag } from './Membership.jsx';
 
 function NicknameModal({ me, onClose, onDone }) {
@@ -188,17 +188,11 @@ export default function Account() {
         </p>
       </Card>
       <Card title={t('acct.security')}>
-        <div className="between">
-          <span>
-            <b>{t('acct.change_password')}</b>
-            <span className="muted small" style={{ display: 'block' }}>
-              {t('acct.password_body')}
-            </span>
-          </span>
-          <Button variant="secondary" icon={KeyRound} disabled={!fresh} onClick={() => setModal('password')}>
-            {t('acct.change_password')}
+        <Row label={t('acct.change_password')} hint={t('acct.password_body')}>
+          <Button variant="ghost" icon={KeyRound} disabled={!fresh} onClick={() => setModal('password')}>
+            {t('acct.change')}
           </Button>
-        </div>
+        </Row>
       </Card>
       <Sessions />
       <div className="inline" style={{ marginBottom: 24 }}>

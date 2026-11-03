@@ -35,6 +35,18 @@
     "label": "Ad"
   },
   "nav": {
+    "short": {
+      "new": "New",
+      "sessions": "Chats",
+      "tasks": "Tasks",
+      "history": "History",
+      "files": "Files",
+      "ssh": "SSH",
+      "pages": "Pages",
+      "system": "System",
+      "ai": "AI",
+      "settings": "Settings"
+    },
     "main": "Main navigation",
     "terminals": "Sessions",
     "pages": "Local pages",
@@ -313,11 +325,9 @@
   },
   "pages": {
     "title": "Local pages",
-    "intro": "Put web pages running on this computer (such as a site you're developing at localhost:5173) under your personal address, so you can open them from your phone or any other computer. Only your signed-in Looklook account can see them.",
     "paused": "While remote access is paused, local pages can't be opened from outside either.",
     "list_title": "Added pages",
-    "empty_title": "No pages added yet",
-    "empty_body": "Enter the number after the colon in the page's address below to create an address that works from outside.",
+    "add_manual": "Port not listed above? Enter it yourself",
     "add_title": "Add a page",
     "count": "{{n}} / {{max}}",
     "full": "At most {{max}} pages can be added. Delete one you no longer need and add again.",
@@ -331,7 +341,6 @@
     "enabled": "Enabled",
     "delete_title": "Delete \"{{name}}\"?",
     "delete_body": "After deleting, this address stops working. The page on your computer is not affected.",
-    "privacy": "These addresses can only be opened by you after signing in to Looklook; they are not public. If you share one temporarily with a specific account, that account can open it until the share expires.",
     "share": {
       "button": "Share temporarily",
       "title": "Share “{{name}}” temporarily",
@@ -354,9 +363,9 @@
       "done": "Shared with {{username}} until {{until}}. Send them the address below; they open it after signing in to their own Looklook account:"
     },
     "mcp": {
-      "title": "MCP interface",
+      "title": "Let AI assistants use Looklook",
       "enable": "Turn on the MCP interface",
-      "intro": "When on, Codex, Claude Code, OpenCode and DSH on this computer can use the tools listed below through Looklook's MCP interface: look up and add local pages, and run commands on the SSH hosts you allow. They connect with a separate token, only from this computer; they cannot delete pages and never see SSH passwords or keys.",
+      "intro": "When on, Claude Code, Codex and others on this computer can add local pages and run commands on SSH hosts you allow — without seeing passwords.",
       "skill": "When an AI assistant finds a web page",
       "skill_auto": "Add it",
       "skill_ask": "Ask me first",
@@ -387,16 +396,24 @@
       "rotate": "New token",
       "rotate_title": "Switch to a new token?",
       "rotate_body": "The old token stops working immediately. AI assistants installed above switch to the new token automatically; tools set up by hand need the new one.",
-      "rotated": "Switched to a new token"
+      "rotated": "Switched to a new token",
+      "install_all": "Install into AI assistants ({{count}})",
+      "all_done": "All installed",
+      "none_found": "No Claude Code, Codex, OpenCode or DSH found on this computer yet. Come back after installing one.",
+      "advanced": "Advanced: what to do with pages, install one by one, manual setup"
     },
-    "mcp_moved": "Want AI assistants to look up and add pages themselves? Turn on the MCP interface under AI assistant → Tools & permissions:"
+    "sub": "Turn a page running on this computer (like localhost:5173) into an address you can open anywhere — only you, signed in.",
+    "copy": "Copy address",
+    "copied": "Address copied",
+    "disable": "Pause",
+    "enable": "Resume",
+    "disabled": "Paused"
   },
   "settings": {
     "title": "Settings",
     "terminal": "Terminal appearance",
     "preview": "~/project $ claude\nHello! Let me help you look into this error.\nThe quick brown fox 0O1lI {}[]",
     "font": "CJK font",
-    "font_hint": "English text uses JetBrains Mono.",
     "font_missing": "The bundled font wasn't found; the system font will be used.",
     "font_wenkai": "LXGW WenKai (bundled)",
     "font_system": "System font",
@@ -412,7 +429,7 @@
     "workdir": "Default folder",
     "workdir_hint": "The folder used by default when creating a terminal.",
     "device_name": "Computer name",
-    "device_name_hint": "The name shown on the Looklook website, to help you recognize this computer.",
+    "device_name_hint": "The name shown in your computer list.",
     "device_name_auto": "Use the computer's own name",
     "language": "Language",
     "about": "About",
@@ -437,12 +454,14 @@
     "default_full_access": "Permissions for new AI sessions",
     "default_full_access_ask": "Ask when needed",
     "default_full_access_on": "Full access",
-    "default_full_access_hint": "What the + on a project and new sessions use by default (Claude Code, Codex, OpenCode). In a project that already has AI sessions, the most recent one's choice is used.",
+    "default_full_access_hint": "When the project already has an AI session, follows the latest one.",
     "autosave": "Changes are saved automatically",
     "saving": "Saving…",
     "saved": "Saved",
     "scope": "Settings for this computer:",
-    "language_hint": "Only affects this browser or app, not your other computers."
+    "language_hint": "Only changes this browser or app.",
+    "details": "Build details, server, source code",
+    "platform": "Platform"
   },
   "account": {
     "days_left": "{{n}} days left",
@@ -486,14 +505,14 @@
   },
   "access": {
     "title": "Access control",
-    "intro": "This computer can always open the dashboard itself. Here you decide whether other devices can connect directly to it. To use it from your phone outside, use your personal address; no change is needed here.",
+    "intro": "This computer can always open it. Away from home, use your personal address — nothing to change here.",
     "lan": "Allow devices on the LAN to open it",
-    "lan_hint": "When on, phones and computers on the same Wi‑Fi or router can open the dashboard by entering this computer's LAN address (e.g. http://192.168.1.20:1234) in a browser. Useful when Looklook runs on a NAS or another computer at home. Don't enable it on shared networks such as cafés or offices. If unsure, leave it off.",
+    "lan_hint": "Phones and computers on the same Wi‑Fi can open it by the LAN address. Don’t turn on in public networks.",
     "lan_urls": "Devices on the LAN open this address:",
     "lan_unknown": "Couldn't find this computer's LAN address. Check its IP in your router's admin page, then open http://that-IP:{{port}}/",
     "lan_no_code": "Also enable the access code, otherwise anyone on the same Wi‑Fi can open your terminals.",
     "code": "Require an access code",
-    "code_hint": "The access code is stored only on this computer (in Looklook's local database) and is never uploaded to the Looklook server. When on, devices on the LAN or allowlist must enter it the first time they open the dashboard, and that browser remembers it for 30 days; this computer itself doesn't need it. Purpose: stop other people on the same network from opening your terminals.",
+    "code_hint": "Other devices enter it the first time; this computer never needs it.",
     "code_enable": "Enable access code",
     "code_new": "Generate a new one",
     "code_custom": "Set your own",
@@ -519,7 +538,8 @@
     "fw_lan": "To let other devices at home open it: tick only \"Private networks\" and click \"Allow access\". Don't tick \"Public networks\" (cafés, airports, etc.).",
     "fw_profile": "Allowed but still can't connect: in Windows Settings → Network & Internet → Wi‑Fi (or Ethernet) → your network, set the network profile type to \"Private\".",
     "fw_fix": "Clicked the wrong option and want to change it: open Control Panel → Windows Defender Firewall → Allow an app through Windows Firewall → Change settings, find looklook and tick only \"Private\". You can also run this in PowerShell as administrator:",
-    "fw_never": "To never see this prompt: set the environment variable LOOKLOOK_LISTEN=127.0.0.1:1234 and reopen Looklook. Then the dashboard can only be opened on this computer, and LAN access won't work."
+    "fw_never": "To never see this prompt: set the environment variable LOOKLOOK_LISTEN=127.0.0.1:1234 and reopen Looklook. Then the dashboard can only be opened on this computer, and LAN access won't work.",
+    "more": "Allow-list and custom access domain"
   },
   "relay": {
     "state": {
@@ -678,7 +698,7 @@
     "background": "Update in background",
     "background_hint": "You can close this window and keep working. Progress shows at the top of the page, and the page refreshes when it's done.",
     "banner_progress": "Updating to {{version}}",
-    "on_device": "{{name}}: ",
+    "on_device": "On “{{name}}”: ",
     "slow_restart": "The restart is taking longer than usual. If Looklook is already running, refresh the page. If it still won't open, start Looklook again on the computer.",
     "reload_page": "Refresh page",
     "this_device": "This computer"
@@ -773,9 +793,9 @@
     "default": "default",
     "help": "How do several computers work?",
     "tools_on": "Tools apply to this computer",
-    "local_only": "This computer only",
-    "local_only_hint": "Hide your other computers and connect straight to this one, without the platform or relay",
-    "local_only_hint_on": "Other computers are hidden and everything connects straight to this one. Turn off to show them again",
+    "local_only": "Use only this computer",
+    "local_only_hint": "Hide your other computers; everything connects straight to this one, not through Looklook’s servers.",
+    "local_only_hint_on": "Other computers are hidden. Turn off to show them again.",
     "local_only_on": "Showing this computer only",
     "local_only_off": "Showing all computers again",
     "this_computer": "This computer",
@@ -848,10 +868,10 @@
   },
   "relays": {
     "title": "Remote route",
-    "intro": "When you open this computer from your phone or another computer, the data goes through a Looklook route. Looklook tests the routes regularly and uses the one with the lowest latency, so you usually don't need to do anything.",
+    "intro": "The route used when you open this computer remotely. Keep “Automatic”; switch only if it feels slow.",
     "when_slow": "If remote access feels laggy or typing is delayed, pick a route with lower latency below. Once you pick one yourself it won't switch automatically, and Looklook remembers your choice. If a route gets noticeably slow, you'll see a reminder at the top of the page.",
     "auto": "Automatic (recommended)",
-    "auto_hint": "This computer tests the routes regularly and uses the one with the lowest latency. It only switches when no terminal is open, and moves to another route if one fails",
+    "auto_hint": "Measures regularly and uses the fastest; never switches while a terminal is open.",
     "auto_now": "Currently using {{name}}",
     "in_use": "In use",
     "ms": "{{ms}} ms",
@@ -888,7 +908,8 @@
       "clash": "Clash Verge, mihomo, Clash Meta and similar: add the rules below to the very top of your rule list (in Clash Verge: right-click the profile → Edit rules → Prepend rules, so profile updates don't overwrite them).",
       "others": "Other proxy apps (Surge, Shadowrocket, v2rayN, etc.): add the LookLook program to the per-process direct list (if supported), and the same domains to the “direct” or “bypass” list.",
       "reload": "After the change, connections the proxy app already set up keep using the old rules: close all connections on its Connections page or restart its core, then reload the remote page. In Connections, check that the route address (port 3478) shows DIRECT."
-    }
+    },
+    "more": "Routes, latency and proxy apps"
   },
   "dsh": {
     "output": "View DSH's output",
@@ -951,6 +972,7 @@
     "delete_dir_body": "{{path}} and everything in it will be deleted permanently — it won’t go to the Trash and can’t be undone.",
     "deleted": "Deleted “{{name}}”",
     "upload": "Upload to this folder",
+    "upload_short": "Upload",
     "upload_hint": "Upload to this folder (or drop files onto the list)",
     "uploading": "Uploading {{n}} files · {{pct}}%",
     "uploaded": "Uploaded {{n}} files",
@@ -962,7 +984,8 @@
     "office_failed": "Couldn't read this file (it may be damaged or password-protected). Download it and open it in an office app.",
     "rows_truncated": "Showing the first {{n}} of {{total}} rows. Download for the full content.",
     "sheet_empty": "This sheet is empty.",
-    "office_no_pdf": "This browser can't show PDFs inside the page. Download it to open."
+    "office_no_pdf": "This browser can't show PDFs inside the page. Download it to open.",
+    "page_sub": "Click a file to preview it, drop files here to upload. Download, rename and delete are in each row’s “⋯”."
   },
   "model": {
     "provider": "Provider",
@@ -1362,7 +1385,10 @@
         "title": "Signed in, but the command never finished",
         "hint": "Signed in, but the test command hadn't finished after 25 seconds. A login script (.bashrc etc.) may be waiting for input."
       }
-    }
+    },
+    "sub": "Keep your servers here. Click “Connect” to open a terminal — no password typing.",
+    "ai_on": "AI allowed",
+    "testing": "Testing the connection…"
   },
   "sshx": {
     "import": "Import from another computer",
@@ -1448,9 +1474,8 @@
   },
   "ai": {
     "title": "AI assistant",
-    "intro": "AI assistants such as Claude Code and Codex use Looklook through its MCP interface. Set the interface up here and see and control what they can do.",
     "local_only": "Remotely you can only turn it on or off; the token and installing into AI assistants are only available when the console is opened directly on this computer (running in Docker? start with --local-from to count the host as this computer).",
-    "tools_title": "Tools AI assistants can use",
+    "tools_title": "What the AI can use",
     "tools_intro": "The MCP interface is on; AI assistants can use the tools that are on below.",
     "tools_off": "The MCP interface is off, so AI assistants can't use any tools right now. The tools below apply once it is on.",
     "group_pages": "Local pages",
@@ -1500,7 +1525,10 @@
       "pet_on": "On",
       "pet_off": "Off",
       "pet_none": "No pet installed"
-    }
+    },
+    "pages_hint": "List added pages and create addresses for ports; can’t delete.",
+    "hosts_manage": "Set per host on the SSH page",
+    "tool_names": "Tools the AI can call (for checking logs)"
   },
   "select": {
     "toggle": "Select text",
@@ -2103,7 +2131,8 @@
     "away_attn": "{{n}} waiting for you",
     "away_sep": ", ",
     "empty_phone": "On your phone, Tasks lets you tap Allow or Deny, or answer its questions, right there.",
-    "empty_go": "Start an AI session"
+    "empty_go": "Start an AI session",
+    "sub": "Sessions where the AI is working, waiting for you, or just finished."
   },
   "sess": {
     "new": "New session",
@@ -2221,7 +2250,8 @@
     "view_menu": "View",
     "filters": "Filters",
     "pane_resize": "Drag to resize the session list",
-    "running_cmd": "Running: {{cmd}}"
+    "running_cmd": "Running: {{cmd}}",
+    "live_n": "Running: {{count}}"
   },
   "draft": {
     "tag": "Draft",
@@ -2266,7 +2296,7 @@
     "source_client": "From Looklook",
     "source_client_hint": "Forwarded to Looklook by this computer.",
     "source_offline": "Can't reach Looklook",
-    "computers_lead": "{{n}} of {{max}} computers signed in. After switching, tool pages such as Files and Settings show that computer; the session list always includes every computer.",
+    "computers_lead": "{{n}} of {{max}} computers signed in.",
     "no_computers": "No computers are signed in yet",
     "this_computer": "This computer",
     "current": "Current",
@@ -2350,7 +2380,9 @@
     "sign_out_all": "Sign out all",
     "others_signed_out": "Other browsers signed out",
     "computers_lead_single": "{{n}} of {{max}} computers signed in. Only this computer can be managed here right now; use \"Open in browser\" for the others.",
-    "address_copied": "Personal address copied. Open it in a browser on your phone or any computer."
+    "address_copied": "Personal address copied. Open it in a browser on your phone or any computer.",
+    "more_keys": "For servers and images: install keys",
+    "change": "Change"
   },
   "conn": {
     "title": "Connection",
@@ -2370,7 +2402,7 @@
     "remote_note": "Tries to reach that computer directly and falls back to the route as a relay, which only sees encrypted data."
   },
   "hist": {
-    "title": "Earlier conversations",
+    "title": "History",
     "lead": "Conversations you had with Claude Code, Codex and OpenCode on this computer. Click one to continue it in Looklook.",
     "in_project": "Continue an earlier conversation in {{name}}",
     "all_link": "All earlier conversations →",
@@ -2442,7 +2474,8 @@
     "scope": "Which computers",
     "scope_here": "This computer",
     "scope_all": "All computers",
-    "loading_more_devices": "Still loading other computers"
+    "loading_more_devices": "Still loading other computers",
+    "sub": "Earlier Claude Code, Codex and other conversations — even ones not started in Looklook. Click one to continue."
   },
   "path": {
     "label": "Path",
@@ -2478,7 +2511,7 @@
   },
   "direct": {
     "title": "Direct connection",
-    "intro": "When you open this computer remotely, a direct connection is tried first and the relay is used if it fails. If this computer has a public address (full-cone NAT only) and the ports below are open, phones and office networks can connect directly too. Changes apply to new connections.",
+    "intro": "Remote access tries a direct connection first and falls back to a relay. Most networks need nothing here.",
     "ports": "Port range (UDP)",
     "ports_hint": "Each connection uses one port. At least 8, 32 recommended. When all are taken, a random port is used and that connection goes through the relay.",
     "port_begin": "First port",
@@ -2499,7 +2532,9 @@
     "probe_disagree": "Sources disagree; a proxy or VPN may be in the way. Please check.",
     "ipv6": "Use IPv6",
     "ipv6_hint": "Turn off to use IPv4 only, e.g. when IPv6 is unreliable.",
-    "firewall": "Direct connections need UDP {{begin}}–{{end}} open in the firewall or cloud security group (IPv4 and IPv6). With router port forwarding, external and internal ports must match."
+    "firewall": "Direct connections need UDP {{begin}}–{{end}} open in the firewall or cloud security group (IPv4 and IPv6). With router port forwarding, external and internal ports must match.",
+    "more": "Have a public IP? Add it and open the ports for faster remote access",
+    "intro_full": "If this computer has a public address (full-cone NAT only) and the ports below are open, phones and office networks can connect directly too. Changes apply to new connections only."
   },
   "addp": {
     "title": "Add project",
@@ -2755,7 +2790,7 @@
   },
   "ports": {
     "title": "Ports listening on this computer",
-    "intro": "Dev servers, OpenClaw, Hermes and similar programs open a port on this computer. Choose “Make page” to open it from anywhere. Only you can see it after signing in, and you don't need to open the port to the internet.",
+    "intro": "Click “Make page” to open it from your phone or another computer.",
     "empty_title": "No listening ports found",
     "empty_body": "Start your web server, then refresh.",
     "unknown": "Unknown program",
@@ -2777,9 +2812,9 @@
   },
   "guard": {
     "title": "Safety net",
-    "lead": "When the AI is about to run a command that matches a rule, it stops and waits for you (in chat, the board or Feishu), or is refused and told to find another way. Works even when Claude Code runs with full permissions.",
+    "lead": "Undo what the AI broke, and stop it before dangerous commands.",
     "builtin": "Confirm dangerous commands",
-    "builtin_hint": "Things that are hard to undo: git push --force, git reset --hard, git clean -f, deleting your home, root or current folder (rm -rf ~ / . *), DROP TABLE, terraform destroy, kubectl delete, docker system prune, curl … | sh and so on. Everyday commands like rm -rf build are not stopped.",
+    "builtin_hint": "Commands that are hard to undo — git push --force, DROP TABLE — wait for your OK.",
     "mine": "My rules",
     "mine_hint": "A rule matches when the command contains its text, ignoring case; * stands for anything. Deny wins.",
     "pattern": "Command text",
@@ -2792,8 +2827,11 @@
     "limits": "Only commands are checked, not file edits (use checkpoints to undo those). Applies to Claude Code sessions started from now on; nothing is stopped while Looklook isn't running. For Codex it only applies when Codex asks you itself, so it can't stop Codex running with full permissions. Commands nobody confirms are denied after 10 minutes.",
     "synced": "Shared by all your computers.",
     "checkpoints": "Save a checkpoint every turn",
-    "checkpoints_hint": "When the session's folder is a git repository, a snapshot of the files is saved as each turn starts. In the terminal's Git tab you can see what changed since and go back to before that turn. Your staging area, branches and commits are not touched.",
-    "rules": "Command rules"
+    "checkpoints_hint": "Save a snapshot of the files before each turn; roll back in the Git tab (git repositories only).",
+    "rules": "Command rules",
+    "builtin_list": "Things that are hard to undo: git push --force, git reset --hard, git clean -f, deleting your home, root or current folder (rm -rf ~ / . *), DROP TABLE, terraform destroy, kubectl delete, docker system prune, curl … | sh and so on. Everyday commands like rm -rf build are not stopped.",
+    "mine_more": "Add your own rules",
+    "mine_n": "My rules ({{count}})"
   },
   "ikey": {
     "title": "Install keys",
@@ -2915,7 +2953,7 @@
   "tips": {
     "ok": "Got it",
     "reset_label": "Tips",
-    "reset_hint": "Bring back the tips you dismissed and the getting-started checklist (for every browser on this computer, and every computer when settings sync is on).",
+    "reset_hint": "Show the tips and getting-started list you closed once more.",
     "reset": "Show all tips again",
     "reset_done": "Tips will show again",
     "chat_term": {
@@ -3118,11 +3156,11 @@
     "auto_on": "Sessions not opened for {{n}} days and not busy are also stopped automatically (Settings → General → Background sessions).",
     "auto_off": "Automatic stopping is off (Settings → General → Background sessions).",
     "auto_label": "Stop automatically after not opened for",
-    "auto_hint": "Only idle ones: sessions where the AI is replying, waiting for you, or a command is running are left alone. The session stays; opening it starts it again.",
+    "auto_hint": "Busy ones (AI replying, a command running) are never stopped; stopped ones restart when opened.",
     "never": "Never",
     "n_days": "{{n}} days",
     "now_label": "Clean up now",
-    "now_hint": "Review the sessions running in the background and pick which to stop."
+    "now_hint": "Pick the sessions running in the background and stop them at once."
   },
   "inapp": {
     "open": "Open",

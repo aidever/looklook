@@ -4,6 +4,8 @@ import { AlertTriangle } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { PageHead } from '../shared/page.jsx';
+
 import { api } from '../shared/api.js';
 import { spanText } from '../shared/time.js';
 import { Card, ErrorNote, Skeleton } from '../shared/ui.jsx';
@@ -193,17 +195,13 @@ export default function System() {
   }, [range]);
 
   const head = (
-    <div className="page-head">
-      <div>
-        <h1>{t('system.title')}</h1>
-        {data?.now?.t > 0 && (
-          <p className="small muted" style={{ margin: '4px 0 0' }}>
-            {[data.now.cpu_brand, t('system.cores', { n: data.now.cores.length }), t('system.uptime', { when: fmtUptime(t, data.now.uptime) })].filter(Boolean).join(' · ')}
-          </p>
-        )}
-      </div>
+    <PageHead
+      title={t('system.title')}
+      sub={data?.now?.t > 0 ? [data.now.cpu_brand, t('system.cores', { n: data.now.cores.length }), t('system.uptime', { when: fmtUptime(t, data.now.uptime) })].filter(Boolean).join(' · ') : null}
+      perDevice
+    >
       <Seg value={range} label={t('system.range')} onChange={setRange} options={RANGES.map((r) => [r, t(`system.range_${r}`)])} />
-    </div>
+    </PageHead>
   );
   if (!data || !(data.now?.t > 0)) {
     return (

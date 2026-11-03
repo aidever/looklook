@@ -1,14 +1,14 @@
 // 会员与邀请：到期时间、兑换续期码、会员记录、邀请码与已加入的朋友。数据来自看看平台（shared/platform.js）。
 // 没有在线支付：续期码由官方发放，在这里兑换。
-import { CalendarClock, CheckCircle2, CloudOff, Gift, History, Plus, Ticket, UserPlus } from 'lucide-react';
+import { CalendarClock, CloudOff, Gift, Plus, Ticket, UserPlus } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { useStatus, webUrl } from '../App.jsx';
 import { api } from '../shared/api.js';
-import { platform, platformDirect } from '../shared/platform.js';
+import { platform } from '../shared/platform.js';
 import { daysLeft, formatDate } from '../shared/time.js';
-import { Button, Card, CopyButton, Empty, ErrorNote, Field, Note, Skeleton, Time, useAction, useConfirm, useLoad, useToast } from '../shared/ui.jsx';
+import { Button, Card, CopyButton, Empty, ErrorNote, Field, More, Note, Skeleton, Time, useAction, useConfirm, useLoad, useToast } from '../shared/ui.jsx';
 
 /** 账户页面右上角：数据从哪里来；连不上平台时说明显示不了。 */
 export function SourceTag({ error }) {
@@ -21,12 +21,8 @@ export function SourceTag({ error }) {
       </span>
     );
   }
-  return (
-    <span className="src-tag" title={t(platformDirect ? 'acct.source_direct_hint' : 'acct.source_client_hint')}>
-      <CheckCircle2 size={14} aria-hidden="true" />
-      {t(platformDirect ? 'acct.source_direct' : 'acct.source_client')}
-    </span>
-  );
+  // 数据正常取到时不用告诉用户它从哪来；只在取不到、显示的是旧数据时说
+  return null;
 }
 
 /** 输入时自动转大写并按 4 位一组加连字符。 */
@@ -218,10 +214,9 @@ export default function Membership() {
             }}
           />
           <Invites />
-          <Card title={t('acct.history_member')}>
-            {data.history.length === 0 ? (
-              <Empty icon={History} title={t('acct.history_member_empty')} />
-            ) : (
+          {/* 续期记录：有记录才显示，收起来 */}
+          {data.history.length > 0 && (
+            <More summary={t('acct.history_member')}>
               <ul className="list">
                 {data.history.map((h) => (
                   <li key={h.id}>
@@ -237,8 +232,8 @@ export default function Membership() {
                   </li>
                 ))}
               </ul>
-            )}
-          </Card>
+            </More>
+          )}
         </>
       )}
     </>

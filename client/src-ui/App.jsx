@@ -63,8 +63,8 @@ export function webUrl(status, path) {
 }
 
 /** 安全提醒：有公网 IP 的机器不要把管理台端口开放到公网。允许了其他设备却没开访问码时换成红色并说明。
- *  设置页（full）显示全文；登录页、首页折叠成一行，且在手机或其他电脑上打开时只在有风险时出现
- *  （防火墙建议只能在这台电脑上处理）。 */
+ *  设置页（full）显示全文；登录页、首页只在真有风险（放开了其他设备、又没开访问码）时折叠成一行出现——
+ *  安全的状态（只有这台电脑能打开）不用黄色警告去打扰人。 */
 export function SafetyNote({ full = false }) {
   const { t } = useTranslation();
   const { status } = useStatus();
@@ -74,7 +74,7 @@ export function SafetyNote({ full = false }) {
   const risky = open && !c.code_enabled;
   const state = risky ? 'open_no_code' : open ? 'open' : 'local_only';
   if (!full) {
-    if (status.access !== 'local' && !risky) return null;
+    if (!risky) return null;
     return (
       <FoldNote kind={risky ? 'error' : 'warn'} summary={`${t('safety.title')} · ${t(`safety.short.${state}`)}`}>
         <p>{t(`safety.${state}`)}</p>
@@ -82,6 +82,8 @@ export function SafetyNote({ full = false }) {
       </FoldNote>
     );
   }
+  // 只有这台电脑能打开：没什么要提醒的
+  if (!open) return null;
   return (
     <Note kind={risky ? 'error' : 'warn'}>
       <b>{t('safety.title')}</b>
@@ -91,14 +93,15 @@ export function SafetyNote({ full = false }) {
   );
 }
 
-// 侧栏“工具”里的页面（会话在侧栏下面，账户在用户菜单里）
+// 导航分两组（docs/DONT_MAKE_ME_THINK_2026-11.md §2）：上面是“在电脑上做事”的工具，下面是“配置”（AI 助手、设置）。
+// 每个入口都带字（short），不让人悬停去猜图标。账户在用户菜单里。
 const TOOLS = [
-  { to: '/files', icon: FolderOpen, key: 'nav.files' },
-  { to: '/ssh', icon: Server, key: 'nav.ssh' },
-  { to: '/pages', icon: Globe, key: 'nav.pages' },
-  { to: '/ai', icon: Bot, key: 'nav.ai' },
-  { to: '/system', icon: Activity, key: 'nav.system', meta: 'cpu' },
-  { to: '/settings', icon: SettingsIcon, key: 'nav.settings', badge: 'update' },
+  { to: '/files', icon: FolderOpen, key: 'nav.files', short: 'nav.short.files' },
+  { to: '/ssh', icon: Server, key: 'nav.ssh', short: 'nav.short.ssh' },
+  { to: '/pages', icon: Globe, key: 'nav.pages', short: 'nav.short.pages' },
+  { to: '/system', icon: Activity, key: 'nav.system', short: 'nav.short.system' },
+  { to: '/ai', icon: Bot, key: 'nav.ai', short: 'nav.short.ai', config: true },
+  { to: '/settings', icon: SettingsIcon, key: 'nav.settings', short: 'nav.short.settings', config: true },
 ];
 // 按电脑的页面：多台电脑时顶栏显示电脑切换（会话合并显示所有电脑，账户页不分电脑）
 const DEVICE_PAGES = ['/files', '/ssh', '/pages', '/ai', '/system', '/settings'];
@@ -330,14 +333,17 @@ function readWidth() {
   }
 }
 
-/** 图标栏上的一个入口：悬停显示名字（和快捷键），右上角可以带个数或红点。 */
-function RailItem({ to, onClick, icon: Icon, label, hint, active, count, dot, className = '', disabled }) {
+/** 图标栏上的一个入口：图标下面一直带着短名字（short），悬停显示全名和快捷键，右上角可以带个数或红点。 */
+function RailItem({ to, onClick, icon: Icon, label, short, hint, active, count, dot, className = '', disabled }) {
   const title = hint ? `${label} (${hint})` : label;
   const inner = (
     <>
-      <Icon size={19} aria-hidden="true" />
-      {count > 0 && <span className="rail-count">{count}</span>}
-      {dot && <span className="dot-badge" aria-hidden="true" />}
+      <span className="rail-ico">
+        <Icon size={19} aria-hidden="true" />
+        {count > 0 && <span className="rail-count">{count}</span>}
+        {dot && <span className="dot-badge" aria-hidden="true" />}
+      </span>
+      <span className="rail-label">{short ?? label}</span>
     </>
   );
   const cls = `rail-btn ${active ? 'active' : ''} ${className}`;
@@ -380,21 +386,26 @@ function NavRail({ path, paneOpen, onPane }) {
       <Link to="/" className="rail-brand" aria-label={t('nav.start')} title={t('nav.start')}>
         <BrandMark size={30} />
       </Link>
-      <RailItem onClick={() => ui.newSession()} icon={Plus} label={t('sess.new')} hint={keyLabel('mod+shift+O')} className="rail-new" disabled={!status.account.allowed} />
-      <RailItem onClick={openSessions} icon={MessageSquare} label={t(!area ? 'sess.title' : paneOpen ? 'sess.collapse_side' : 'sess.expand_side')} hint={keyLabel('mod+shift+S')} active={area} />
-      <RailItem to="/tasks" icon={ListTodo} label={n > 0 ? t('board.nav_count', { count: n }) : t('board.title')} active={path === '/tasks'} count={n} />
-      <RailItem to="/history" icon={History} label={t('hist.title')} active={path === '/history'} />
+      <RailItem onClick={() => ui.newSession()} icon={Plus} label={t('sess.new')} short={t('nav.short.new')} hint={keyLabel('mod+shift+O')} className="rail-new" disabled={!status.account.allowed} />
+      <RailItem onClick={openSessions} icon={MessageSquare} label={t(!area ? 'sess.title' : paneOpen ? 'sess.collapse_side' : 'sess.expand_side')} short={t('nav.short.sessions')} hint={keyLabel('mod+shift+S')} active={area} />
+      <RailItem to="/tasks" icon={ListTodo} label={n > 0 ? t('board.nav_count', { count: n }) : t('board.title')} short={t('nav.short.tasks')} active={path === '/tasks'} count={n} />
+      <RailItem to="/history" icon={History} label={t('hist.title')} short={t('nav.short.history')} active={path === '/history'} />
       <span className="rail-sep" aria-hidden="true" />
-      {TOOLS.filter((x) => x.to !== '/settings').map((x) => (
-        <RailItem key={x.to} to={x.to} icon={x.icon} label={t(x.key)} active={path === x.to} />
+      {TOOLS.filter((x) => !x.config).map((x) => (
+        <RailItem key={x.to} to={x.to} icon={x.icon} label={t(x.key)} short={t(x.short)} active={path === x.to} />
       ))}
       <span className="rail-grow" aria-hidden="true" />
-      <RailItem to="/settings" icon={SettingsIcon} label={t('nav.settings')} dot={shouldRemind(status.update)} />
+      {TOOLS.filter((x) => x.config).map((x) => (
+        <RailItem key={x.to} to={x.to} icon={x.icon} label={t(x.key)} short={t(x.short)} active={path === x.to} dot={x.to === '/settings' && shouldRemind(status.update)} />
+      ))}
       <span className="rail-conn">
         <ConnChip />
       </span>
       <PopMenu items={userMenu} className="rail-btn rail-me" label={s?.user.nickname ?? t('upsell.menu')}>
-        <Initial name={s ? s.user.nickname : null} />
+        <span className="rail-ico">
+          <Initial name={s ? s.user.nickname : null} />
+        </span>
+        <span className="rail-label">{t('nav.me')}</span>
       </PopMenu>
     </nav>
   );
@@ -438,18 +449,6 @@ function SessionPane({ path, width, onWidth, onCollapse }) {
   );
 }
 
-/** 工具页顶上：多台电脑时说明工具作用于哪台，可以切换（手机上在顶栏里）。 */
-function ToolContext() {
-  const { t } = useTranslation();
-  const { status } = useStatus();
-  return (
-    <div className="toolctx">
-      <span className="muted small">{t('nav.tools_on')}</span>
-      <DeviceSwitcher perDevice helpUrl={webUrl(status, '/docs/remote')} />
-    </div>
-  );
-}
-
 /**
  * 手机底部的标签栏：会话 · 任务 · ＋新建 · 工具 · 我的。工具和“我的”从底部弹出菜单。
  */
@@ -461,7 +460,8 @@ function MobileTabs({ path }) {
   const userMenu = useUserMenu();
   const n = useAttnCount();
   const s = status.account.session;
-  const tools = TOOLS.filter((x) => x.to !== '/settings').map((x) => ({ icon: x.icon, label: t(x.key), onClick: () => navigate(x.to) }));
+  const item = (x) => ({ icon: x.icon, label: t(x.key), onClick: () => navigate(x.to) });
+  const tools = [...TOOLS.filter((x) => !x.config).map(item), 'sep', item(TOOLS.find((x) => x.to === '/ai'))];
   const onTool = TOOLS.some((x) => x.to === path && x.to !== '/settings');
   return (
     <nav className="mtabs" aria-label={t('nav.main')}>
@@ -582,7 +582,6 @@ function ConsoleLayout({ path, stale, children }) {
           <JustUpdatedBanner />
           <RelayHint />
         <main className={`console-main ${wide ? 'console-wide' : 'shell'} ${sess ? 'console-session' : ''}`}>
-          {switcher && <ToolContext />}
           {/* 打开的会话排成顶部标签（电脑上，开始页和会话页） */}
           {(sess || path === '/') && <SessionTabs activeId={sess} />}
           {/* 刚切换电脑、新电脑的状态还没拿到时先不渲染页面，免得页面用上一台电脑的设置初始化 */}

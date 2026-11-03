@@ -7,6 +7,7 @@ import { useTranslation } from 'react-i18next';
 
 import { useStatus } from '../App.jsx';
 import { api } from './api.js';
+import { More } from './page.jsx';
 import { Link, useRouter } from './router.jsx';
 import { Button, Card, CopyButton, ErrorNote, FoldNote, Note, Skeleton, useAction, useLoad, useToast } from './ui.jsx';
 
@@ -104,14 +105,13 @@ export default function RelayPicker() {
     <div ref={ref} id={RELAYS_ANCHOR} className="anchor">
     <Card
       title={t('relays.title')}
+      sub={t('relays.intro')}
       actions={
         <Button variant="ghost" size="sm" icon={RefreshCw} busy={loading && Boolean(data)} onClick={reload}>
           {t('relays.retest')}
         </Button>
       }
     >
-      <p className="small">{t('relays.intro')}</p>
-      <p className="muted small">{t('relays.when_slow')}</p>
       {fallback && <Note kind="warn">{t('relays.fallback', { preferred: data.preferred, current: data.current })}</Note>}
       <ErrorNote error={error || save.error} />
       {!data && loading && (
@@ -145,9 +145,13 @@ export default function RelayPicker() {
           {data.items.length === 0 && <p className="muted small">{t('relays.none')}</p>}
         </div>
       )}
-      {data && <ProxyTip items={data.items} os={data.os} />}
-      <p className="muted small">{t('relays.latency_explain')}</p>
-      <p className="muted small">{t('relays.switch_note')}</p>
+      {/* 原理和代理软件的设置：觉得卡、想弄明白时再点开 */}
+      <More summary={t('relays.more')}>
+        <p className="muted small">{t('relays.when_slow')}</p>
+        <p className="muted small">{t('relays.latency_explain')}</p>
+        <p className="muted small">{t('relays.switch_note')}</p>
+        {data && <ProxyTip items={data.items} os={data.os} />}
+      </More>
     </Card>
     </div>
   );

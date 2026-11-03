@@ -445,6 +445,8 @@ function ProjectRow({ p, x, open, onToggle, showDevice }) {
   const merged = Boolean(x?.merged);
   const dev = devices.multi && !merged ? devices.byId(p.device) : null;
   const attn = !open && (x?.items ?? p.items).some((i) => sessionState(i) === 'attn');
+  // 收起时：几个会话正在运行
+  const liveN = open ? 0 : (x?.live?.length ?? 0);
   const members = x?.members ?? [p];
   const pinned = members.some((m) => m.pinned);
   const allowed = status.account.allowed && !p.offline;
@@ -463,6 +465,12 @@ function ProjectRow({ p, x, open, onToggle, showDevice }) {
         <span className="ellipsis grow">{p.name}</span>
         {pinned && <Pin size={12} className="prow-pin" aria-label={t('sess.pinned')} />}
         {attn && <span className="sdot sdot-attn" aria-label={t('sess.state.attn')} role="img" />}
+        {liveN > 0 && (
+          <span className="prow-live" title={t('sess.live_n', { count: liveN })}>
+            <span className="sdot sdot-run" aria-hidden="true" />
+            {liveN}
+          </span>
+        )}
         {showDevice && dev && <DeviceTag device={dev} />}
         {merged && <DeviceDots members={members} />}
         {p.offline && <span className="badge">{t('devices.offline')}</span>}
@@ -718,7 +726,8 @@ export function SessionList({ currentId, onCollapse }) {
     setStatusState(v);
     writeStore(sessionStorage, STATUS_KEY, v);
   };
-  // 折叠：用户点过的记住；没点过的，最近一周用过的项目展开，其他收起
+  // 折叠：用户点过的记住；没点过的，只展开最近用过的 3 个、有会话在等你的和正开着的那个，其他收起
+  // （收起的项目行上照样显示几个在运行、有没有在等你，不会漏看）
   const [cleanup, setCleanup] = useState(false);
   const [fold, setFoldState] = useState(() => readStore(localStorage, FOLD_KEY, {}));
   const setFold = (key, open) =>
@@ -727,8 +736,7 @@ export function SessionList({ currentId, onCollapse }) {
       writeStore(localStorage, FOLD_KEY, next);
       return next;
     });
-  const weekAgo = Date.now() - 7 * 86400e3;
-  const isOpen = (x) => fold[x.key] ?? (Math.max(x.used, x.convAt) > weekAgo || x.items.some((i) => i.id === currentId));
+  const isOpen = (x) => fold[x.key] ?? (topKeys.has(x.key) || x.items.some((i) => i.id === currentId || sessionState(i) === 'attn'));
   const match = matcher(query, t);
   const convMatch = convMatcher(query, t);
   const multi = devices.multi;
@@ -779,6 +787,7 @@ export function SessionList({ currentId, onCollapse }) {
       };
     })
     .filter((x) => (!filtering ? true : x.live.length + x.rest.length > 0 || (match && status === 'all' && x.p.name.toLowerCase().includes(query.trim().toLowerCase()))));
+  const topKeys = new Set([...projects].sort((a, b) => Math.max(b.used, b.convAt) - Math.max(a.used, a.convAt)).slice(0, 3).map((x) => x.key));
   const attn = status === 'rest' ? [] : s.items.filter((i) => sessionState(i) === 'attn' && devOk(multi ? terminalDevice(i.id) : null) && (!match || match(i)));
   // 每台电脑的会话个数（电脑筛选里显示）
   const counts = {};

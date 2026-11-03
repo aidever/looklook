@@ -4,6 +4,7 @@ import { X } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../shared/api.js';
+import { More, Row } from '../shared/page.jsx';
 import { Button, Card, ErrorNote, Switch, useAction, useLoad } from '../shared/ui.jsx';
 
 export default function GuardCard() {
@@ -19,15 +20,9 @@ export default function GuardCard() {
     if (pattern.trim() && (await save({ rules: [...g.rules, { pattern: pattern.trim(), action }] }))) setPattern('');
   };
   const toggle = (k, title, hint) => (
-    <div className="between" style={{ flexWrap: 'nowrap', gap: 12 }}>
-      <span>
-        <b>{title}</b>
-        <span className="small muted" style={{ display: 'block' }}>
-          {hint}
-        </span>
-      </span>
+    <Row label={title} hint={hint}>
       <Switch checked={g[k]} disabled={busy} onChange={(v) => save({ [k]: v })} label={title} />
-    </div>
+    </Row>
   );
   const actionSelect = (value, onChange, label) => (
     <select value={value} disabled={busy} onChange={(e) => onChange(e.target.value)} aria-label={label} style={{ width: 'auto', flexShrink: 0 }}>
@@ -35,20 +30,16 @@ export default function GuardCard() {
       <option value="deny">{t('guard.deny')}</option>
     </select>
   );
+  // 两个开关各一行；“危险命令”具体拦哪些、自己的规则、限制都收在下面
   return (
-    <Card title={t('guard.title')}>
+    <Card title={t('guard.title')} sub={t('guard.lead')}>
       <ErrorNote error={loadError} />
       {g && (
-        <div className="stack" style={{ gap: 14 }}>
+        <>
           {toggle('checkpoints', t('guard.checkpoints'), t('guard.checkpoints_hint'))}
-          <div className="nt-calm stack" style={{ gap: 14 }}>
-            <b className="nt-calm-title">{t('guard.rules')}</b>
-            <p className="small muted" style={{ margin: 0 }}>
-              {t('guard.lead')}
-            </p>
-            {toggle('builtin', t('guard.builtin'), t('guard.builtin_hint'))}
+          {toggle('builtin', t('guard.builtin'), t('guard.builtin_hint'))}
+          <More summary={g.rules.length ? t('guard.mine_n', { count: g.rules.length }) : t('guard.mine_more')}>
             <div className="stack" style={{ gap: 8 }}>
-              <b>{t('guard.mine')}</b>
               <span className="small muted">{t('guard.mine_hint')}</span>
               {g.rules.map((r, n) => (
                 <div key={r.pattern} className="gd-rule">
@@ -81,18 +72,17 @@ export default function GuardCard() {
                   {t('guard.add')}
                 </Button>
               </form>
+              <p className="small muted" style={{ margin: '8px 0 0' }}>
+                {t('guard.builtin_list')}
+              </p>
+              <p className="small muted" style={{ margin: 0 }}>
+                {t('guard.limits')}
+                {data.sync_enabled && ` ${t('guard.synced')}`}
+              </p>
             </div>
-            <p className="small muted" style={{ margin: 0 }}>
-              {t('guard.limits')}
-            </p>
-          </div>
-          {data.sync_enabled && (
-            <p className="small muted" style={{ margin: 0 }}>
-              {t('guard.synced')}
-            </p>
-          )}
+          </More>
           <ErrorNote error={error} />
-        </div>
+        </>
       )}
     </Card>
   );

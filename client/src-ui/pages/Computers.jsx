@@ -12,7 +12,7 @@ import { DevicesProvider, osLabel, useDevices } from '../shared/devices.jsx';
 import { platform } from '../shared/platform.js';
 import PopMenu from '../shared/PopMenu.jsx';
 import { useRouter } from '../shared/router.jsx';
-import { Button, Card, Empty, ErrorNote, Field, Modal, Note, PasswordInput, Skeleton, Time, useAction, useLoad, useToast } from '../shared/ui.jsx';
+import { Button, Card, Empty, ErrorNote, Field, Modal, More, Note, PasswordInput, Skeleton, Time, useAction, useLoad, useToast } from '../shared/ui.jsx';
 import InstallKeysCard from './InstallKeys.jsx';
 import { SourceTag } from './Membership.jsx';
 
@@ -247,9 +247,12 @@ export default function Computers() {
           </a>
         </div>
       </Card>
-      <InstallKeysCard />
+      {/* 安装密钥（给服务器、镜像装）和登录记录：少数人用，收起来 */}
+      <More summary={t('acct.more_keys')}>
+        <InstallKeysCard />
+      </More>
       {data?.history?.length > 0 && (
-        <Card title={t('acct.history')}>
+        <More summary={t('acct.history')}>
           <ul className="list">
             {data.history.map((d) => (
               <li key={`${d.id}-${d.logged_out_at}`}>
@@ -265,7 +268,7 @@ export default function Computers() {
               </li>
             ))}
           </ul>
-        </Card>
+        </More>
       )}
       {renaming && <RenameModal device={renaming} onClose={() => setRenaming(null)} onDone={done(setRenaming)} />}
       {revoking && (

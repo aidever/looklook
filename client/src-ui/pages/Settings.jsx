@@ -9,7 +9,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { useStatus } from '../App.jsx';
-import { DeviceTag } from '../shared/brands.jsx';
+import { More, Row } from '../shared/page.jsx';
 import { LocalOnlyToggle, useDevices } from '../shared/devices.jsx';
 import { api } from '../shared/api.js';
 import AccessCard from './Access.jsx';
@@ -24,7 +24,7 @@ import { DiagCard } from '../shared/Report.jsx';
 import RelayPicker, { RELAYS_ANCHOR } from '../shared/RelayPicker.jsx';
 import { useRouter } from '../shared/router.jsx';
 import { shouldRemind, UpdateCheck } from '../shared/Update.jsx';
-import { Button, Card, ErrorNote, Field, Seg, useAction, useLoad, useToast } from '../shared/ui.jsx';
+import { Button, Card, ErrorNote, Seg, useAction, useLoad, useToast } from '../shared/ui.jsx';
 import { useTips } from '../shared/tips.jsx';
 import { SyncCard, SyncLabel } from '../shared/SettingsSync.jsx';
 
@@ -127,21 +127,19 @@ function IdleCard({ value, onChange }) {
   const [open, setOpen] = useState(false);
   return (
     <Card title={t('idle.card')}>
-      <Field label={t('idle.auto_label')} hint={t('idle.auto_hint')}>
+      <Row label={t('idle.auto_label')} hint={t('idle.auto_hint')} stack>
         <Seg
           value={Number(value)}
           label={t('idle.auto_label')}
           onChange={onChange}
           options={[0, 1, 3, 7, 14, 30].map((d) => [d, d ? t('idle.n_days', { n: d }) : t('idle.never')])}
         />
-      </Field>
-      <Field label={t('idle.now_label')} hint={t('idle.now_hint')}>
-        <div>
-          <Button variant="secondary" icon={Eraser} onClick={() => setOpen(true)}>
-            {t('idle.menu')}
-          </Button>
-        </div>
-      </Field>
+      </Row>
+      <Row label={t('idle.now_label')} hint={t('idle.now_hint')}>
+        <Button variant="ghost" icon={Eraser} onClick={() => setOpen(true)}>
+          {t('idle.menu')}
+        </Button>
+      </Row>
       {open && <IdleCleanupDialog onClose={() => setOpen(false)} />}
     </Card>
   );
@@ -159,11 +157,11 @@ function TipsField() {
       toast(t('tips.reset_done'));
     });
   return (
-    <Field label={t('tips.reset_label')} hint={t('tips.reset_hint')}>
-      <Button variant="secondary" busy={busy} onClick={reset}>
+    <Row label={t('tips.reset_label')} hint={t('tips.reset_hint')}>
+      <Button variant="ghost" busy={busy} onClick={reset}>
         {t('tips.reset')}
       </Button>
-    </Field>
+    </Row>
   );
 }
 
@@ -202,10 +200,10 @@ export default function Settings() {
     general: (
       <>
         <Card title={t('settings.general')}>
-          <Field label={t('settings.device_name')} hint={t('settings.device_name_hint')}>
-            <input value={s.device_name} onChange={(e) => set('device_name')(e.target.value)} maxLength={64} placeholder={t('settings.device_name_auto')} />
-          </Field>
-          <Field label={t('settings.language')} hint={devices.multi ? t('settings.language_hint') : undefined}>
+          <Row label={t('settings.device_name')} hint={t('settings.device_name_hint')}>
+            <input className="srow2-input" value={s.device_name} onChange={(e) => set('device_name')(e.target.value)} maxLength={64} placeholder={t('settings.device_name_auto')} />
+          </Row>
+          <Row label={t('settings.language')} hint={devices.multi ? t('settings.language_hint') : undefined}>
             <Seg
               value={i18n.language?.startsWith('en') ? 'en-US' : 'zh-CN'}
               label={t('settings.language')}
@@ -215,8 +213,7 @@ export default function Settings() {
                 ['en-US', 'English'],
               ]}
             />
-          </Field>
-          <TipsField />
+          </Row>
         </Card>
         {caps.os === 'darwin' && status.access === 'local' && <MacFoldersCard />}
         <SyncCard />
@@ -233,7 +230,7 @@ export default function Settings() {
           >
             {t('settings.preview')}
           </div>
-          <Field label={<SyncLabel text={t('settings.font')} />} hint={caps.fonts ? t('settings.font_hint') : t('settings.font_missing')}>
+          <Row label={<SyncLabel text={t('settings.font')} />} hint={caps.fonts ? undefined : t('settings.font_missing')}>
             <Seg
               value={s.font}
               label={t('settings.font')}
@@ -243,15 +240,15 @@ export default function Settings() {
                 ['system', t('settings.font_system')],
               ]}
             />
-          </Field>
-          <Field label={<SyncLabel text={t('settings.font_size')} />}>
+          </Row>
+          <Row label={<SyncLabel text={t('settings.font_size')} />}>
             <Seg value={Number(s.font_size)} label={t('settings.font_size')} onChange={set('font_size')} options={[13, 14, 15, 16, 18, 20].map((n) => [n, String(n)])} />
-          </Field>
+          </Row>
         </Card>
         <Card title={t('settings.new_terminal')}>
           <FolderField label={t('settings.workdir')} hint={t('settings.workdir_hint')} value={s.default_workdir} onChange={set('default_workdir')} />
           <ShellPicker value={s.default_shell ?? ''} onChange={set('default_shell')} data={shells} />
-          <Field label={<SyncLabel text={t('settings.default_full_access')} />} hint={t('settings.default_full_access_hint')}>
+          <Row label={<SyncLabel text={t('settings.default_full_access')} />} hint={t('settings.default_full_access_hint')}>
             <Seg
               value={Boolean(s.default_full_access)}
               label={t('settings.default_full_access')}
@@ -261,7 +258,7 @@ export default function Settings() {
                 [true, t('settings.default_full_access_on')],
               ]}
             />
-          </Field>
+          </Row>
         </Card>
       </>
     ),
@@ -282,23 +279,31 @@ export default function Settings() {
     about: (
       <>
         <Card title={t('settings.about')}>
-          <dl className="kv" style={{ marginBottom: 16 }}>
-            <dt>{t('settings.version')}</dt>
-            <dd className="mono">
-              {status.version} · {status.target}
-              {/* Windows 版（桌面应用）还在测试阶段 */}
-              {status.target?.startsWith('windows') && <> <span className="badge badge-warn">{t('settings.beta')}</span></>}
-            </dd>
-            <dt>{t('settings.backend')}</dt>
-            <dd>{t(caps.persistent ? 'settings.backend_persistent' : 'settings.backend_direct')}</dd>
-            <dt>{t('settings.server')}</dt>
-            <dd className="mono">{status.account.server}</dd>
-            <dt>{t('settings.source')}</dt>
-            <dd>
-              <a href={SOURCE_URL} target="_blank" rel="noopener noreferrer">github.com/imythu/looklook</a> · AGPL-3.0
-            </dd>
-          </dl>
+          <Row
+            label={
+              <span className="mono">
+                {t('settings.version')} {status.version}
+                {/* Windows 版（桌面应用）还在测试阶段 */}
+                {status.target?.startsWith('windows') && <> <span className="badge badge-warn">{t('settings.beta')}</span></>}
+              </span>
+            }
+          />
           <UpdateCheck />
+          <TipsField />
+          <More summary={t('settings.details')}>
+            <dl className="kv">
+              <dt>{t('settings.platform')}</dt>
+              <dd className="mono">{status.target}</dd>
+              <dt>{t('settings.backend')}</dt>
+              <dd>{t(caps.persistent ? 'settings.backend_persistent' : 'settings.backend_direct')}</dd>
+              <dt>{t('settings.server')}</dt>
+              <dd className="mono">{status.account.server}</dd>
+              <dt>{t('settings.source')}</dt>
+              <dd>
+                <a href={SOURCE_URL} target="_blank" rel="noopener noreferrer">github.com/imythu/looklook</a> · AGPL-3.0
+              </dd>
+            </dl>
+          </More>
         </Card>
         <DiagCard />
       </>
@@ -318,16 +323,6 @@ export default function Settings() {
 
   return (
     <>
-      <div className="page-head">
-        <h1>{t('settings.title')}</h1>
-        {/* 多台电脑时说清楚改的是哪一台（语言除外，它只跟着浏览器） */}
-        {devices.multi && (
-          <span className="settings-scope small muted">
-            {t('settings.scope')}
-            <DeviceTag device={devices.byId(devices.selected)} />
-          </span>
-        )}
-      </div>
       <div className="settings">
         <nav className="settings-nav" aria-label={t('settings.title')}>
           {SECTIONS.map(([id, Icon]) => (
@@ -360,9 +355,8 @@ export default function Settings() {
           </a>
         </nav>
         <div className="settings-body">
-          {(section === 'general' || section === 'terminal') && (
+          {(section === 'general' || section === 'terminal') && saveState.phase !== 'idle' && (
             <div className="settings-note">
-              <span className="muted small">{t('settings.autosave')}</span>
               <SaveState state={saveState} />
             </div>
           )}

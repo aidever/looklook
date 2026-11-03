@@ -10,7 +10,7 @@ import { configureDevices, deviceApi, fetchDevices, localApi, rtcMode } from './
 import { DeviceAvatar } from './brands.jsx';
 import { linkLabel, PathDot, PathLine, useLinks } from './paths.jsx';
 import { useTip } from './tips.jsx';
-import { Button, ErrorNote, Field, Modal, Switch, useAction, useToast } from './ui.jsx';
+import { Button, ErrorNote, Field, Modal, Row, Switch, useAction, useToast } from './ui.jsx';
 
 const KEY = 'looklook.device';
 const NONE = { ready: true, multi: false, localOnly: false, pinned: null, canLocalOnly: false, setLocalOnly: async () => {}, items: [], def: null, selected: null, max: null, select: () => {}, byId: () => null };
@@ -290,16 +290,10 @@ export function LocalOnlyToggle({ menu = true }) {
     if (r) toast(t(on ? (web ? 'devices.only_this_on' : 'devices.local_only_on') : 'devices.local_only_off'));
   };
   return (
-    <div className={menu ? 'device-local-only' : 'stack'} style={menu ? undefined : { gap: 6 }}>
-      <div className="between" style={{ flexWrap: 'nowrap', gap: 12 }}>
-        <span>
-          <b>{label}</b>
-          <span className="small muted" style={{ display: 'block' }}>
-            {t(web ? (d.localOnly ? 'devices.only_this_hint_on' : 'devices.only_this_hint') : d.localOnly ? 'devices.local_only_hint_on' : 'devices.local_only_hint')}
-          </span>
-        </span>
+    <div className={menu ? 'device-local-only' : undefined}>
+      <Row label={label} hint={t(web ? (d.localOnly ? 'devices.only_this_hint_on' : 'devices.only_this_hint') : d.localOnly ? 'devices.local_only_hint_on' : 'devices.local_only_hint')}>
         <Switch checked={d.localOnly} disabled={busy} onChange={set} label={label} />
-      </div>
+      </Row>
       <ErrorNote error={error} />
     </div>
   );

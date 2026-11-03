@@ -15,7 +15,7 @@ import { spinnerText } from '../shared/spinner.js';
 import { spanText } from '../shared/time.js';
 import { Link, useRouter } from '../shared/router.jsx';
 import { Button, Empty, Note, Skeleton, useConfirm, useToast } from '../shared/ui.jsx';
-import { HelpLink } from '../shared/help.jsx';
+import { PageHead } from '../shared/page.jsx';
 import { useSessionUi } from './Sessions.jsx';
 import { useNarrow } from './TerminalView.jsx';
 
@@ -316,12 +316,7 @@ export default function Board() {
   const away = awayRecap(sessions.items, awaySince, now);
   return (
     <div className="board">
-      <header className="bd-head">
-        <h1 className="inline">
-          {t('board.title')} <HelpLink page="tasks" />
-        </h1>
-        {!empty && <span className="muted small">{counts}</span>}
-      </header>
+      <PageHead title={t('board.title')} sub={empty ? t('board.sub') : counts} help="tasks" />
       {feishuDown && (
         <div className="bd-notify">
           <Note kind="warn">

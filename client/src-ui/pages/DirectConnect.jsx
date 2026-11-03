@@ -7,6 +7,7 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { api } from '../shared/api.js';
+import { More } from '../shared/page.jsx';
 import { Button, Card, ErrorNote, Field, Note, Skeleton, Switch, useAction, useToast } from '../shared/ui.jsx';
 
 /** 填的是域名（有字母、没有冒号）：检测不覆盖它。 */
@@ -62,6 +63,7 @@ export default function DirectCard() {
   const changed = Object.keys(f).some((k) => f[k] !== form(data)[k]);
   const [defBegin, defEnd] = data.default_ports;
   const isDefault = f.port_begin === String(defBegin) && f.port_end === String(defEnd);
+  const configured = Boolean(data.public_v4 || data.public_v6) || data.port_begin !== defBegin || data.port_end !== defEnd;
   // 保存的是域名时显示它现在解析出的地址（输入框改动后不显示）
   const addrHint = (k, fallback) => {
     const r = data[`resolved_${k}`];
@@ -79,10 +81,10 @@ export default function DirectCard() {
   };
 
   return (
-    <Card title={t('direct.title')}>
-      <p className="muted small" style={{ marginTop: -6 }}>
-        {t('direct.intro')}
-      </p>
+    <Card title={t('direct.title')} sub={t('direct.intro')}>
+      {/* 大多数网络不用设：表单收起来；已经填过（公网地址、改过端口）就展开 */}
+      <More summary={t('direct.more')} open={configured}>
+      <p className="muted small">{t('direct.intro_full')}</p>
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -134,6 +136,7 @@ export default function DirectCard() {
         <Switch checked={data.ipv6} onChange={(v) => save({ ipv6: v })} disabled={busy} label={t('direct.ipv6')} />
       </div>
       <Note>{t('direct.firewall', { begin: data.port_begin, end: data.port_end })}</Note>
+      </More>
       <ErrorNote error={error?.params?.field ? null : error} />
     </Card>
   );

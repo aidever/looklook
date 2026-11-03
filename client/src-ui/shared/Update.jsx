@@ -64,17 +64,15 @@ async function dismissVersion(version, toast, t) {
 }
 
 /**
- * 远程打开（看看网页、远程域名）或能切换电脑时，提醒说的是哪台电脑的看看：横幅前面带上它的名字。
- * 在这台电脑上本机打开时不带（就是这台）。
+ * 有好几台电脑时，提醒说的是哪台电脑的看看：横幅前面写明“电脑“台式”：”。只有一台时不写——
+ * 就是它，写上名字反而让人分不清（电脑名叫“claude”时读起来像 Claude 要更新）。
  */
 function DeviceLabel() {
   const { t } = useTranslation();
-  const { status } = useStatus();
   const devices = useDevices();
-  // 一直写明是哪台电脑：本机 App 里也可能管着好几台，单看提示分不清是哪台要更新
-  const d = devices.multi ? devices.byId(devices.selected) : devices.items[0];
-  const name = d ? deviceName(t, d) : status.settings?.device_name || t('update.this_device');
-  return name ? <b>{t('update.on_device', { name })}</b> : null;
+  if (!devices.multi) return null;
+  const d = devices.byId(devices.selected);
+  return d ? <b>{t('update.on_device', { name: deviceName(t, d) })}</b> : null;
 }
 
 const DialogCtx = createContext(() => {});

@@ -5,7 +5,7 @@
 // - 宠物：对话界面角落的宠物。
 // 以前在“设置”里的 #ai、#notify、#pet、#claude-accounts 等链接都转到这里（Settings.jsx）。
 // MCP 开关远程也能改；令牌和装进 AI 助手只能直接在这台电脑上看、做（见 PagesMcp.jsx）。
-import { Bell, Bot, Globe, MessageSquare, PawPrint, Server, ShieldCheck, UserCog, Wrench } from 'lucide-react';
+import { Bell, Globe, MessageSquare, PawPrint, Server, ShieldCheck, UserCog } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -13,7 +13,7 @@ import { api } from '../shared/api.js';
 import { errorText } from '../shared/i18n.js';
 import { Link, useRouter } from '../shared/router.jsx';
 import { Button, Card, CopyButton, ErrorNote, Skeleton, Switch, useAction, useLoad, useToast } from '../shared/ui.jsx';
-import { HelpLink } from '../shared/help.jsx';
+import { More, PageHead, Row } from '../shared/page.jsx';
 import ClaudeProfilesCard, { CodexProfilesCard } from './ClaudeProfiles.jsx';
 import GuardCard from './Guard.jsx';
 import NotifySection from './Notify.jsx';
@@ -32,9 +32,10 @@ function ToolList({ names, on }) {
   return (
     <ul className="ai-tools">
       {names.map((n) => (
+        // 先说能做什么；工具名是给想对照日志的人看的，放后面、淡一点
         <li key={n} className={on ? '' : 'off'}>
-          <code className="mono small">{n}</code>
-          <span className="small muted">{t(`ai.tool.${n}`)}</span>
+          <span className="small">{t(`ai.tool.${n}`)}</span>
+          <code className="mono">{n}</code>
         </li>
       ))}
     </ul>
@@ -92,17 +93,20 @@ function LarkGroup() {
       </>
     );
   return (
-    <section className="ai-group">
-      <div className="ai-group-head">
-        <MessageSquare size={16} aria-hidden="true" />
-        <b className="grow">{t('ai.group_feishu')}</b>
-        {tools && <span className={`badge ${path ? 'badge-ok' : ''}`}>{t(path ? 'ai.lark_badge_ok' : 'ai.lark_badge_none')}</span>}
+    <div className="srow2 srow2-stack">
+      <div className="srow2-text">
+        <div className="srow2-label between">
+          <span className="inline">
+            <MessageSquare size={16} aria-hidden="true" /> {t('ai.group_feishu')}
+          </span>
+          {tools && <span className={`badge ${path ? 'badge-ok' : ''}`}>{t(path ? 'ai.lark_badge_ok' : 'ai.lark_badge_none')}</span>}
+        </div>
+        <div className="srow2-hint">{t('ai.lark_intro')}</div>
       </div>
-      <p className="small muted">{t('ai.lark_intro')}</p>
       {body}
       {job && job.state !== 'ok' && <pre className="mono small ai-job">{job.output.slice(-2000)}</pre>}
       <ErrorNote error={actError} />
-    </section>
+    </div>
   );
 }
 
@@ -126,61 +130,33 @@ function ToolsCard({ version }) {
     }
   };
   const allowed = data.items.filter((h) => h.allow_ai).length;
+  // 每样工具一行：能做什么、现在能不能用。逐台主机的开关在 SSH 主机页，工具的函数名收在最下面
   return (
-    <Card
-      title={
-        <span className="inline">
-          <Wrench size={18} aria-hidden="true" /> {t('ai.tools_title')}
-        </span>
-      }
-    >
-      <p className="muted">{mcp ? t('ai.tools_intro') : t('ai.tools_off')}</p>
-      <section className="ai-group">
-        <div className="ai-group-head">
-          <Globe size={16} aria-hidden="true" />
-          <b className="grow">{t('ai.group_pages')}</b>
-          <span className={`badge ${mcp ? 'badge-ok' : ''}`}>{t(mcp ? 'ai.on' : 'ai.off')}</span>
-        </div>
-        <ToolList names={PAGE_TOOLS} on={mcp} />
-      </section>
-      <section className="ai-group">
-        <div className="ai-group-head">
-          <Server size={16} aria-hidden="true" />
-          <b className="grow">{t('ai.group_ssh')}</b>
-          <Switch checked={ssh} disabled={busy === 'ssh'} label={t('ai.ssh_switch')} onChange={(on) => run('ssh', () => api.put('/mcp', { ssh: on }))} />
-        </div>
-        <p className="small muted">{t(ssh ? 'ai.ssh_on_hint' : 'ai.ssh_off_hint')}</p>
-        <ToolList names={SSH_TOOLS} on={mcp && ssh} />
-        {data.items.length === 0 ? (
-          <p className="small muted">
-            {t('ai.no_hosts')} <Link to="/ssh">{t('nav.ssh')}</Link>
-          </p>
-        ) : (
-          <>
-            <p className="small">{t('ai.hosts_count', { n: allowed, total: data.items.length })}</p>
-            <ul className="list ai-hosts">
-              {data.items.map((h) => (
-                <li key={h.id} className={ssh ? '' : 'off'}>
-                  <span className="grow" style={{ minWidth: 0 }}>
-                    <b className="ellipsis">{h.name}</b>
-                    <span className="mono small muted ellipsis">
-                      {h.user}@{h.host}
-                      {h.port !== 22 && `:${h.port}`}
-                    </span>
-                  </span>
-                  <Switch
-                    checked={h.allow_ai}
-                    disabled={busy === h.id}
-                    label={`${t('ssh.allow_ai')} · ${h.name}`}
-                    onChange={(allow) => run(h.id, () => api.put(`/ssh/hosts/${h.id}/ai`, { allow }))}
-                  />
-                </li>
-              ))}
-            </ul>
-          </>
-        )}
-      </section>
+    <Card title={t('ai.tools_title')} sub={mcp ? null : t('ai.tools_off')}>
+      <Row label={<span className="inline"><Globe size={16} aria-hidden="true" /> {t('ai.group_pages')}</span>} hint={t('ai.pages_hint')}>
+        <span className={`badge ${mcp ? 'badge-ok' : ''}`}>{t(mcp ? 'ai.on' : 'ai.off')}</span>
+      </Row>
+      <Row
+        label={<span className="inline"><Server size={16} aria-hidden="true" /> {t('ai.group_ssh')}</span>}
+        hint={
+          data.items.length === 0 ? (
+            <>
+              {t('ai.no_hosts')} <Link to="/ssh">{t('nav.ssh')}</Link>
+            </>
+          ) : (
+            <>
+              {t('ai.hosts_count', { n: allowed, total: data.items.length })} · <Link to="/ssh">{t('ai.hosts_manage')}</Link>
+            </>
+          )
+        }
+      >
+        <Switch checked={ssh} disabled={busy === 'ssh'} label={t('ai.ssh_switch')} onChange={(on) => run('ssh', () => api.put('/mcp', { ssh: on }))} />
+      </Row>
       <LarkGroup />
+      <More summary={t('ai.tool_names')}>
+        <ToolList names={PAGE_TOOLS} on={mcp} />
+        <ToolList names={SSH_TOOLS} on={mcp && ssh} />
+      </More>
     </Card>
   );
 }
@@ -262,12 +238,7 @@ export default function AiPage() {
   const go = (id) => navigate(`/ai#${id}`, { replace: true });
   return (
     <>
-      <div className="page-head">
-        <h1 className="inline">
-          <Bot size={24} aria-hidden="true" /> {t('ai.title')} <HelpLink page="ai" />
-        </h1>
-      </div>
-      <p className="muted">{t('ai.hub.intro')}</p>
+      <PageHead title={t('ai.title')} sub={t('ai.hub.intro')} help="ai" perDevice />
       <nav className="ai-hub" aria-label={t('ai.title')}>
         {HUB.map(({ id, icon: Icon }) => {
           const s = status[id];
@@ -309,7 +280,6 @@ export default function AiPage() {
       {hub === 'remote' && <NotifySection />}
       {hub === 'tools' && (
         <>
-          <p className="muted">{t('ai.intro')}</p>
           <McpCard onChange={() => setVersion((v) => v + 1)} />
           <ToolsCard version={version} />
           <GuardCard />

@@ -196,13 +196,13 @@ class Xterm {
 
   onSocketOpen() {
     console.log('[ttyd] websocket connection opened');
-    const { terminal, overlay } = this;
+    const { terminal } = this;
     const msg = JSON.stringify({ AuthToken: this.token, columns: terminal.cols, rows: terminal.rows });
     this.socket?.send(this.encoder.encode(msg));
     if (this.opened) {
       terminal.reset();
       terminal.options.disableStdin = false;
-      overlay.show('Reconnected', 300);
+      // 断线、重连的提示由 term-inject.js 统一显示（中文、带“立即重试”）；ttyd 原来的英文浮层不再出现，免得同一件事说两遍
     } else {
       this.opened = true;
     }
@@ -213,23 +213,19 @@ class Xterm {
 
   onSocketClose(event) {
     console.log(`[ttyd] websocket connection closed with code: ${event.code}`);
-    const { overlay } = this;
     const doReconnect = this.doReconnect;
-    overlay.show('Connection Closed');
     this.dispose();
-    // 1000：正常关闭
+    // 1000：正常关闭。提示由 term-inject.js 显示，这里只管重连
     if (event.code !== 1000 && doReconnect) {
-      overlay.show('Reconnecting...');
       this.refreshToken().then(() => this.connect());
     } else {
+      // 正常结束的（比如程序退出了）：按回车重新连上
       const keyDispose = this.terminal.onKey((e) => {
         if (e.domEvent.key === 'Enter') {
           keyDispose.dispose();
-          overlay.show('Reconnecting...');
           this.refreshToken().then(() => this.connect());
         }
       });
-      overlay.show('Press ⏎ to Reconnect');
     }
   }
 

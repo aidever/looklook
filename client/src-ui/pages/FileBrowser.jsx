@@ -487,11 +487,14 @@ export default function FileBrowser({ id, active = true, onInsert }) {
           <RefreshCw size={17} className={state.loading ? 'spin' : ''} />
         </button>
         <span className="fb-bar-sep" aria-hidden="true" />
-        <button type="button" className="btn btn-plain btn-icon" disabled={!canWrite} onClick={mkdir} aria-label={t('fb.new_folder')} title={t('fb.new_folder')}>
-          <FolderPlus size={17} />
+        {/* 新建、上传是这一栏里最常用的两样：地方够时带上文字，不用悬停猜 */}
+        <button type="button" className="btn btn-plain fb-act" disabled={!canWrite} onClick={mkdir} aria-label={t('fb.new_folder')} title={t('fb.new_folder')}>
+          <FolderPlus size={17} aria-hidden="true" />
+          <span className="fb-act-label">{t('fb.new_folder')}</span>
         </button>
-        <button type="button" className="btn btn-plain btn-icon" disabled={!canWrite} onClick={() => fileInput.current?.click()} aria-label={t('fb.upload')} title={t('fb.upload_hint')}>
-          <Upload size={17} />
+        <button type="button" className="btn btn-plain fb-act" disabled={!canWrite} onClick={() => fileInput.current?.click()} aria-label={t('fb.upload')} title={t('fb.upload_hint')}>
+          <Upload size={17} aria-hidden="true" />
+          <span className="fb-act-label">{t('fb.upload_short')}</span>
         </button>
         <input ref={fileInput} type="file" multiple hidden onChange={(e) => { upload(e.target.files); e.target.value = ''; }} />
       </div>

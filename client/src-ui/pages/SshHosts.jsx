@@ -3,7 +3,7 @@
 // 选好后显示脱敏的概况（算法、指纹、首尾几个字符），“系统密钥”也列出 ssh 会试的钥匙。可以经跳板机（另一台保存的主机）连接，
 // 添加主机时也能顺手新建跳板机；目标机的密钥配在跳板机上的，登录方式选“跳板机代登”，这台不用填任何密码 / 私钥。标了“允许 AI 使用”的主机，AI 助手可以经 MCP（“AI 助手”页）运行命令，同样拿不到密码。
 // 测试连接用 `ssh -v`：添加 / 修改时保存前就能测（新主机保存后也自动测一次），失败时说清卡在哪一步、为什么、怎么办，附完整日志。
-import { ArrowDownToLine, Bot, CheckCircle2, FolderOpen, KeyRound, LockKeyhole, Pencil, Play, Plus, PlugZap, Server, ShieldCheck, Trash2, Upload, Waypoints } from 'lucide-react';
+import { ArrowDownToLine, Bot, CheckCircle2, FolderOpen, KeyRound, LockKeyhole, Pencil, Play, Plus, PlugZap, Server, Trash2, Upload, Waypoints } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -11,8 +11,10 @@ import { useStatus } from '../App.jsx';
 import { api } from '../shared/api.js';
 import { errorText } from '../shared/i18n.js';
 import { Link, useRouter } from '../shared/router.jsx';
-import { Button, Card, CopyButton, Empty, ErrorNote, Field, FoldNote, Modal, Note, PasswordInput, Skeleton, Switch, useConfirm, useLoad, useToast } from '../shared/ui.jsx';
-import { HelpLink } from '../shared/help.jsx';
+import { Button, Card, CopyButton, Empty, ErrorNote, Field, Modal, Note, PasswordInput, Skeleton, Switch, useConfirm, useLoad, useToast } from '../shared/ui.jsx';
+import { useDevices } from '../shared/devices.jsx';
+import { More, PageHead } from '../shared/page.jsx';
+import PopMenu from '../shared/PopMenu.jsx';
 import { Seg } from './Settings.jsx';
 import { ImportDialog, TransferPanel } from './SshTransfer.jsx';
 import { FolderPicker } from './Terminals.jsx';
@@ -566,7 +568,7 @@ function HostDialog({ initial, hosts, onClose, onSaved }) {
   );
 }
 
-function HostCard({ h, hosts, ai, autoTest, onEdit, onChanged }) {
+function HostRow({ h, hosts, ai, autoTest, onEdit, onChanged }) {
   const { t } = useTranslation();
   const { status } = useStatus();
   const { navigate } = useRouter();
@@ -627,68 +629,62 @@ function HostCard({ h, hosts, ai, autoTest, onEdit, onChanged }) {
     }
   };
   const AuthIcon = h.auth === 'password' ? LockKeyhole : h.auth === 'jump' ? Waypoints : KeyRound;
+  // 一行一台：名字和地址，右边只有“连接”这一个按钮；测试、AI 权限、编辑、删除都在“⋯”里
+  const menu = [
+    { icon: PlugZap, label: t('ssh.test'), onClick: doTest, disabled: Boolean(busy) },
+    { icon: Bot, label: t('ssh.allow_ai'), checked: h.allow_ai, disabled: aiBusy, onClick: () => toggleAi(!h.allow_ai) },
+    'sep',
+    { icon: Pencil, label: t('ssh.edit'), onClick: () => onEdit(h) },
+    { icon: Trash2, label: t('ssh.delete'), onClick: remove, danger: true },
+  ];
   return (
-    <div className="card ssh-card">
-      <div className="ssh-card-head">
+    <li className="ssh-row">
+      <div className="ssh-row-main">
         <div className="tile-icon">
-          <Server size={20} aria-hidden="true" />
+          <Server size={18} aria-hidden="true" />
         </div>
         <div className="grow" style={{ minWidth: 0 }}>
-          <h3 className="ellipsis">{h.name}</h3>
-          <p className="mono small muted ellipsis">
-            {h.user}@{h.host}
-            {h.port !== 22 && `:${h.port}`}
-          </p>
-        </div>
-        <span className="ssh-card-tools">
-          <button type="button" className="btn btn-plain btn-icon" onClick={() => onEdit(h)} aria-label={`${t('ssh.edit')} ${h.name}`} title={t('ssh.edit')}>
-            <Pencil size={16} />
-          </button>
-          <button type="button" className="btn btn-plain btn-icon" onClick={remove} aria-label={`${t('ssh.delete')} ${h.name}`} title={t('ssh.delete')}>
-            <Trash2 size={16} />
-          </button>
-        </span>
-      </div>
-      <div className="ssh-tags">
-        <span className="badge">
-          <AuthIcon size={12} aria-hidden="true" /> {t(`ssh.auth_${h.auth}`)}
-          {h.auth === 'key' && h.key_stored && ` · ${t('ssh.key_uploaded')}`}
-          {h.auth !== 'agent' && h.auth !== 'jump' && h.has_secret && ` · ${t('ssh.saved')}`}
-        </span>
-        {h.jump && (
-          <span className="badge" title={t('ssh.jump_via_hint')}>
-            <Waypoints size={12} aria-hidden="true" /> {t('ssh.jump_via', { name: hosts.find((x) => x.id === h.jump)?.name ?? '?' })}
+          <b className="ellipsis" style={{ display: 'block' }}>{h.name}</b>
+          <span className="ssh-row-meta small muted">
+            <span className="mono ellipsis">
+              {h.user}@{h.host}
+              {h.port !== 22 && `:${h.port}`}
+            </span>
+            <span className="ssh-row-tag" title={t(`ssh.auth_${h.auth}`)}>
+              <AuthIcon size={12} aria-hidden="true" /> {t(`ssh.auth_${h.auth}`)}
+            </span>
+            {h.jump && (
+              <span className="ssh-row-tag" title={t('ssh.jump_via_hint')}>
+                <Waypoints size={12} aria-hidden="true" /> {t('ssh.jump_via', { name: hosts.find((x) => x.id === h.jump)?.name ?? '?' })}
+              </span>
+            )}
+            {h.allow_ai && (
+              <span className="ssh-row-tag ssh-row-ai" title={t('ssh.allow_ai')}>
+                <Bot size={12} aria-hidden="true" /> {t('ssh.ai_on')}
+              </span>
+            )}
+            {h.allow_ai && ai && (!ai.mcp || !ai.ssh) && (
+              <Link to="/ai" className="warn-text">
+                {t(!ai.mcp ? 'ssh.ai_mcp_off' : 'ssh.ai_ssh_off')}
+              </Link>
+            )}
           </span>
-        )}
-      </div>
-      <div className="ssh-ai-quick">
-        <Bot size={16} aria-hidden="true" />
-        <span className="grow">
-          {t('ssh.allow_ai')}
-          {h.allow_ai && ai && (!ai.mcp || !ai.ssh) && (
-            <Link to="/ai" className="small warn-text ssh-ai-off">
-              {t(!ai.mcp ? 'ssh.ai_mcp_off' : 'ssh.ai_ssh_off')}
-            </Link>
-          )}
-        </span>
-        <Switch checked={h.allow_ai} disabled={aiBusy} onChange={toggleAi} label={`${t('ssh.allow_ai')} · ${h.name}`} />
-      </div>
-      {test && <TestResult result={test.result} error={test.error} />}
-      <div className="ssh-actions">
+        </div>
         <Button icon={Play} busy={busy === 'open'} disabled={!status.account.allowed || Boolean(busy)} onClick={open}>
           {t('ssh.connect')}
         </Button>
-        <Button variant="ghost" icon={PlugZap} busy={busy === 'test'} disabled={Boolean(busy)} onClick={doTest}>
-          {t('ssh.test')}
-        </Button>
+        <PopMenu items={menu} label={`${t('action.more')} · ${h.name}`} />
       </div>
-    </div>
+      {busy === 'test' && <p className="small muted" style={{ margin: '8px 0 0' }}>{t('ssh.testing')}</p>}
+      {test && <TestResult result={test.result} error={test.error} />}
+    </li>
   );
 }
 
 export default function SshHosts() {
   const { t } = useTranslation();
   const { status } = useStatus();
+  const devices = useDevices();
   const [data, error, reload] = useLoad(() => api.get('/ssh/hosts'));
   const [dialog, setDialog] = useState(null);
   const [importing, setImporting] = useState(false);
@@ -697,28 +693,23 @@ export default function SshHosts() {
   const items = data?.items ?? [];
   return (
     <>
-      <div className="page-head">
-        <h1 className="inline">
-          {t('ssh.title')} <HelpLink page="ssh" />
-        </h1>
-        <span className="row">
+      <PageHead title={t('ssh.title')} sub={t('ssh.sub')} help="ssh" perDevice>
+        {/* 从其他电脑导入：只有多台电脑时才有意义 */}
+        {devices.multi && (
           <Button variant="ghost" icon={ArrowDownToLine} onClick={() => setImporting(true)}>
             {t('sshx.import')}
           </Button>
-          {items.length > 0 && (
-            <Button icon={Plus} onClick={() => setDialog({})}>
-              {t('ssh.add')}
-            </Button>
-          )}
-        </span>
-      </div>
+        )}
+        {items.length > 0 && (
+          <Button icon={Plus} onClick={() => setDialog({})}>
+            {t('ssh.add')}
+          </Button>
+        )}
+      </PageHead>
       <ErrorNote error={error} />
       {data && !data.ssh && <Note kind="warn">{t('ssh.no_ssh')}</Note>}
       {!data && !error ? (
-        <div className="instances">
-          <Skeleton height={150} />
-          <Skeleton height={150} />
-        </div>
+        <Skeleton height={150} />
       ) : items.length === 0 ? (
         <Card>
           <Empty icon={Server} title={t('ssh.empty_title')}>
@@ -729,22 +720,24 @@ export default function SshHosts() {
           </Empty>
         </Card>
       ) : (
-        <div className="instances">
-          {items.map((h) => (
-            <HostCard key={h.id} h={h} hosts={items} ai={data.ai} autoTest={autoTest === h.id} onEdit={setDialog} onChanged={reload} />
-          ))}
-        </div>
+        <Card>
+          <ul className="list ssh-list">
+            {items.map((h) => (
+              <HostRow key={h.id} h={h} hosts={items} ai={data.ai} autoTest={autoTest === h.id} onEdit={setDialog} onChanged={reload} />
+            ))}
+          </ul>
+          <More summary={t('ssh.safety_title')}>
+            <ul className="ssh-safety">
+              <li>{t('ssh.safety_1')}</li>
+              <li>{t('ssh.safety_2')}</li>
+              <li>
+                {t('ssh.safety_3')} <Link to="/ai">{t('nav.ai')}</Link>
+              </li>
+              <li>{t('ssh.safety_4')}</li>
+            </ul>
+          </More>
+        </Card>
       )}
-      <FoldNote icon={ShieldCheck} summary={t('ssh.safety_title')}>
-        <ul className="ssh-safety">
-          <li>{t('ssh.safety_1')}</li>
-          <li>{t('ssh.safety_2')}</li>
-          <li>
-            {t('ssh.safety_3')} <Link to="/ai">{t('nav.ai')}</Link>
-          </li>
-          <li>{t('ssh.safety_4')}</li>
-        </ul>
-      </FoldNote>
       <TransferPanel local={status.access === 'local'} />
       {importing && <ImportDialog local={items} onClose={() => setImporting(false)} onDone={reload} />}
       {dialog && (

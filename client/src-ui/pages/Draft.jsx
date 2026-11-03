@@ -442,6 +442,7 @@ function DraftForm() {
   const recent = project && !container ? projectEntries(project).rest.filter((x) => x.kind === 'conv').slice(0, RECENT_N) : [];
   const empty = !text.trim() && !files.length;
   const guideRemote = useGuideShowsRemote();
+  const newcomer = s.items.length < 3;
   // 以前开的网页版 DSH（每台电脑一个）：还能从这里打开它的网页；新开的 DSH 都是对话模式
   const dshWeb = s.items.find((i) => isDshWeb(i) && (!devices.multi || terminalDevice(i.id) === device));
   const typeItems = [
@@ -689,8 +690,9 @@ function DraftForm() {
           )}
         </form>
         <ErrorNote error={error} />
-        <DraftTip />
-        <AiLinks />
+        {/* 按键说明、小技巧、AI 设置入口是给刚上手的人的：用熟了（开过几个会话）就不再占地方，导航上都有 */}
+        {newcomer && <DraftTip />}
+        {newcomer && <AiLinks />}
       </div>
     </div>
   );

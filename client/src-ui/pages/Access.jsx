@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { SafetyNote, useStatus } from '../App.jsx';
+import { More, Row } from '../shared/page.jsx';
 import { api } from '../shared/api.js';
 import { errorText } from '../shared/i18n.js';
 import { checkOpenHost, urlHost } from '../shared/host.js';
@@ -14,15 +15,9 @@ import { Button, Card, CopyButton, ErrorNote, Note, Skeleton, Switch, useAction,
 /** 一行“开关 + 标题 + 说明”。 */
 function Toggle({ checked, onChange, disabled, title, children }) {
   return (
-    <div className="toggle-row">
-      <span className="grow">
-        <b>{title}</b>
-        <span className="field-hint" style={{ display: 'block' }}>
-          {children}
-        </span>
-      </span>
+    <Row label={title} hint={children}>
       <Switch checked={checked} onChange={onChange} disabled={disabled} label={title} />
-    </div>
+    </Row>
   );
 }
 
@@ -211,10 +206,7 @@ export default function AccessCard() {
   const listError = error?.params?.field === 'allowed_ips' ? error : null;
   const lanUrls = data.lan_ips.map((ip) => `http://${urlHost(ip)}:${data.port}/`);
   return (
-    <Card title={t('access.title')}>
-      <p className="muted small" style={{ marginTop: -6 }}>
-        {t('access.intro')}
-      </p>
+    <Card title={t('access.title')} sub={t('access.intro')}>
       <Toggle checked={data.allow_lan} onChange={(v) => save({ allow_lan: v })} disabled={busy} title={t('access.lan')}>
         {t('access.lan_hint')}
       </Toggle>
@@ -246,6 +238,8 @@ export default function AccessCard() {
       </Toggle>
       {data.code_enabled && <CodeBox data={data} save={save} busy={busy} />}
 
+      {/* 白名单、自定义域名只有少数人用：收起来；已经填了的就展开 */}
+      <More summary={t('access.more')} open={data.allowed_ips.length > 0 || Boolean(data.open_host)}>
       <Whitelist data={data} save={save} busy={busy} error={listError} clearError={() => setError(null)} />
       {data.allowed_ips.length > 0 && !data.code_enabled && (
         <Note kind="warn" icon={KeyRound}>
@@ -257,6 +251,7 @@ export default function AccessCard() {
       )}
 
       <OpenHost data={data} save={save} busy={busy} />
+      </More>
       <ErrorNote error={listError ? null : error} />
       <SafetyNote full />
     </Card>

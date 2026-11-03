@@ -1,17 +1,17 @@
 // 本机网页：把电脑上正在运行的网页（例如 localhost:5173）放到自己的专属地址下，在外面也能打开。
 // 每个账户最多 10 个；只有本人登录后才能打开，或在有效期内临时分享给指定的看看账户。数据登记在看看服务端。
 // 上面列出这台电脑上正在监听的端口（docs/PLAN_2026-10-27.md §1），点一下转成网页，不用记端口号。
-import { AlertTriangle, Bot, ExternalLink, Globe, Plus, Radar, RefreshCw, Trash2, UserPlus, X } from 'lucide-react';
+import { AlertTriangle, Copy, ExternalLink, PauseCircle, PlayCircle, Plus, Radar, RefreshCw, Trash2, UserPlus, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { useStatus } from '../App.jsx';
 import { api } from '../shared/api.js';
 import { errorText } from '../shared/i18n.js';
-import { Link } from '../shared/router.jsx';
 import { formatTime, relativeTime } from '../shared/time.js';
-import { Button, Card, CopyButton, Empty, ErrorNote, Field, Modal, Note, Skeleton, Switch, useAction, useConfirm, useLoad, useToast } from '../shared/ui.jsx';
-import { HelpLink } from '../shared/help.jsx';
+import { Button, Card, CopyButton, Empty, ErrorNote, Field, Modal, Note, Skeleton, useAction, useConfirm, useLoad, useToast } from '../shared/ui.jsx';
+import { PageHead } from '../shared/page.jsx';
+import PopMenu from '../shared/PopMenu.jsx';
 import { RemoteUpsell, remoteAllowed } from '../shared/Remote.jsx';
 
 // 分享有效期可选项（小时），服务端上限 7 天
@@ -201,9 +201,9 @@ function PortsCard({ pages, max, allowed, onAdded }) {
   return (
     <Card
       title={t('ports.title')}
+      sub={t('ports.intro')}
       actions={<Button variant="ghost" icon={RefreshCw} aria-label={t('action.refresh')} title={t('action.refresh')} onClick={reload} />}
     >
-      <p className="muted small" style={{ marginTop: 0 }}>{t('ports.intro')}</p>
       <ErrorNote error={error} />
       {!data && !error ? (
         <Skeleton height={80} />
@@ -229,6 +229,8 @@ function AddForm({ count, max, onAdded }) {
   const { busy, error, run } = useAction();
   const toast = useToast();
   const full = count >= max;
+  // 大多数人在上面的端口列表里点“转成网页”就够了；手动填端口收起来，要用时点开
+  const [open, setOpen] = useState(false);
   const submit = async (e) => {
     e.preventDefault();
     const n = Number(port);
@@ -240,6 +242,15 @@ function AddForm({ count, max, onAdded }) {
       onAdded();
     }
   };
+  if (!open && !full) {
+    return (
+      <p className="small" style={{ margin: 0 }}>
+        <button type="button" className="link-btn" onClick={() => setOpen(true)}>
+          {t('pages.add_manual')}
+        </button>
+      </p>
+    );
+  }
   return (
     <Card title={t('pages.add_title')} actions={<span className="muted small">{t('pages.count', { n: count, max })}</span>}>
       {full ? (
@@ -257,7 +268,7 @@ function AddForm({ count, max, onAdded }) {
               </>
             }
           >
-            <input value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, '').slice(0, 5))} inputMode="numeric" placeholder="5173" required />
+            <input value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, '').slice(0, 5))} inputMode="numeric" placeholder="5173" required autoFocus />
           </Field>
           <Field label={t('pages.name')}>
             <input value={name} onChange={(e) => setName(e.target.value)} maxLength={32} placeholder={t('pages.name_placeholder')} />
@@ -294,23 +305,39 @@ function PageRow({ p, onChanged, onShare }) {
       act(() => api.del(`/tunnels/${p.id}`));
     }
   };
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(p.url);
+      toast(t('pages.copied'));
+    } catch {
+      window.prompt('', p.url);
+    }
+  };
+  // 一个主要按钮“打开”；复制、分享、停用、删除在“⋯”里
+  const menu = [
+    { icon: Copy, label: t('pages.copy'), onClick: copy },
+    { icon: UserPlus, label: t('pages.share.button'), onClick: () => onShare(p), disabled: busy },
+    'sep',
+    { icon: enabled ? PauseCircle : PlayCircle, label: t(enabled ? 'pages.disable' : 'pages.enable'), disabled: busy, onClick: () => act(() => api.patch(`/tunnels/${p.id}`, { status: enabled ? 'disabled' : 'enabled' })) },
+    { icon: Trash2, label: t('action.delete'), onClick: remove, danger: true, disabled: busy },
+  ];
   return (
     <li className="page-row">
       <span className="grow">
-        <b className="ellipsis">{p.name}</b>
-        <span className="muted small">{t('pages.local', { port: p.target_port })}</span>
+        <b className="ellipsis">
+          {p.name}
+          {!enabled && <span className="badge" style={{ marginLeft: 8 }}>{t('pages.disabled')}</span>}
+        </b>
         <a className="mono small ellipsis" href={p.url} target="_blank" rel="noopener noreferrer">
-          {p.url}
+          {p.url.replace(/^https?:\/\//, '')}
         </a>
+        <span className="muted small">{t('pages.local', { port: p.target_port })}</span>
       </span>
       <span className="inline" style={{ flexWrap: 'nowrap' }}>
-        <Switch checked={enabled} disabled={busy} label={t('pages.enabled')} onChange={(v) => act(() => api.patch(`/tunnels/${p.id}`, { status: v ? 'enabled' : 'disabled' }))} />
-        <CopyButton text={p.url} label={false} />
-        <Button variant="ghost" icon={UserPlus} disabled={busy} aria-label={t('pages.share.button')} title={t('pages.share.button')} onClick={() => onShare(p)} />
-        <a className="btn btn-ghost btn-icon" href={p.url} target="_blank" rel="noopener noreferrer" aria-label={t('action.open')}>
-          <ExternalLink size={18} />
+        <a className={`btn btn-ghost ${enabled ? '' : 'disabled'}`} href={p.url} target="_blank" rel="noopener noreferrer">
+          <ExternalLink size={16} aria-hidden="true" /> {t('action.open')}
         </a>
-        <Button variant="ghost" icon={Trash2} disabled={busy} aria-label={t('action.delete')} onClick={remove} />
+        <PopMenu items={menu} label={`${t('action.more')} · ${p.name}`} />
       </span>
     </li>
   );
@@ -327,12 +354,7 @@ export default function Pages() {
   const allowed = remoteAllowed(status);
   return (
     <>
-      <div className="page-head">
-        <h1 className="inline">
-          {t('pages.title')} <HelpLink page="local-pages" />
-        </h1>
-      </div>
-      <p className="muted">{t('pages.intro')}</p>
+      <PageHead title={t('pages.title')} sub={t('pages.sub')} help="local-pages" perDevice />
       {guest && <RemoteUpsell />}
       {!guest && !allowed && <Note kind="warn">{t('pages.paused')}</Note>}
       <ErrorNote error={error} />
@@ -341,28 +363,21 @@ export default function Pages() {
       ) : (
         data && (
           <>
-            <Card title={t('pages.list_title')}>
-              {items.length === 0 ? (
-                <Empty icon={Globe} title={t('pages.empty_title')}>
-                  <p>{t('pages.empty_body')}</p>
-                </Empty>
-              ) : (
+            {/* 还没添加过：不摆一张空卡片，直接从下面正在运行的端口里挑 */}
+            {items.length > 0 && (
+              <Card title={t('pages.list_title')}>
                 <ul className="list">
                   {items.map((p) => (
                     <PageRow key={p.id} p={p} onChanged={reload} onShare={allowed ? setSharing : () => {}} />
                   ))}
                 </ul>
-              )}
-            </Card>
+              </Card>
+            )}
             <PortsCard pages={items} max={data.max} allowed={allowed} onAdded={reload} />
             {allowed && <AddForm count={items.length} max={data.max} onAdded={reload} />}
-            <Note kind="info" icon={Bot}>
-              {t('pages.mcp_moved')} <Link to="/ai">{t('nav.ai')}</Link>
-            </Note>
           </>
         )
       )}
-      <p className="muted small">{t('pages.privacy')}</p>
       <ShareDialog page={sharing} onClose={() => setSharing(null)} />
     </>
   );

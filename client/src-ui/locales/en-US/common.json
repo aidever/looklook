@@ -48,7 +48,7 @@
     "remote_latency_hint": "Round trip {{ms}} ms (browser → relay → this computer). Above 150 ms typing feels slow; you can switch the remote route in Settings.",
     "files": "Files",
     "ssh": "SSH hosts",
-    "ai": "AI tools & access",
+    "ai": "AI assistant",
     "home_page": "Looklook home page",
     "docs": "Help & docs",
     "github": "GitHub repository",
@@ -389,7 +389,7 @@
       "rotate_body": "The old token stops working immediately. AI assistants installed above switch to the new token automatically; tools set up by hand need the new one.",
       "rotated": "Switched to a new token"
     },
-    "mcp_moved": "Want AI assistants to look up and add pages themselves? Turn on the MCP interface on the AI tools & access page:"
+    "mcp_moved": "Want AI assistants to look up and add pages themselves? Turn on the MCP interface under AI assistant → Tools & permissions:"
   },
   "settings": {
     "title": "Settings",
@@ -430,6 +430,7 @@
     "sec_terminal": "Terminal",
     "sec_ai": "AI models",
     "sec_notify": "Notifications",
+    "sec_pet": "Pet",
     "sec_network": "Network & access",
     "sec_about": "About",
     "new_terminal": "Defaults for new terminals",
@@ -1446,7 +1447,7 @@
     "carry_none": "No secrets"
   },
   "ai": {
-    "title": "AI tools & access",
+    "title": "AI assistant",
     "intro": "AI assistants such as Claude Code and Codex use Looklook through its MCP interface. Set the interface up here and see and control what they can do.",
     "local_only": "Remotely you can only turn it on or off; the token and installing into AI assistants are only available when the console is opened directly on this computer (running in Docker? start with --local-from to count the host as this computer).",
     "tools_title": "Tools AI assistants can use",
@@ -1476,7 +1477,30 @@
     "lark_copy": "Copy install command",
     "lark_need_node": "Needs Node.js (npm) first. You can also copy the command into a terminal.",
     "lark_installed": "lark-cli is installed on this computer.",
-    "lark_login_hint": "The first time, the AI assistant gives you a link to confirm in Feishu. Or run these in a terminal yourself:"
+    "lark_login_hint": "The first time, the AI assistant gives you a link to confirm in Feishu. Or run these in a terminal yourself:",
+    "hub": {
+      "intro": "Everything about your AI in one place: which accounts and models to use, how to reach you when you are away, which tools the AI can use, and the chat pet.",
+      "accounts": "Accounts & models",
+      "accounts_desc": "Claude / Codex accounts, third-party models, usage",
+      "remote": "Away from your desk",
+      "remote_desc": "Get notified when the AI finishes or needs you; chat from Feishu",
+      "tools": "Tools & permissions",
+      "tools_desc": "MCP, the tools the AI can use, auto-approval",
+      "pet": "Pet",
+      "pet_desc": "A companion in the chat corner that follows the AI",
+      "accounts_n": "Claude {{claude}} · Codex {{codex}}",
+      "accounts_none": "No accounts yet",
+      "feishu_on": "Feishu connected",
+      "feishu_down": "Feishu not connected",
+      "hooks_n_one": "{{count}} channel",
+      "hooks_n_other": "{{count}} channels",
+      "remote_none": "Not set up",
+      "mcp_on": "MCP on",
+      "mcp_off": "MCP off",
+      "pet_on": "On",
+      "pet_off": "Off",
+      "pet_none": "No pet installed"
+    }
   },
   "select": {
     "toggle": "Select text",
@@ -2005,12 +2029,6 @@
     "detached_dsh_follow_title": "Lost the connection to DSH",
     "detached_dsh_follow_body": "Reconnecting; if it doesn't come back, try again below.",
     "approve_reason": "Reason: {{reason}}",
-    "pet_hide": "Hide the buddy",
-    "pet_show": "Bring back the buddy",
-    "pet_working": "Working",
-    "pet_waiting": "Waiting for you",
-    "pet_done": "Done!",
-    "pet_sleeping": "Napping",
     "plan_approve": "Approve the plan and start",
     "dsh_plan_on": "Plan mode: DSH only reads and writes a plan; it acts after you approve",
     "dsh_plan_off": "Leave plan mode",
@@ -3003,8 +3021,16 @@
         "body": "Open sites you're developing on this computer (like localhost:5173) from your phone too."
       },
       "ai": {
-        "title": "AI assistants",
-        "body": "Let Claude Code and Codex use Looklook's tools to add pages or run commands on servers you allow."
+        "title": "AI assistant",
+        "body": "Accounts and models, notifications and Feishu, AI tools and the pet — all on one page."
+      },
+      "notify": {
+        "title": "Away from your desk",
+        "body": "Get a Feishu message when the AI finishes or needs you, and reply right there to keep going."
+      },
+      "pet": {
+        "title": "Chat pet",
+        "body": "Install a pet pack and a companion in the chat corner thinks, works and waits along with the AI."
       },
       "accounts": {
         "title": "Accounts & models",
@@ -3103,5 +3129,59 @@
     "attn": "“{{title}}” needs you",
     "done": "“{{title}}” is done",
     "failed": "“{{title}}” failed"
+  },
+  "pet": {
+    "title": "Chat pet",
+    "intro": "A little buddy in the corner of the chat that acts out what the AI is doing: thinking, working, waiting for you, cheering when done, sighing on errors. Click it, drag it, fling it; hover for a small × to hide it.",
+    "enabled": "Show pet",
+    "on": "On",
+    "off": "Off",
+    "default": "Default pet",
+    "default_none": "No pets yet: import a pet pack below, or install Codex or dsh-pet pets.",
+    "follow_default": "Same as default",
+    "hidden": "Don't show",
+    "size": "Size",
+    "lines": "Speech bubbles",
+    "packs": "Pet packs",
+    "packs_hint": "Looklook ships no characters. Import a .llpet / .zip pack, or drop a pet folder into the folder below; installed Codex and dsh-pet pets show up here too.",
+    "guide": "How to make a pet",
+    "rescan": "Rescan",
+    "import": "Import",
+    "imported": "Imported {{name}}",
+    "none": "No pets found yet.",
+    "dir_local": "Imported pets",
+    "dir_codex": "Codex pets",
+    "dir_dsh": "dsh-pet",
+    "src_local": "Imported",
+    "src_codex": "Codex",
+    "src_dsh": "dsh-pet",
+    "sprite": "Sprite",
+    "noncommercial": "Non-commercial",
+    "by": "by {{name}}",
+    "license_unknown": "License not stated",
+    "no_mov": "No .mov for Apple devices: iPhone, Safari and the macOS app show a still image.",
+    "no_mov_here": "No .mov for Apple devices: this device shows a still image.",
+    "remove_title": "Delete “{{name}}”?",
+    "remove_body": "Deletes this imported pack's files; chats using it stop showing a pet.",
+    "trial": "Preview",
+    "trial_title": "Preview: {{name}}",
+    "trial_hint": "Use the buttons to see each state and action; you can also click, drag and fling it, or right-click to put it to sleep.",
+    "trial_states": "States",
+    "trial_once": "One-off",
+    "trial_clips": "All clips ({{n}})",
+    "state_idle": "Idle",
+    "state_thinking": "Thinking",
+    "state_tool": "Using a tool",
+    "state_toolDone": "Tool finished",
+    "state_waiting": "Waiting for you",
+    "state_terminal": "Needs the terminal",
+    "state_offline": "Not connected",
+    "state_done": "Done",
+    "state_error": "Error",
+    "act_click": "Click",
+    "act_sleep": "Sleep",
+    "label": "{{name}} (click or drag it; right-click to sleep)",
+    "hide": "Hide pet",
+    "show": "Show pet"
   }
 }

@@ -955,38 +955,75 @@
   //   在随后的 input 事件里把实际上屏的字（输入法给的全角或原样的半角）发给终端；字母、空格仍走 xterm 的处理。
   var MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || '');
   function setupKeys(term) {
-    var punct = null; // 放行给浏览器的标点键：{ key, timer }
+    var punct = null; // 放行给浏览器的标点键：{ key, ime, before, timer }
+    var own = null; // 标点键引起、由这里接管的输入法组字（搜狗、微信输入法等把标点也走一遍组字）：{ before }
     function sendText(text) {
       if (typeof term.input === 'function') term.input(text, true);
       else if (term._core && term._core.coreService) term._core.coreService.triggerDataEvent(text, true);
     }
+    // 输入框里比按键时多出来的字（输入框只会在末尾追加；xterm 偶尔清空，清空了就当全是新的）
+    function added(before) {
+      var v = term.textarea ? term.textarea.value : '';
+      return v.indexOf(before) === 0 ? v.slice(before.length) : v;
+    }
+    function onTa(e) { return term.textarea && e.target === term.textarea; }
     document.addEventListener('keypress', function (e) {
-      if (punct && e.target === term.textarea) e.stopImmediatePropagation(); // 不让 xterm 在 keypress 里发英文、取消输入
+      if ((punct || own) && onTa(e)) e.stopImmediatePropagation(); // 不让 xterm 在 keypress 里发英文、取消输入
     }, true);
     document.addEventListener('input', function (e) {
-      if (!punct || e.target !== term.textarea) return;
+      if (!onTa(e)) return;
+      if (own) { e.stopImmediatePropagation(); return; } // 组字由 compositionend 收尾
+      if (!punct) return;
+      // 组字中的不管（随后会有 compositionstart 或 xterm 自己的组字处理）
+      if (!e.data || e.isComposing || e.inputType === 'insertCompositionText' || !/^insert/.test(e.inputType || '')) return;
       clearTimeout(punct.timer);
       punct = null;
-      // 组字中的交给 xterm 的组字处理；直接上屏的（insertText，有的输入法是 insertReplacementText / insertFromComposition）由这里发
-      if (!e.data || e.isComposing || e.inputType === 'insertCompositionText' || !/^insert/.test(e.inputType || '')) return;
       e.stopImmediatePropagation();
       sendText(e.data);
     }, true);
+    // 标点键按下后输入法开始组字：xterm 没见过这个按键，而且它在 setTimeout(0) 里从输入框截取组好的字，
+    // macOS App（WKWebView）的输入法跨进程、上屏晚，截到的是空的，第一下就丢了（要按两次）。
+    // 这种组字整个由这里接管：xterm 收不到组字事件，结束时用 compositionend 的 data（没有就看输入框多出的字）发出去。
     document.addEventListener('compositionstart', function (e) {
-      if (punct && e.target === term.textarea) clearTimeout(punct.timer), (punct = null);
+      if (!onTa(e)) return;
+      if (!punct) { own = null; return; }
+      clearTimeout(punct.timer);
+      own = { before: punct.before };
+      punct = null;
+      e.stopImmediatePropagation();
+    }, true);
+    document.addEventListener('compositionupdate', function (e) {
+      if (own && onTa(e)) e.stopImmediatePropagation();
+    }, true);
+    document.addEventListener('compositionend', function (e) {
+      if (!own || !onTa(e)) return;
+      e.stopImmediatePropagation();
+      var o = own;
+      own = null;
+      if (e.data) { sendText(e.data); return; }
+      setTimeout(function () { var t = added(o.before); if (t) sendText(t); }, 60);
     }, true);
     document.addEventListener('keydown', function (e) {
-      if (!term.textarea || e.target !== term.textarea || e.isComposing) return;
+      if (!onTa(e)) return;
+      // 接管的组字还没结束：输入法要的按键（229）别让 xterm 再去比对输入框，免得重复发
+      if (own) { if (e.isComposing || e.keyCode === 229) e.stopImmediatePropagation(); return; }
+      if (e.isComposing) return;
       // macOS App（WKWebView）里中文输入法的标点：按键报 229、key 却是实际的键（Chrome 报 Process）。交给 xterm 的话，
       // 它在 setTimeout(0) 里比对输入框找新上屏的字，WKWebView 的输入法异步上屏，比对时还没有字，这一下就丢了。
       var ime = e.keyCode === 229;
       if (e.key && e.key.length === 1 && !/[A-Za-z ]/.test(e.key) && !e.ctrlKey && !e.altKey && !e.metaKey) {
         e.stopImmediatePropagation(); // 不 preventDefault：输入法照常处理这个键
         if (punct) clearTimeout(punct.timer);
-        var key = e.key;
-        // 浏览器没有触发 input（不该发生）时按原样补发，免得丢字。输入法接手的（229）不补：它可能在组字。
-        // WKWebView 的输入法要跨进程，上屏可能晚几十毫秒，多等一会儿
-        punct = { key: key, timer: setTimeout(function () { if (punct && punct.key === key) { punct = null; if (!ime) sendText(key); } }, 400) };
+        var p = { key: e.key, ime: ime, before: term.textarea.value };
+        // 等不到 input / 组字：输入框里多了字就发多出来的（WKWebView 上屏晚），什么都没有且不是输入法接手的（229）才按原样补发
+        p.timer = setTimeout(function () {
+          if (punct !== p) return;
+          punct = null;
+          var t = added(p.before);
+          if (t) sendText(t);
+          else if (!p.ime) sendText(p.key);
+        }, 400);
+        punct = p;
         return;
       }
       if (ime) return;

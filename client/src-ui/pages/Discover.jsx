@@ -1,7 +1,7 @@
 // 发现更多功能（docs/ONBOARDING_2026-10.md §3.5）：
 // - DraftTip：开始页输入框下面的一行小技巧，每次打开换一条（电脑上的跟手机上的分开）；
 // - DiscoverDialog：“看看还能做什么”，一张功能清单，每项一句话 + 去那里的按钮。上手清单做完后、用户菜单“上手指南”里都能打开。
-import { Bot, CalendarClock, Container, FolderOpen, Globe, History, Keyboard, Laptop, ListTodo, RefreshCw, Server, Settings as SettingsIcon, UserCog } from 'lucide-react';
+import { Bell, Bot, CalendarClock, Container, FolderOpen, Globe, History, Keyboard, Laptop, ListTodo, PawPrint, RefreshCw, Server, Settings as SettingsIcon, UserCog } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -22,6 +22,37 @@ const DRAFT_TIPS = [
   { id: 'keybar', touch: true },
   { id: 'landscape', touch: true },
 ];
+
+/** 开始页输入框下面一行：AI 助手页的四块（账号、通知与飞书、工具、宠物），不知道有这些的用户一眼能看到 */
+const AI_LINKS = [
+  { id: 'accounts', icon: UserCog },
+  { id: 'remote', icon: Bell },
+  { id: 'tools', icon: Bot },
+  { id: 'pet', icon: PawPrint },
+];
+
+export function AiLinks() {
+  const { t } = useTranslation();
+  const { navigate } = useRouter();
+  return (
+    <nav className="draft-ai" aria-label={t('ai.title')}>
+      {AI_LINKS.map((x) => (
+        <a
+          key={x.id}
+          href={`/ai#${x.id}`}
+          className="draft-ai-link"
+          onClick={(e) => {
+            e.preventDefault();
+            navigate(`/ai#${x.id}`);
+          }}
+        >
+          <x.icon size={13} aria-hidden="true" />
+          {t(`ai.hub.${x.id}`)}
+        </a>
+      ))}
+    </nav>
+  );
+}
 
 /** 开始页输入框下面：按键说明（电脑上）+ 一条小技巧。 */
 export function DraftTip() {
@@ -48,7 +79,9 @@ const FEATURES = [
   { id: 'ssh', icon: Server, to: '/ssh' },
   { id: 'pages', icon: Globe, to: '/pages' },
   { id: 'ai', icon: Bot, to: '/ai' },
-  { id: 'accounts', icon: UserCog, to: '/settings#claude-accounts' },
+  { id: 'notify', icon: Bell, to: '/ai#notify' },
+  { id: 'pet', icon: PawPrint, to: '/ai#pet' },
+  { id: 'accounts', icon: UserCog, to: '/ai#claude-accounts' },
   { id: 'history', icon: History, to: '/history' },
   { id: 'tasks', icon: ListTodo, to: '/tasks' },
   { id: 'docker', icon: Container, to: '/new' },

@@ -22,7 +22,7 @@ import { Button, ErrorNote, Spinner, Switch, useLoad, useToast } from '../shared
 import { ClaudeProfilePick, CodexProfilePick } from './ClaudeProfiles.jsx';
 import { DiscoverCard } from './AddProject.jsx';
 import { Onboarding, useGuideShowsRemote } from './Onboarding.jsx';
-import { DraftTip } from './Discover.jsx';
+import { AiLinks, DraftTip } from './Discover.jsx';
 import PromptsMenu from './PromptTemplates.jsx';
 import { AI_TOOLS, FULL_ACCESS, fullAccessFor, opensInPage, shortAgo, useSessionUi } from './Sessions.jsx';
 import { BackendNote, FolderPicker, InstallProgress, Promotions, RemoteCard, ShellPicker } from './Terminals.jsx';
@@ -690,6 +690,7 @@ function DraftForm() {
         </form>
         <ErrorNote error={error} />
         <DraftTip />
+        <AiLinks />
       </div>
     </div>
   );

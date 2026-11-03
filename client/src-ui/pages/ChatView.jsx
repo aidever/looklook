@@ -1850,7 +1850,7 @@ function SwitchProfile({ id, manage, goOn = true }) {
   const others = profiles.filter((p) => p.id !== cur);
   if (!others.length) {
     return manage ? (
-      <Button variant="ghost" onClick={() => navigate('/settings#claude-accounts')}>
+      <Button variant="ghost" onClick={() => navigate('/ai#claude-accounts')}>
         <UserRound size={15} aria-hidden="true" /> {t('chat.limit.add_account')}
       </Button>
     ) : null;
@@ -1881,7 +1881,7 @@ function SwitchProfile({ id, manage, goOn = true }) {
           onClick: () => pick(p),
         })),
         'sep',
-        { label: t('cprof.manage'), onClick: () => navigate('/settings#claude-accounts') },
+        { label: t('cprof.manage'), onClick: () => navigate('/ai#claude-accounts') },
       ]}
     />
   );
@@ -4427,6 +4427,7 @@ export default function ChatView({ id, launch, active, touch, offline = false, o
           )}
           {status && <SideToggle side={side} onSide={setSide} />}
           {phase === 'tui' && <TuiDialog id={id} dialog={status?.dialog ?? null} limit={status?.limit} />}
+          <ChatPet id={id} active={active} status={status} touch={touch} />
         </div>
         <div className="chat-dock">
           {todos && todos.some((x) => x.status !== 'completed') && (
@@ -4446,7 +4447,6 @@ export default function ChatView({ id, launch, active, touch, offline = false, o
           {phase !== 'detached' && <AgentStrip id={id} items={items} live={live} bg={bg} onOpen={openAgent} />}
           <StatusNotice status={status} online={chat.online} offline={offline} />
           <NotifyAsk active={active} phase={phase} />
-          <ChatPet phase={phase} />
           <Composer id={id} active={active} status={status} phase={phase} touch={touch} offline={offline && !chat.online} models={models} usage={usage} items={items} onAction={onAction} onSide={setSide} />
         </div>
       </div>

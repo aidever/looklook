@@ -1,6 +1,6 @@
 [package]
 name = "looklook-client"
-version = "1.59.0"
+version = "1.60.0"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 description = "看看客户端：在自己的电脑上运行终端与 AI 助手，并通过看看服务端随时随地访问"
@@ -56,6 +56,10 @@ zeroize = "1"
 data-encoding = "2"
 rust-embed = "8"
 mime_guess = "2"
+# 导入宠物包（.llpet / .zip，src/pets.rs）：只要解压
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# 导入宠物包时的临时文件、临时目录
+tempfile = "3"
 dirs = "6"
 memchr = "2"
 hostname = "0.4"

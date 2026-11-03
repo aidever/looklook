@@ -48,6 +48,7 @@ mod notify;
 mod feishu_agent;
 mod feishu_route;
 mod paths;
+mod pets;
 mod platform;
 mod ports;
 mod proctree;
@@ -190,10 +191,25 @@ enum Cmd {
     /// ssh 的 ProxyCommand：经跳板机连接时由看看自己连上跳板机（内部使用）/ ProxyCommand for jump hosts (internal)
     #[command(hide = true)]
     SshProxy { jump: String, host: String, port: u16 },
+    /// 对话宠物包：检查、安装、列出（docs/PET_PACK_GUIDE.md）/ Chat pet packs: check, install, list
+    Pet {
+        #[command(subcommand)]
+        action: PetCmd,
+    },
     /// 安装脚本用（Linux）：把安装包目录放进数据目录的 versions/，删掉更高的版本，稳定入口 bin/looklook 指向它
     /// For installers (Linux): put the package into versions/ in the data directory and point bin/looklook at it
     #[command(hide = true)]
     InstallVersion { from: PathBuf },
+}
+
+#[derive(Subcommand)]
+enum PetCmd {
+    /// 检查一个宠物包文件夹（装了 ffmpeg 时还会看尺寸、透明通道、首尾帧）/ Check a pet pack folder
+    Check { dir: PathBuf },
+    /// 安装一个 .llpet / .zip（同 id 覆盖）/ Install a .llpet / .zip (replaces the same id)
+    Install { file: PathBuf },
+    /// 列出这台电脑上找得到的宠物 / List the pets found on this computer
+    List,
 }
 
 #[derive(Subcommand)]
@@ -341,6 +357,29 @@ fn main() -> Result<()> {
                 None => {
                     for h in ssh::list(&store) {
                         println!("{:<20} {}@{}:{}  {}{}", h.name, h.user, h.host, h.port, h.auth, if h.allow_ai { "  ai" } else { "" });
+                    }
+                    Ok(())
+                }
+            }
+        }
+        Some(Cmd::Pet { action }) => {
+            let paths = Paths::discover(cli.home)?;
+            match action {
+                PetCmd::Check { dir } => std::process::exit(pets::check(&dir)),
+                PetCmd::Install { file } => match pets::import(&paths.home, &file) {
+                    Ok(p) => {
+                        println!("✓ {} → {}", p.id, p.dir.display());
+                        Ok(())
+                    }
+                    Err(e) => {
+                        eprintln!("✗ {}: {}", e.code, e.detail);
+                        std::process::exit(1)
+                    }
+                },
+                PetCmd::List => {
+                    for p in pets::scan(&paths.home) {
+                        let err = p.error.as_ref().map(|e| format!("  ✗ {}: {}", e.code, e.detail)).unwrap_or_default();
+                        println!("{:<28} {:<7} {}{}", p.key(), p.manifest.renderer, p.dir.display(), err);
                     }
                     Ok(())
                 }

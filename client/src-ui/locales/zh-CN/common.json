@@ -48,7 +48,7 @@
     "remote_latency_hint": "往返 {{ms}} 毫秒（浏览器 → 中转 → 这台电脑）。超过 150 毫秒打字会感觉慢，可以在设置里换一条远程线路。",
     "files": "文件",
     "ssh": "SSH 主机",
-    "ai": "AI 工具与权限",
+    "ai": "AI 助手",
     "home_page": "看看主页",
     "docs": "帮助文档",
     "github": "GitHub 开源仓库",
@@ -389,7 +389,7 @@
       "rotate_body": "旧令牌马上失效。上面已经装好的 AI 助手会自动换成新令牌；手动配置的工具需要重新填写。",
       "rotated": "已换新令牌"
     },
-    "mcp_moved": "想让 AI 助手自己查看、添加网页？在“AI 工具与权限”页打开 MCP 接口："
+    "mcp_moved": "想让 AI 助手自己查看、添加网页？在“AI 助手 → 工具与权限”里打开 MCP 接口："
   },
   "settings": {
     "title": "设置",
@@ -430,6 +430,7 @@
     "sec_terminal": "终端",
     "sec_ai": "AI 模型",
     "sec_notify": "通知",
+    "sec_pet": "宠物",
     "sec_network": "网络与访问",
     "sec_about": "关于",
     "new_terminal": "新建终端的默认值",
@@ -1446,7 +1447,7 @@
     "carry_none": "不带秘密"
   },
   "ai": {
-    "title": "AI 工具与权限",
+    "title": "AI 助手",
     "intro": "Claude Code、Codex 等 AI 助手通过 MCP 接口使用看看：这里装好接口，并看清、控制它们能做什么。",
     "local_only": "远程打开时只能开关；令牌和装进 AI 助手只能在这台电脑上直接打开管理台时查看、操作（在 Docker 里运行时，可用启动参数 --local-from 把宿主机也当作这台电脑）。",
     "tools_title": "AI 助手能用的工具",
@@ -1476,7 +1477,30 @@
     "lark_copy": "复制安装命令",
     "lark_need_node": "要先装 Node.js（npm）。也可以复制命令到终端里装。",
     "lark_installed": "这台电脑已经装好 lark-cli。",
-    "lark_login_hint": "第一次用时 AI 助手会给你一个链接，在飞书里确认就行；也可以自己在终端里运行："
+    "lark_login_hint": "第一次用时 AI 助手会给你一个链接，在飞书里确认就行；也可以自己在终端里运行：",
+    "hub": {
+      "intro": "和 AI 有关的都在这里：用哪个账号和模型、离开电脑时怎么找到你、AI 能用哪些工具，还有对话角落的宠物。",
+      "accounts": "账号与模型",
+      "accounts_desc": "Claude / Codex 账号、第三方模型、用量",
+      "remote": "离开电脑也能用",
+      "remote_desc": "AI 做完、要确认时通知你；飞书里直接聊",
+      "tools": "工具与权限",
+      "tools_desc": "MCP 接口、AI 能用的工具、自动审批",
+      "pet": "宠物",
+      "pet_desc": "对话角落跟着 AI 状态动的小伙伴",
+      "accounts_n": "Claude {{claude}} 个 · Codex {{codex}} 个",
+      "accounts_none": "还没添加账号",
+      "feishu_on": "飞书已连接",
+      "feishu_down": "飞书没连上",
+      "hooks_n_one": "{{count}} 个通知渠道",
+      "hooks_n_other": "{{count}} 个通知渠道",
+      "remote_none": "还没设置",
+      "mcp_on": "MCP 已打开",
+      "mcp_off": "MCP 没打开",
+      "pet_on": "已开",
+      "pet_off": "没开",
+      "pet_none": "还没装宠物"
+    }
   },
   "select": {
     "toggle": "选择文字",
@@ -2005,12 +2029,6 @@
     "detached_dsh_follow_title": "和 DSH 的连接断了",
     "detached_dsh_follow_body": "正在重新连接；一直连不上时点下面的按钮重试。",
     "approve_reason": "原因：{{reason}}",
-    "pet_hide": "藏起小家伙",
-    "pet_show": "叫出小家伙",
-    "pet_working": "在干活",
-    "pet_waiting": "在等你",
-    "pet_done": "做完啦",
-    "pet_sleeping": "在打盹",
     "plan_approve": "批准计划，开始执行",
     "dsh_plan_on": "进入计划模式：DSH 先只读、写计划，你批准后再动手",
     "dsh_plan_off": "离开计划模式",
@@ -3004,7 +3022,15 @@
       },
       "ai": {
         "title": "AI 助手",
-        "body": "让 Claude Code、Codex 通过看看的接口添加网页、在你允许的服务器上运行命令。"
+        "body": "账号与模型、通知与飞书、AI 能用的工具、宠物，都在一页。"
+      },
+      "notify": {
+        "title": "离开电脑也能用",
+        "body": "AI 做完、要你确认时发到飞书；在飞书里直接回复它、接着聊。"
+      },
+      "pet": {
+        "title": "对话宠物",
+        "body": "装个宠物包，对话角落的小伙伴跟着 AI 思考、干活、等你。"
       },
       "accounts": {
         "title": "账号与模型",
@@ -3103,5 +3129,59 @@
     "attn": "「{{title}}」在等你处理",
     "done": "「{{title}}」做完了",
     "failed": "「{{title}}」出错了"
+  },
+  "pet": {
+    "title": "对话宠物",
+    "intro": "对话界面角落的小伙伴，跟着 AI 的状态换动作：思考、干活、等你确认、做完庆祝、出错叹气。点它、拖它、甩它都有反应；鼠标移上去有个小叉可以藏起来。",
+    "enabled": "显示宠物",
+    "on": "开",
+    "off": "关",
+    "default": "默认用哪只",
+    "default_none": "还没有宠物：在下面导入一个宠物包，或者装 Codex、dsh-pet 的宠物。",
+    "follow_default": "跟默认一样",
+    "hidden": "不显示",
+    "size": "大小",
+    "lines": "头顶气泡",
+    "packs": "宠物包",
+    "packs_hint": "看看不自带宠物形象。导入 .llpet / .zip 宠物包，或者把宠物文件夹放进下面的目录；装过的 Codex 宠物、dsh-pet 宠物也会列在这里。",
+    "guide": "怎么做一只宠物",
+    "rescan": "重新读取",
+    "import": "导入",
+    "imported": "已导入：{{name}}",
+    "none": "还没有找到宠物。",
+    "dir_local": "导入的宠物",
+    "dir_codex": "Codex 宠物",
+    "dir_dsh": "dsh-pet",
+    "src_local": "导入的",
+    "src_codex": "Codex",
+    "src_dsh": "dsh-pet",
+    "sprite": "精灵图",
+    "noncommercial": "非商用",
+    "by": "作者 {{name}}",
+    "license_unknown": "未声明许可",
+    "no_mov": "没有苹果设备用的 .mov：在 iPhone、Safari、看看 macOS 版上只显示封面。",
+    "no_mov_here": "没有苹果设备用的 .mov：在这台设备上只显示封面。",
+    "remove_title": "删除“{{name}}”？",
+    "remove_body": "会删掉导入的这个宠物包的文件，用它的对话不再显示宠物。",
+    "trial": "试播",
+    "trial_title": "试播：{{name}}",
+    "trial_hint": "点下面的按钮看各个状态和动作；也可以直接点、拖、甩它，右键让它睡觉。",
+    "trial_states": "持续状态",
+    "trial_once": "一次性",
+    "trial_clips": "全部片段（{{n}}）",
+    "state_idle": "空闲",
+    "state_thinking": "思考",
+    "state_tool": "调工具",
+    "state_toolDone": "工具做完",
+    "state_waiting": "等你确认",
+    "state_terminal": "要去终端",
+    "state_offline": "没连上",
+    "state_done": "做完了",
+    "state_error": "出错了",
+    "act_click": "点一下",
+    "act_sleep": "睡觉",
+    "label": "{{name}}（点一下、拖动它；右键睡觉）",
+    "hide": "藏起宠物",
+    "show": "叫出宠物"
   }
 }

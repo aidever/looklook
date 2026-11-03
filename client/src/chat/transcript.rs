@@ -340,7 +340,8 @@ impl Transcript {
             return Change::None;
         }
         // 只有末尾那条变了（assistant 又多了一个内容块）或者在末尾新增：增量更新；否则整个重新加载
-        let tail_grew = first_diff >= old.len() || (first_diff + 1 == old.len() && old[first_diff].first() == self.display[first_diff].first());
+        // 显示的条目可能变少（末尾那条没了）：`display[first_diff]` 不一定有
+        let tail_grew = first_diff >= old.len() || (first_diff + 1 == old.len() && self.display.get(first_diff).is_some_and(|g| g.first() == old[first_diff].first()));
         if tail_grew && self.display.len() >= old.len() {
             Change::Upsert { start: first_diff, items: self.items(first_diff, self.display.len()) }
         } else {
@@ -392,10 +393,14 @@ impl Transcript {
             }
             chain.push(i);
             let rec = &self.recs[i];
-            cur = rec.parent.as_ref().and_then(|p| self.by_uuid.get(p)).copied();
-            // 压缩分界指向的前一条记录不在文件里（实测 2.1.30x 的自动压缩会这样）：接到分界之前写下的最后一条主线记录，
-            // 不然压缩前的对话在界面上整个消失
-            if cur.is_none() && rec.boundary {
+            // 只认写在它前面的父记录：后面才写的当作不在文件里（不然等它写出来，链会绕回来在这里断掉）
+            cur = rec.parent.as_ref().and_then(|p| self.by_uuid.get(p)).copied().filter(|&p| p < i);
+            // 指向的前一条记录不在文件里：接到它之前写下的最后一条主线记录，不然前面的对话在界面上整个消失。
+            // - 压缩分界（实测 2.1.30x 的自动压缩，`logicalParentUuid` 还会指向分界之后才写的附件）；
+            // - 父记录写在后面（实测：附件、`scheduled_task_fire` 指向这一轮结束时才写的记录）：以前一轮跑着的时候界面只剩
+            //   一两条（空白），跑完才恢复；
+            // - 父记录压根没写进来（磁盘满之类）。
+            if cur.is_none() && (rec.boundary || rec.parent.is_some()) {
                 cur = self.recs[..i].iter().rposition(|r| r.uuid.is_some() && (self.sidechain || !r.sidechain));
             }
         }
@@ -1084,6 +1089,56 @@ mod tests {
         s += &user("u2", Some("s1"), json!("暗号是什么"));
         t.feed(s.as_bytes());
         assert_eq!(kinds(&t), ["user", "assistant", "divider", "summary", "user"]);
+    }
+
+    /// 2.1.30x 实测：自动压缩的分界 `logicalParentUuid` 指向分界之后才写的附件。
+    /// 那条附件写出来以后，链不能在分界处绕回去断掉（压缩前的对话整个消失）
+    #[test]
+    fn compaction_logical_parent_written_later() {
+        let mut t = Transcript::new("/nonexistent".into());
+        let mut s = user("u1", None, json!("记住暗号"));
+        s += &assistant("a1", "u1", "m1", json!({"type":"text","text":"好的"}));
+        s += &line(json!({"type":"system","subtype":"compact_boundary","uuid":"c1","parentUuid":null,"logicalParentUuid":"x1","content":"Conversation compacted"}));
+        s += &line(json!({"type":"user","uuid":"s1","parentUuid":"c1","isCompactSummary":true,"message":{"content":"摘要……"}}));
+        s += &line(json!({"type":"attachment","uuid":"x1","parentUuid":"s1","attachment":{"type":"total_tokens_reminder"}}));
+        s += &user("u2", Some("x1"), json!("暗号是什么"));
+        t.feed(s.as_bytes());
+        assert_eq!(kinds(&t), ["user", "assistant", "divider", "summary", "user"]);
+    }
+
+    /// 父记录写在后面（实测：附件、`scheduled_task_fire` 指向这一轮结束时才写的记录）或者压根没写进来：
+    /// 以前整段对话只剩这一条（运行中界面空白，跑完才恢复），现在接到它前面那条
+    #[test]
+    fn parent_written_later_keeps_history() {
+        let mut t = Transcript::new("/nonexistent".into());
+        let mut s = user("u1", None, json!("你好"));
+        s += &assistant("a1", "u1", "m1", json!({"type":"text","text":"好"}));
+        t.feed(s.as_bytes());
+        assert_eq!(t.len(), 2);
+        // 父记录 later 还没写出来
+        assert!(matches!(t.feed(line(json!({"type":"attachment","uuid":"x1","parentUuid":"later","attachment":{"type":"session_context"}})).as_bytes()), Change::None));
+        assert_eq!(kinds(&t), ["user", "assistant"]);
+        // 父记录压根不在文件里
+        t.feed(user("u2", Some("gone"), json!("接着说")).as_bytes());
+        assert_eq!(kinds(&t), ["user", "assistant", "user"]);
+        // 后来写出来的那条：照常接在后面
+        t.feed(assistant("later", "u2", "m2", json!({"type":"text","text":"嗯"})).as_bytes());
+        assert_eq!(kinds(&t), ["user", "assistant", "user", "assistant"]);
+    }
+
+    /// 显示的条目变少、而且正好少了最后一条（以前 `display[first_diff]` 越界，release 下 panic = abort，整个客户端退出）
+    #[test]
+    fn display_shrinks_by_last_item() {
+        let mut t = Transcript::new("/nonexistent".into());
+        let mut s = user("u1", None, json!("一"));
+        s += &assistant("a1", "u1", "m1", json!({"type":"text","text":"二"}));
+        s += &user("u2", Some("a1"), json!("三"));
+        t.feed(s.as_bytes());
+        assert_eq!(t.len(), 3);
+        // 从 a1 另起一条没有内容的记录：显示变成前两条
+        let ch = t.feed(line(json!({"type":"attachment","uuid":"x1","parentUuid":"a1","attachment":{"type":"date"}})).as_bytes());
+        assert_eq!(t.len(), 2);
+        assert!(matches!(ch, Change::Reset));
     }
 
     #[test]

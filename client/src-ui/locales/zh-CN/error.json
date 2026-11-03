@@ -161,7 +161,19 @@
   "reason": {
     "MEMBERSHIP_EXPIRED": "会员已到期",
     "ACCOUNT_DISABLED": "账户已停用",
-    "OFFLINE_TOO_LONG": "很久没有连上看看服务器"
+    "OFFLINE_TOO_LONG": "很久没有连上看看服务器",
+    "pet_manifest": "pet.json 读不出来：{{detail}}",
+    "pet_field": "pet.json 里的 {{detail}} 不对或者没写",
+    "pet_version": "不支持的格式版本 {{detail}}，请升级看看",
+    "pet_missing_file": "缺少文件 {{detail}}",
+    "pet_too_big": "文件太大 {{detail}}（单个 ≤ 8 MB，整个包 ≤ 200 MB）",
+    "pet_too_many": "文件太多（最多 400 个）",
+    "pet_bad_name": "文件名不合规：{{detail}}（只用小写英文、数字、. _ -）",
+    "pet_bad_clip": "片段 {{detail}} 的设置不对",
+    "pet_bad_ref": "用到了没登记的片段：{{detail}}",
+    "pet_bad_image": "精灵图读不出来或尺寸不对：{{detail}}",
+    "pet_bad_zip": "不是有效的 zip：{{detail}}",
+    "pet_io": "读写文件失败：{{detail}}"
   },
   "AUTHORIZATION_PENDING": "还在等待批准",
   "AUTHORIZATION_EXPIRED": "授权已过期，请重新登录",
@@ -265,5 +277,8 @@
   "DSH_UNAUTHORIZED": "DSH 拒绝了看看的登录，重试一次；还不行就重启 dsh web",
   "DSH_REQUEST_FAILED": "DSH 没能完成：{{detail}}",
   "DSH_START": "dsh web 没能启动（{{detail}}）。看看日志 run/dsh-web.log",
-  "DSH_IMAGES_UNSUPPORTED": "现在选的模型不能看图片：在模型菜单里换一个支持图片的模型（例如 Flash）再发"
+  "DSH_IMAGES_UNSUPPORTED": "现在选的模型不能看图片：在模型菜单里换一个支持图片的模型（例如 Flash）再发",
+  "PET_INVALID": "宠物包有问题：{{reason_text}}",
+  "TOO_LARGE": "文件太大",
+  "UPLOAD_FAILED": "上传失败：{{message}}"
 }

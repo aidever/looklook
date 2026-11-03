@@ -78,7 +78,7 @@ export function NotifyAsk({ active, phase }) {
   }
   if (denied) {
     return (
-      <TipBar icon={BellOff} onDone={deniedDone} action={{ label: t('tips.notify.channels'), onClick: () => navigate('/settings#notify') }} className="chat-tip">
+      <TipBar icon={BellOff} onDone={deniedDone} action={{ label: t('tips.notify.channels'), onClick: () => navigate('/ai#notify') }} className="chat-tip">
         <p>{t('tips.notify.denied')}</p>
       </TipBar>
     );

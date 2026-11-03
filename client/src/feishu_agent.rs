@@ -510,7 +510,7 @@ fn failed(en: bool, e: &LocalError) -> String {
 }
 
 fn off_hint(en: bool) -> String {
-    tr(en, "在飞书里和 AI 对话没有打开：到看看的设置 → 通知里打开。", "Chatting with the AI in Feishu is off. Turn it on in LookLook Settings → Notifications.")
+    tr(en, "在飞书里和 AI 对话没有打开：到看看的 AI 助手 → 离开电脑也能用里打开。", "Chatting with the AI in Feishu is off. Turn it on in LookLook under AI assistant → Away from your desk.")
 }
 
 /// 去掉“正在输入”表情

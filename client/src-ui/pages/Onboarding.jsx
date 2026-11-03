@@ -128,7 +128,7 @@ export function Onboarding({ onTry }) {
     project: { label: t('onboard.project.go'), onClick: () => ui.addProject() },
     ai: { label: t('onboard.ai.go'), onClick: () => (onTry ? onTry(t('onboard.ai.sample')) : navigate('/new')) },
     phone: { label: t(qr ? 'onboard.phone.hide' : 'onboard.phone.go'), onClick: () => setQr(!qr) },
-    notify: { label: t('onboard.notify.go'), onClick: () => navigate('/settings#notify') },
+    notify: { label: t('onboard.notify.go'), onClick: () => navigate('/ai#notify') },
     tasks: { label: t('onboard.tasks.go'), onClick: () => navigate('/tasks') },
   };
   return (

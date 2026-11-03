@@ -41,8 +41,11 @@ export default function PullRefresh() {
       start.current = null;
       if (e.touches.length !== 1) return;
       const el = e.target;
-      // 终端页、侧栏、弹窗、输入框里不处理
-      if (el.closest?.('.term-page, .side.open, .modal-backdrop, input, textarea, [contenteditable="true"], .keybar') || scrolledAbove(el)) return;
+      // 终端页、侧栏、弹窗、菜单、抽屉、输入框里不处理；底部弹出的菜单开着时（往下划是关菜单）整页都不处理
+      if (document.querySelector('.menu-pop-sheet')) return;
+      const skip = '.term-page, .side.open, .modal-backdrop, .menu-pop-list, .menu-pop-backdrop, .drawer-backdrop, .chat-sheet-back, '
+        + '.files-panel, input, textarea, [contenteditable="true"], .keybar';
+      if (el.closest?.(skip) || scrolledAbove(el)) return;
       start.current = e.touches[0].clientY;
     };
     const move = (e) => {

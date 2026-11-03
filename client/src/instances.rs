@@ -1551,6 +1551,21 @@ impl Instances {
         Some(text.trim_end().to_string())
     }
 
+    /// 终端 ID → 会话里最后一次有输出的时间（毫秒，各窗口取最晚）。tmux 有输出就更新 `window_activity`，
+    /// 不用界面开着：飞书里发消息、AI 自己在跑都算。没有 tmux、取不到时为空。
+    pub async fn output_activity(&self) -> HashMap<String, i64> {
+        let mut out = HashMap::new();
+        let Ok(o) = self.tmux(&["list-windows", "-a", "-F", "#{session_name} #{window_activity}"]).await else { return out };
+        for l in String::from_utf8_lossy(&o.stdout).lines() {
+            let mut it = l.split_whitespace();
+            let (Some(name), Some(Ok(at))) = (it.next(), it.next().map(str::parse::<i64>)) else { continue };
+            let Some(id) = name.strip_prefix("ll_") else { continue };
+            let e = out.entry(id.to_string()).or_insert(0);
+            *e = (*e).max(at * 1000);
+        }
+        out
+    }
+
     /// 会话名 → (创建时间, 最后活动时间)，秒。非 tmux 后端返回 None。
     async fn tmux_sessions(&self) -> Option<HashMap<String, (i64, i64)>> {
         let Backend::Tmux(_) = self.backend else { return None };
@@ -1594,11 +1609,13 @@ impl Instances {
     /// 后台看护：ttyd 意外退出时重启。本机使用不看账户（未登录、会员到期也照常运行），远程打开由网关把关。
     pub async fn supervise(self: Arc<Self>) {
         let mut orphans = HashSet::new();
+        let mut server = None;
         let mut swept = Instant::now();
         loop {
             if swept.elapsed() >= ORPHAN_SWEEP {
                 swept = Instant::now();
                 orphans = self.sweep_orphans(orphans).await;
+                server = self.recover_lost(server).await;
             }
             self.reap();
             let rows = self.store.instances().unwrap_or_default();
@@ -1618,6 +1635,43 @@ impl Instances {
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
+    }
+
+    /// tmux 服务整个没了（有人在终端里敲了不带 `-L` 的 `tmux kill-server`——面板里的 `$TMUX` 指着看看的服务；
+    /// tmux 崩溃）：里面的会话全没了，没人打开的终端就一直是空的。上次看到时还在、这次服务换了一个（进程号变了）、
+    /// 会话不在了的 AI 终端，按它最后在写的那段对话重新启动。用户自己退出的（服务还是原来那个；或者只没了一个）不动。
+    /// 返回这一次看到的（服务进程号, 会话名），下一次用。
+    async fn recover_lost(&self, before: Option<(i64, HashSet<String>)>) -> Option<(i64, HashSet<String>)> {
+        let _g = self.op.lock().await;
+        let pid = self.tmux_server_pid().await;
+        let now: HashSet<String> = self.tmux_sessions().await.unwrap_or_default().into_keys().collect();
+        if let Some((old, seen)) = before.filter(|(old, _)| pid != Some(*old)) {
+            let rows = self.store.instances().unwrap_or_default();
+            let lost: Vec<&InstanceRow> = rows.iter().filter(|r| r.want_running && seen.contains(&Self::session_name(&r.id)) && !now.contains(&Self::session_name(&r.id))).collect();
+            // 只没了一个：可能是用户在最后一个会话里退出了 shell（tmux 没有会话就自己退出），不算服务没了
+            let lost = if lost.len() >= 2 { lost } else { vec![] };
+            for row in lost.into_iter().filter(|r| self.container(&r.id).is_none()) {
+                let conv = crate::chat::binding(&self.store, &row.id).map(|b| b.session_id).or_else(|| self.store.get::<String>(&resume_key(&row.id)).ok().flatten());
+                let Some(conv) = conv.filter(|c| self.resume_command(row, &Resume { id: c.clone(), fork: false }).is_some()) else {
+                    tracing::warn!(id = %row.id, launch = %row.launch, old, ?pid, "tmux 服务换了，终端的会话没了；不是能接着对话的 AI 终端，等打开时再新建");
+                    continue;
+                };
+                tracing::warn!(id = %row.id, launch = %row.launch, conv = %conv, old, ?pid, "tmux 服务换了，终端的会话没了，接着原来的对话重新启动");
+                lock(&self.first_resume).insert(row.id.clone(), Resume { id: conv, fork: false });
+                if let Err(e) = self.ensure_session(row).await {
+                    tracing::warn!(id = %row.id, error = ?e.code, "重新启动会话失败");
+                }
+            }
+        }
+        // 重新启动的会话下一次也算“看到过”；服务可能是刚才重新启动会话时起来的，重新取
+        let now = self.tmux_sessions().await.unwrap_or_default().into_keys().collect();
+        self.tmux_server_pid().await.map(|p| (p, now))
+    }
+
+    /// tmux 服务的进程号；没有服务时 None
+    async fn tmux_server_pid(&self) -> Option<i64> {
+        let out = self.tmux(&["display-message", "-p", "#{pid}"]).await.ok().filter(|o| o.status.success())?;
+        String::from_utf8_lossy(&out.stdout).trim().parse().ok()
     }
 
     /// 结束游离的 tmux 会话：终端已经删了、或者已经停止了，会话却还在（停止时 kill-session 没成功、客户端在中途被结束）。
@@ -2179,6 +2233,43 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
         }
+    }
+
+    /// tmux 服务整个没了（终端里敲了 `tmux kill-server`）：没人打开的 AI 终端接着原来的对话重新启动；普通终端不动。
+    /// 用 opencode（这里没装：命令失败后面板回到 shell，会话照样在），不会真的跑起一个 AI 工具。
+    #[tokio::test]
+    async fn recovers_ai_sessions_after_tmux_server_dies() {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::discover(Some(home.path().to_path_buf())).unwrap();
+        let inst = Instances::new(Arc::new(Store::memory().unwrap()), paths);
+        if !matches!(inst.backend, Backend::Tmux(_)) {
+            return;
+        }
+        let wd = home.path().display().to_string();
+        let mut ids = vec![];
+        for (i, launch) in ["opencode", "opencode", "shell"].into_iter().enumerate() {
+            let r = InstanceRow { id: random_id(8), launch: launch.into(), workdir: wd.clone(), want_running: true, port: 41001 + i as u16, ..row() };
+            inst.store.insert_instance(&r).unwrap();
+            inst.store.set(&resume_key(&r.id), &format!("ses_{}", r.id)).unwrap();
+            inst.ensure_session(&r).await.unwrap();
+            ids.push(r.id);
+        }
+        let seen = inst.recover_lost(None).await;
+        assert_eq!(seen.as_ref().map(|s| s.1.len()), Some(3));
+        // 服务还是原来那个：什么都不做
+        let seen = inst.recover_lost(seen).await;
+        let _ = inst.tmux(&["kill-server"]).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let seen = inst.recover_lost(seen).await;
+        let alive = inst.tmux_sessions().await.unwrap_or_default();
+        assert!(alive.contains_key(&sname(&ids[0])) && alive.contains_key(&sname(&ids[1])), "AI 终端应该重新启动了：{alive:?}");
+        assert!(!alive.contains_key(&sname(&ids[2])), "普通终端不该擅自重新运行");
+        assert_eq!(seen.map(|s| s.1.len()), Some(2));
+        let _ = inst.tmux(&["kill-server"]).await;
+    }
+
+    fn sname(id: &str) -> String {
+        Instances::session_name(id)
     }
 
     /// 端到端：随包的 looklook-mux 保持会话——ttyd 结束后任务仍在运行，输出还能读到。

@@ -128,7 +128,8 @@ export async function fetchRaw(path, options = {}) {
   if (device) headers['X-LL-Device'] = device;
   let res;
   try {
-    res = await fetch(`/api${path}`, { signal: options.signal, headers, credentials: 'same-origin', cache: 'no-store' });
+    // cache：网址带版本、内容不会变的（宠物动画）可以用 'default'，走浏览器缓存
+    res = await fetch(`/api${path}`, { signal: options.signal, headers, credentials: 'same-origin', cache: options.cache ?? 'no-store' });
   } catch (e) {
     if (e.name === 'AbortError') throw e;
     throw new ApiError(0, 'CLIENT_UNREACHABLE');
@@ -138,6 +139,25 @@ export async function fetchRaw(path, options = {}) {
     throw new ApiError(res.status, e.code ?? 'INTERNAL', e.params ?? {});
   }
   return res;
+}
+
+/** 请求体是文件本身（导入宠物包）：返回 JSON，出错抛 ApiError */
+export async function postFile(path, file, options = {}) {
+  const headers = { Accept: 'application/json', 'X-Looklook-Client': '1', 'Content-Type': 'application/octet-stream' };
+  const device = await deviceFor(path, options);
+  if (device) headers['X-LL-Device'] = device;
+  let res;
+  try {
+    res = await fetch(`/api${path}`, { method: 'POST', headers, credentials: 'same-origin', cache: 'no-store', body: file });
+  } catch {
+    throw new ApiError(0, 'CLIENT_UNREACHABLE');
+  }
+  const data = await res.json().catch(() => null);
+  if (!res.ok) {
+    const e = data?.error ?? {};
+    throw new ApiError(res.status, e.code ?? (res.status === 413 ? 'TOO_LARGE' : 'INTERNAL'), e.params ?? {});
+  }
+  return data;
 }
 
 /** 普通链接能不能直接打开不属于终端的接口（远程且有多台电脑时不能，见 fetchRaw）。 */

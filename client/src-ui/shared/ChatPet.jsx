@@ -1,87 +1,95 @@
-// 对话界面右下角的小胖鱼：跟着对话状态动（在跑摆尾巴冒泡、等你时举鳍、做完翻跟头、闲久了睡觉），像素见 pet.js。
-// 点它会蹦一下；鼠标移上去有个小叉可以藏起来，藏起来后留一个很淡的小点，点了叫回来（记在这个浏览器里）。
-import { useEffect, useMemo, useReducer, useRef, useState } from 'react';
+// 对话界面角落的宠物（docs/PET_PACK.md）：用哪只按“设置 → 宠物”里给这种对话配的，跟着对话状态换动作。
+// 鼠标移上去有个小叉可以藏起来，藏起来后留一个很淡的小点，点了叫回来（记在这个浏览器里）。
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { PET_FRAMES, PET_H, PET_W, petMood, petPixels } from './pet.js';
+import { api } from './api.js';
+import { isTouch } from './KeyBar.jsx';
+import PetPlayer from './pet/PetPlayer.jsx';
+import { agentState, textOf } from './pet/brain.js';
 
-const PET_KEY = 'll-chat-pet';
+/** 设置页改了宠物（换了、导入、删除）：对话页重新取 */
+export const PETS_CHANGED = 'll-pets-changed';
+const HIDE_KEY = 'll-chat-pet';
 
 function readHidden() {
   try {
-    return localStorage.getItem(PET_KEY) === 'off';
+    return localStorage.getItem(HIDE_KEY) === 'off';
   } catch {
     return false;
   }
 }
 
-export default function ChatPet({ phase }) {
-  const { t } = useTranslation();
-  const [hidden, setHidden] = useState(readHidden);
-  const [boop, setBoop] = useState(0);
-  // 什么时候做完的、从什么时候开始闲着：决定 done / sleep
-  const prev = useRef(phase);
-  const times = useRef({ doneAt: 0, idleSince: Date.now() });
-  if (prev.current !== phase) {
-    if (phase === 'idle') times.current = { doneAt: prev.current === 'running' || prev.current === 'approval' ? Date.now() : 0, idleSince: Date.now() };
-    prev.current = phase;
-  }
-  const [now, tick] = useReducer(() => Date.now(), Date.now());
-  const mood = petMood(phase, { ...times.current, now });
-  const [count, every] = PET_FRAMES[mood ?? 'idle'];
-  const [frame, setFrame] = useState(0);
-  const still = useMemo(() => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches, []);
+/** 一个对话用的宠物：`{ pet: { key, source, id, manifest } | null, size, lines }` */
+function usePet(id, active) {
+  const [cfg, setCfg] = useState(null);
   useEffect(() => {
-    if (!mood || hidden) return undefined;
-    const iv = setInterval(() => {
-      if (!still) setFrame((f) => (f + 1) % count);
-      tick();
-    }, every);
-    return () => clearInterval(iv);
-  }, [mood, hidden, count, every, still]);
-  const pixels = useMemo(() => (mood ? petPixels(mood, frame) : []), [mood, frame]);
+    if (!active) return undefined;
+    let dead = false;
+    const load = () =>
+      api.get(`/instances/${id}/pet`).then(
+        (r) => !dead && setCfg(r),
+        () => {},
+      );
+    load();
+    window.addEventListener(PETS_CHANGED, load);
+    return () => {
+      dead = true;
+      window.removeEventListener(PETS_CHANGED, load);
+    };
+  }, [id, active]);
+  return cfg;
+}
+
+export default function ChatPet({ id, active, status, touch }) {
+  const { t, i18n } = useTranslation();
+  const cfg = usePet(id, active);
+  const [hidden, setHidden] = useState(readHidden);
+  const prev = useRef(null);
+  const seq = useRef(0);
+  // 对话状态 → 宠物状态；跟上一次比，认出“刚做完”“刚出错”“一个工具刚结束”
+  const agent = useMemo(() => {
+    const r = agentState(status, prev.current);
+    prev.current = status ? { phase: status.phase, tool: status.tool ?? null, error: status.error ?? null } : null;
+    seq.current += 1;
+    return { ...r, n: seq.current };
+  }, [status?.phase, status?.tool, status?.error]);
+  const pet = cfg?.pet;
+  const fileUrl = useMemo(() => (pet ? (key) => `/instances/${id}/pet/file/${encodeURIComponent(pet.source)}/${encodeURIComponent(pet.id)}/${key}` : null), [id, pet?.key]);
   const toggle = (v) => {
     setHidden(v);
     try {
-      if (v) localStorage.setItem(PET_KEY, 'off');
-      else localStorage.removeItem(PET_KEY);
+      if (v) localStorage.setItem(HIDE_KEY, 'off');
+      else localStorage.removeItem(HIDE_KEY);
     } catch {
       // 存不了（隐私模式）：这次照样生效
     }
   };
-  if (!mood) return null;
+  // 嵌在终端页里的对话标签总是传 touch=false，按设备再认一次（手机上人物小一点）
+  if (!active || !pet) return null;
   if (hidden) {
     return (
-      <div className="chat-pet-dock">
-        <button type="button" className="chat-pet-peek" onClick={() => toggle(false)} title={t('chat.pet_show')} aria-label={t('chat.pet_show')} />
+      <div className="pet-layer">
+        <button type="button" className="pet-peek" onClick={() => toggle(false)} title={t('pet.show')} aria-label={t('pet.show')} />
       </div>
     );
   }
-  const label = t(`chat.pet_${{ work: 'working', wait: 'waiting', done: 'done', sleep: 'sleeping', idle: 'sleeping' }[mood]}`);
+  const name = textOf(pet.manifest.name, i18n.language);
   return (
-    <div className="chat-pet-dock">
-      <div className="chat-pet" data-mood={mood} key={mood === 'done' ? 'done' : 'pet'}>
-        {/* 换 key 让蹦一下的动画每次点都重新播 */}
-        <button type="button" className="chat-pet-body" key={boop} data-boop={boop ? '' : undefined} onClick={() => setBoop((n) => n + 1)} title={mood === 'idle' ? undefined : label} aria-label={label}>
-          <svg viewBox={`0 0 ${PET_W} ${PET_H}`} width={PET_W * 3} height={PET_H * 3} shapeRendering="crispEdges" aria-hidden="true">
-            {pixels.map(([x, y, c]) => (
-              <rect key={`${x}.${y}`} x={x} y={y} width="1.02" height="1.02" className={`pet-${c}`} />
-            ))}
-          </svg>
-          {mood === 'wait' && <span className="chat-pet-mark">!</span>}
-          {mood === 'sleep' && <span className="chat-pet-z">z</span>}
-          {mood === 'work' && (
-            <span className="chat-pet-bubbles">
-              <i />
-              <i />
-              <i />
-            </span>
-          )}
-        </button>
-        <button type="button" className="chat-pet-hide" onClick={() => toggle(true)} title={t('chat.pet_hide')} aria-label={t('chat.pet_hide')}>
-          <X size={11} />
-        </button>
-      </div>
-    </div>
+    <PetPlayer
+      key={pet.key}
+      manifest={pet.manifest}
+      fileUrl={fileUrl}
+      agent={agent}
+      height={(touch || isTouch() ? 96 : 130) * (cfg.size || 1)}
+      lines={cfg.lines !== false}
+      lang={i18n.language}
+      label={t('pet.label', { name })}
+      storeKey="ll-chat-pet-x"
+    >
+      <button type="button" className="pet-hide" onClick={() => toggle(true)} title={t('pet.hide')} aria-label={t('pet.hide')}>
+        <X size={11} />
+      </button>
+    </PetPlayer>
   );
 }

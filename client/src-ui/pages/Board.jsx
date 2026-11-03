@@ -325,7 +325,7 @@ export default function Board() {
       {feishuDown && (
         <div className="bd-notify">
           <Note kind="warn">
-            {t('board.feishu_down')} <Link to="/settings#notify">{t('board.feishu_down_fix')}</Link>
+            {t('board.feishu_down')} <Link to="/ai#notify">{t('board.feishu_down_fix')}</Link>
           </Note>
         </div>
       )}

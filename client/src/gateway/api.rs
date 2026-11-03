@@ -151,6 +151,14 @@ pub fn routes(app: App) -> Router<App> {
         .route("/prompts", get(get_prompts).post(create_prompt))
         .route("/prompts/seed", post(seed_prompts))
         .route("/prompts/{id}", put(update_prompt).delete(delete_prompt))
+        // 对话宠物（docs/PET_PACK.md §6.2）
+        .route("/pets", get(pets_list))
+        .route("/pets/settings", get(pets_settings).put(put_pets_settings))
+        .route("/pets/import", post(pets_import).layer(DefaultBodyLimit::max(crate::pets::MAX_PACK as usize + (1 << 20))))
+        .route("/pets/{source}/{id}", get(pets_manifest).delete(pets_delete))
+        .route("/pets/{source}/{id}/file/{*name}", get(pets_file))
+        .route("/instances/{id}/pet", get(instance_pet))
+        .route("/instances/{id}/pet/file/{source}/{pid}/{*name}", get(instance_pet_file))
         .route("/tips", get(get_tips).post(mark_tips).delete(reset_tips))
         .route("/tunnels", get(list_tunnels).post(create_tunnel))
         .route("/tunnels/{id}", patch(update_tunnel).delete(delete_tunnel))
@@ -2938,4 +2946,87 @@ mod tests {
         assert_eq!(quick.full_access, None);
         assert!(serde_json::to_value(&quick).unwrap().get("full_access").is_none());
     }
+}
+
+// ---------------- 对话宠物（docs/PET_PACK.md） ----------------
+
+#[derive(Deserialize)]
+struct FreshQ {
+    #[serde(default)]
+    fresh: bool,
+}
+
+async fn pets_list(State(app): State<App>, Query(q): Query<FreshQ>) -> Json<Value> {
+    let home = app.paths.home.clone();
+    Json(tokio::task::spawn_blocking(move || crate::pets::list_json(&home, q.fresh)).await.unwrap_or_default())
+}
+
+async fn pets_settings(State(app): State<App>) -> Json<crate::pets::PetSettings> {
+    Json(crate::pets::PetSettings::load(&app.store))
+}
+
+async fn put_pets_settings(State(app): State<App>, Json(s): Json<crate::pets::PetSettings>) -> R<Json<crate::pets::PetSettings>> {
+    Ok(Json(s.save(&app.store)?))
+}
+
+async fn pets_manifest(State(app): State<App>, Path((source, id)): Path<(String, String)>) -> R<Json<Value>> {
+    let home = app.paths.home.clone();
+    let p = tokio::task::spawn_blocking(move || crate::pets::find(&home, &source, &id)).await.ok().flatten().ok_or_else(LocalError::not_found)?;
+    Ok(Json(json!({ "key": p.key(), "source": p.source, "id": p.id, "manifest": p.manifest_out() })))
+}
+
+async fn pets_file(State(app): State<App>, Path((source, id, name)): Path<(String, String, String)>) -> R<Response> {
+    crate::pets::serve(app.paths.home.clone(), source, id, name).await
+}
+
+/// 请求体是 zip（`.llpet`）：先存成临时文件再解压
+async fn pets_import(State(app): State<App>, body: axum::body::Body) -> R<Json<Value>> {
+    use futures_util::StreamExt;
+    let base = crate::pets::local_dir(&app.paths.home);
+    tokio::fs::create_dir_all(&base).await?;
+    let tmp = tempfile::Builder::new().prefix(".upload-").suffix(".zip").tempfile_in(&base).map_err(anyhow::Error::from)?;
+    let (file, path) = tmp.into_parts();
+    let mut f = tokio::fs::File::from_std(file);
+    let mut stream = body.into_data_stream();
+    let mut size = 0u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| LocalError::new("UPLOAD_FAILED").with("message", e.to_string()))?;
+        size += chunk.len() as u64;
+        if size > crate::pets::MAX_PACK {
+            return Err(crate::pets::pack_error(crate::pets::PackError { code: "too_big", detail: String::new() }));
+        }
+        tokio::io::AsyncWriteExt::write_all(&mut f, &chunk).await?;
+    }
+    drop(f);
+    let home = app.paths.home.clone();
+    let pack = tokio::task::spawn_blocking(move || {
+        let r = crate::pets::import(&home, &path);
+        drop(path);
+        r
+    })
+    .await
+    .map_err(anyhow::Error::from)?
+    .map_err(crate::pets::pack_error)?;
+    Ok(Json(pack.summary()))
+}
+
+async fn pets_delete(State(app): State<App>, Path((source, id)): Path<(String, String)>) -> R<StatusCode> {
+    if source != "local" {
+        return Err(LocalError::new("FORBIDDEN"));
+    }
+    crate::pets::remove(&app.paths.home, &id)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// 对话页：按这个终端的启动类型（claude / codex / dsh / opencode）选宠物
+async fn instance_pet(State(app): State<App>, Path(id): Path<String>) -> R<Json<Value>> {
+    let row = app.store.instance(&id)?.ok_or_else(LocalError::not_found)?;
+    let home = app.paths.home.clone();
+    let store = app.store.clone();
+    Ok(Json(tokio::task::spawn_blocking(move || crate::pets::for_agent(&home, &store, &row.launch)).await.unwrap_or_default()))
+}
+
+async fn instance_pet_file(State(app): State<App>, Path((id, source, pid, name)): Path<(String, String, String, String)>) -> R<Response> {
+    app.store.instance(&id)?.ok_or_else(LocalError::not_found)?;
+    crate::pets::serve(app.paths.home.clone(), source, pid, name).await
 }

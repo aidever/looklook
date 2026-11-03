@@ -1,8 +1,9 @@
 // 设置：按分区显示，一次只看一个分区（地址里的 #分区 决定）。
-//   通用：电脑名称、语言、附件；终端：字体与配色、新终端的默认文件夹和 shell、新 AI 会话默认的权限；AI 模型：模型服务商；
-//   通知：飞书通知（Notify.jsx）；网络与访问：远程线路、直连（端口与公网地址）、访问控制；关于：版本、检查更新、问题记录。
+//   通用：电脑名称、语言、附件；终端：字体与配色、新终端的默认文件夹和 shell、新 AI 会话默认的权限；
+//   网络与访问：远程线路、直连（端口与公网地址）、访问控制；关于：版本、检查更新、问题记录。
+// 和 AI 有关的（账号与模型、通知与飞书、工具与权限、宠物）在“AI 助手”页（Ai.jsx），以前指到这里的锚点转过去。
 // 终端和通用里的选项改了就自动保存，不需要点保存按钮。
-import { Bell, Bot, Check, Globe, Info, SlidersHorizontal, SquareTerminal, Eraser } from 'lucide-react';
+import { Bot, Check, Globe, Info, SlidersHorizontal, SquareTerminal, Eraser } from 'lucide-react';
 import { IdleCleanupDialog } from '../shared/IdleCleanup.jsx';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -15,10 +16,7 @@ import AccessCard from './Access.jsx';
 import DirectCard from './DirectConnect.jsx';
 import { AttachmentsCard } from '../shared/Attachments.jsx';
 import { MacFoldersCard } from '../shared/MacFolders.jsx';
-import ClaudeProfilesCard, { CodexProfilesCard } from './ClaudeProfiles.jsx';
-import UsageStatsCard from './UsageStats.jsx';
-import GuardCard from './Guard.jsx';
-import NotifySection from './Notify.jsx';
+import { MOVED_TO_AI } from './Ai.jsx';
 import { FolderField, ShellPicker } from './Terminals.jsx';
 import { setLocale } from '../shared/i18n.js';
 import { termTheme } from '../shared/termTheme.js';
@@ -58,13 +56,11 @@ export { Seg };
 const SECTIONS = [
   ['general', SlidersHorizontal],
   ['terminal', SquareTerminal],
-  ['ai', Bot],
-  ['notify', Bell],
   ['network', Globe],
   ['about', Info],
 ];
-// 别处链接用的锚点（#model、#claude-accounts、#relays、#access）落到所在的分区
-const ALIAS = { model: 'ai', 'claude-accounts': 'ai', 'codex-profiles': 'ai', usage: 'ai', [RELAYS_ANCHOR]: 'network', access: 'network' };
+// 别处链接用的锚点（#relays、#access）落到所在的分区
+const ALIAS = { [RELAYS_ANCHOR]: 'network', access: 'network' };
 
 function sectionOf(hash) {
   const h = hash.replace(/^#/, '');
@@ -269,15 +265,6 @@ export default function Settings() {
         </Card>
       </>
     ),
-    ai: (
-      <>
-        <ClaudeProfilesCard />
-        <CodexProfilesCard />
-        <UsageStatsCard />
-        <GuardCard />
-      </>
-    ),
-    notify: <NotifySection />,
     network: (
       <>
         {(devices.localOnly || (devices.canLocalOnly && (!devices.multi || devices.selected === devices.def))) && (
@@ -318,6 +305,12 @@ export default function Settings() {
     ),
   };
 
+  // 以前在这里的 AI 分区（#ai、#notify、#pet、#claude-accounts 等）搬到了 AI 助手页
+  const moved = MOVED_TO_AI.has(hash.replace(/^#/, ''));
+  useEffect(() => {
+    if (moved) navigate(`/ai${hash}`, { replace: true });
+  }, [moved, hash, navigate]);
+
   // 从别处带着 #access 跳过来时滚到访问控制
   useEffect(() => {
     if (hash === '#access') setTimeout(() => document.getElementById('access')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
@@ -353,6 +346,18 @@ export default function Settings() {
               {id === 'about' && updateDot && <span className="dot-badge" aria-label={t('update.badge')} />}
             </a>
           ))}
+          {/* AI 账号、通知与飞书、工具、宠物搬到了 AI 助手页：在这里找的人点一下过去 */}
+          <a
+            href="/ai"
+            className="settings-tab"
+            onClick={(e) => {
+              e.preventDefault();
+              navigate('/ai');
+            }}
+          >
+            <Bot size={18} aria-hidden="true" />
+            <span>{t('nav.ai')} →</span>
+          </a>
         </nav>
         <div className="settings-body">
           {(section === 'general' || section === 'terminal') && (

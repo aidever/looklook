@@ -161,7 +161,19 @@
   "reason": {
     "MEMBERSHIP_EXPIRED": "membership expired",
     "ACCOUNT_DISABLED": "account disabled",
-    "OFFLINE_TOO_LONG": "haven't reached the Looklook server for a long time"
+    "OFFLINE_TOO_LONG": "haven't reached the Looklook server for a long time",
+    "pet_manifest": "Can't read pet.json: {{detail}}",
+    "pet_field": "pet.json: {{detail}} is missing or invalid",
+    "pet_version": "Unsupported format version {{detail}}; update Looklook",
+    "pet_missing_file": "Missing file {{detail}}",
+    "pet_too_big": "File too large {{detail}} (≤ 8 MB each, ≤ 200 MB per pack)",
+    "pet_too_many": "Too many files (400 max)",
+    "pet_bad_name": "Bad file name: {{detail}} (lowercase letters, digits, . _ - only)",
+    "pet_bad_clip": "Clip {{detail}} has invalid settings",
+    "pet_bad_ref": "Uses a clip that isn't listed: {{detail}}",
+    "pet_bad_image": "Sprite sheet unreadable or wrong size: {{detail}}",
+    "pet_bad_zip": "Not a valid zip: {{detail}}",
+    "pet_io": "File error: {{detail}}"
   },
   "AUTHORIZATION_PENDING": "Waiting for approval",
   "AUTHORIZATION_EXPIRED": "Authorization expired. Please try again",
@@ -265,5 +277,8 @@
   "DSH_UNAUTHORIZED": "DSH rejected the sign-in; try again, or restart dsh web",
   "DSH_REQUEST_FAILED": "DSH couldn't do it: {{detail}}",
   "DSH_START": "dsh web didn't start ({{detail}}). See the log run/dsh-web.log",
-  "DSH_IMAGES_UNSUPPORTED": "The selected model can't take images. Pick one that does (for example Flash) in the model menu and send again"
+  "DSH_IMAGES_UNSUPPORTED": "The selected model can't take images. Pick one that does (for example Flash) in the model menu and send again",
+  "PET_INVALID": "Pet pack problem: {{reason_text}}",
+  "TOO_LARGE": "File too large",
+  "UPLOAD_FAILED": "Upload failed: {{message}}"
 }

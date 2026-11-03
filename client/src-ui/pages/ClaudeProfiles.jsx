@@ -764,7 +764,7 @@ function ProfilePick({ agent, client, device, value, onChange, className = 'btn 
           onClick: () => onChange(p.id === def.id ? null : p.id),
         })),
         'sep',
-        { label: t(`${cfg.t}.manage`), onClick: () => navigate(`/settings#${cfg.anchor}`) },
+        { label: t(`${cfg.t}.manage`), onClick: () => navigate(`/ai#${cfg.anchor}`) },
       ]}
     />
   );

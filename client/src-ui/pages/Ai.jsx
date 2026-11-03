@@ -1,17 +1,25 @@
-// AI 助手：MCP 接口（令牌、一键装进 Codex / Claude Code / OpenCode / DSH）和它给 AI 助手的全部工具，
-// 一处看清 AI 能做什么：本机网页的工具，SSH 工具的总开关和每台主机“允许 AI 使用”的快捷开关，
-// 以及飞书：引导装飞书官方的 lark-cli，AI 助手用它以你本人的身份读、发飞书。
-// 开关远程也能改；MCP 的令牌和装进 AI 助手只能直接在这台电脑上看、做（见 PagesMcp.jsx）。
-import { Bot, Globe, MessageSquare, Server, Wrench } from 'lucide-react';
+// AI 助手：和 AI 有关的设置都在这一页，按“想做什么”分四块，顶上四张卡片就是目录，各写着现在的状态：
+// - 账号与模型：Claude Code / Codex 账号（换账号、第三方模型服务）、用量；
+// - 离开电脑也能用：AI 做完、要确认时通知你（飞书、Webhook），飞书机器人里直接和会话聊；
+// - 工具与权限：MCP 接口（令牌、一键装进 Codex / Claude Code / OpenCode / DSH）和它给 AI 助手的工具，自动审批；
+// - 宠物：对话界面角落的宠物。
+// 以前在“设置”里的 #ai、#notify、#pet、#claude-accounts 等链接都转到这里（Settings.jsx）。
+// MCP 开关远程也能改；令牌和装进 AI 助手只能直接在这台电脑上看、做（见 PagesMcp.jsx）。
+import { Bell, Bot, Globe, MessageSquare, PawPrint, Server, ShieldCheck, UserCog, Wrench } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { api } from '../shared/api.js';
 import { errorText } from '../shared/i18n.js';
-import { Link } from '../shared/router.jsx';
+import { Link, useRouter } from '../shared/router.jsx';
 import { Button, Card, CopyButton, ErrorNote, Skeleton, Switch, useAction, useLoad, useToast } from '../shared/ui.jsx';
 import { HelpLink } from '../shared/help.jsx';
+import ClaudeProfilesCard, { CodexProfilesCard } from './ClaudeProfiles.jsx';
+import GuardCard from './Guard.jsx';
+import NotifySection from './Notify.jsx';
 import McpCard from './PagesMcp.jsx';
+import PetSection from './PetSettings.jsx';
+import UsageStatsCard from './UsageStats.jsx';
 
 const PAGE_TOOLS = ['list_mappings', 'find_mapping', 'ensure_mapping'];
 const SSH_TOOLS = ['list_ssh_hosts', 'ssh_run'];
@@ -177,10 +185,81 @@ function ToolsCard({ version }) {
   );
 }
 
+const HUB = [
+  { id: 'accounts', icon: UserCog },
+  { id: 'remote', icon: Bell },
+  { id: 'tools', icon: ShieldCheck },
+  { id: 'pet', icon: PawPrint },
+];
+// 别处（包括以前设置页里）的锚点落到哪一块
+const HUB_ALIAS = {
+  ai: 'accounts',
+  model: 'accounts',
+  'claude-accounts': 'accounts',
+  'codex-profiles': 'accounts',
+  usage: 'accounts',
+  notify: 'remote',
+  feishu: 'remote',
+  mcp: 'tools',
+  guard: 'tools',
+};
+/** 这些锚点以前在设置页，现在在这一页（Settings.jsx 收到了就转过来） */
+export const MOVED_TO_AI = new Set([...Object.keys(HUB_ALIAS), 'pet']);
+
+function hubOf(hash) {
+  const h = hash.replace(/^#/, '');
+  const id = HUB_ALIAS[h] ?? h;
+  return HUB.some((x) => x.id === id) ? id : 'accounts';
+}
+
+/** 顶上四张卡片的状态：取不到（旧版客户端没有接口等）就不写 */
+function useHubStatus(version) {
+  const { t } = useTranslation();
+  const [st, setSt] = useState({});
+  useEffect(() => {
+    let alive = true;
+    const get = (u) => api.get(u).catch(() => null);
+    Promise.all([get('/claude-profiles'), get('/codex-profiles'), get('/notify'), get('/mcp'), get('/pets/settings'), get('/pets')]).then(([cp, xp, n, m, ps, pets]) => {
+      if (!alive) return;
+      const c = cp?.profiles?.length ?? 0;
+      const x = xp?.profiles?.length ?? 0;
+      const feishu = n?.feishu;
+      const hooks = n?.hooks?.length ?? 0;
+      const petCount = pets?.items?.length;
+      setSt({
+        accounts: cp || xp ? { text: c + x ? t('ai.hub.accounts_n', { claude: c, codex: x }) : t('ai.hub.accounts_none'), ok: c + x > 0 } : null,
+        remote: n
+          ? feishu?.bound
+            ? n.status?.connected === false && n.status?.error
+              ? { text: t('ai.hub.feishu_down'), warn: true }
+              : { text: t('ai.hub.feishu_on'), ok: true }
+            : hooks
+              ? { text: t('ai.hub.hooks_n', { count: hooks }), ok: true }
+              : { text: t('ai.hub.remote_none') }
+          : null,
+        tools: m ? (m.enabled ? { text: t('ai.hub.mcp_on'), ok: true } : { text: t('ai.hub.mcp_off') }) : null,
+        pet: ps
+          ? ps.enabled && petCount !== 0
+            ? { text: t('ai.hub.pet_on'), ok: true }
+            : { text: petCount === 0 ? t('ai.hub.pet_none') : t('ai.hub.pet_off') }
+          : null,
+      });
+    });
+    return () => {
+      alive = false;
+    };
+  }, [version, t]);
+  return st;
+}
+
 export default function AiPage() {
   const { t } = useTranslation();
-  // MCP 开关一变，工具卡片跟着刷新
+  const { hash, navigate } = useRouter();
+  const hub = hubOf(hash);
+  // MCP 开关一变，工具卡片跟着刷新；换一块时顶上的状态也重新取
   const [version, setVersion] = useState(0);
+  const status = useHubStatus(`${hub}:${version}`);
+  const go = (id) => navigate(`/ai#${id}`, { replace: true });
   return (
     <>
       <div className="page-head">
@@ -188,9 +267,55 @@ export default function AiPage() {
           <Bot size={24} aria-hidden="true" /> {t('ai.title')} <HelpLink page="ai" />
         </h1>
       </div>
-      <p className="muted">{t('ai.intro')}</p>
-      <McpCard onChange={() => setVersion((v) => v + 1)} />
-      <ToolsCard version={version} />
+      <p className="muted">{t('ai.hub.intro')}</p>
+      <nav className="ai-hub" aria-label={t('ai.title')}>
+        {HUB.map(({ id, icon: Icon }) => {
+          const s = status[id];
+          return (
+            <a
+              key={id}
+              href={`/ai#${id}`}
+              className={`ai-hub-item${hub === id ? ' active' : ''}`}
+              aria-current={hub === id ? 'page' : undefined}
+              onClick={(e) => {
+                e.preventDefault();
+                go(id);
+              }}
+            >
+              <span className="ai-hub-icon" aria-hidden="true">
+                <Icon size={18} />
+              </span>
+              <span className="ai-hub-text">
+                <b>{t(`ai.hub.${id}`)}</b>
+                <span className="small muted">{t(`ai.hub.${id}_desc`)}</span>
+                {s && (
+                  <span className={`ai-hub-state small${s.ok ? ' ok' : ''}${s.warn ? ' warn' : ''}`}>
+                    <i aria-hidden="true" />
+                    {s.text}
+                  </span>
+                )}
+              </span>
+            </a>
+          );
+        })}
+      </nav>
+      {hub === 'accounts' && (
+        <>
+          <ClaudeProfilesCard />
+          <CodexProfilesCard />
+          <UsageStatsCard />
+        </>
+      )}
+      {hub === 'remote' && <NotifySection />}
+      {hub === 'tools' && (
+        <>
+          <p className="muted">{t('ai.intro')}</p>
+          <McpCard onChange={() => setVersion((v) => v + 1)} />
+          <ToolsCard version={version} />
+          <GuardCard />
+        </>
+      )}
+      {hub === 'pet' && <PetSection />}
     </>
   );
 }

@@ -13,7 +13,7 @@ import { deviceName, useDevices } from './devices.jsx';
 import { errorText } from './i18n.js';
 import { isMod, keyLabel } from './hotkeys.js';
 import { useRouter } from './router.jsx';
-import { projectPath, sessionDir, sessionState, sessionTitle, useSessions } from './sessions.jsx';
+import { projectPath, sessionDir, sessionLaunch, sessionState, sessionTitle, useSessions } from './sessions.jsx';
 import { useToast } from './ui.jsx';
 import { imeComposing } from './ime.js';
 
@@ -95,7 +95,7 @@ export default function QuickSwitch() {
       const d = devices.multi ? dev(terminalDevice(i.id)) : '';
       const sub = [d, sessionDir(i)].filter(Boolean).join(' · ');
       const sc = score(words, title, `${sub} ${i.launch} ${i.name ?? ''}`);
-      if (sc) out.push({ key: `s:${i.id}`, group: 'sessions', sc: sc + (order(i) === 0 ? 0.5 : 0), icon: <LaunchIcon launch={i.launch} size={16} />, title, sub, state: sessionState(i), run: () => ui.openSession(i.id) });
+      if (sc) out.push({ key: `s:${i.id}`, group: 'sessions', sc: sc + (order(i) === 0 ? 0.5 : 0), icon: <LaunchIcon launch={sessionLaunch(i)} size={16} />, title, sub, state: sessionState(i), run: () => ui.openSession(i.id) });
     }
     for (const p of s.projects) {
       const sub = [dev(p.device), p.container ? `${p.container.name}:${p.container.dir}` : p.workdir].filter(Boolean).join(' · ');

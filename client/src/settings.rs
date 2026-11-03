@@ -40,6 +40,8 @@ pub struct Settings {
     pub attach_days: u16,
     /// 新建 AI 会话（Claude Code / Codex / OpenCode）默认带全部权限。项目里用过的跟着那个项目上次的（界面决定）
     pub default_full_access: bool,
+    /// 后台会话这么多天没在界面上打开过就自动停掉（会话留着，点开重新启动；有命令、AI 在跑的不停）。0 = 不自动停
+    pub idle_stop_days: u16,
 }
 
 impl Default for Settings {
@@ -55,6 +57,7 @@ impl Default for Settings {
             auto_update: true,
             attach_days: 7,
             default_full_access: false,
+            idle_stop_days: 7,
         }
     }
 }
@@ -131,6 +134,7 @@ impl Settings {
         self.theme_rev = THEME_REV;
         self.font_size = self.font_size.clamp(10, 28);
         self.attach_days = self.attach_days.clamp(1, 365);
+        self.idle_stop_days = self.idle_stop_days.min(365);
         self.default_workdir = self.default_workdir.trim().to_string();
         if self.default_workdir.is_empty() {
             self.default_workdir = default_workdir();

@@ -6,7 +6,7 @@ import { ArrowUp, BookOpen, ChevronRight, Code2, Copy, Download, Eye, EyeOff, Fi
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { deviceApi, fetchRaw, plainLinksWork, selectedDevice, terminalDevice } from '../shared/api.js';
+import { deviceApi, fetchRaw, plainLinksWork, rtcMode, saveViaFrame, selectedDevice, terminalDevice } from '../shared/api.js';
 import { errorText } from '../shared/i18n.js';
 import Markdown, { isMarkdown } from '../shared/Markdown.jsx';
 import { OFFICE_MAX, officeKind, parseCsv, WHOLE } from '../shared/office.js';
@@ -74,6 +74,8 @@ function DownloadLink({ ep, entry, size = 15 }) {
     );
   }
   const save = async () => {
+    // 远程（WebRTC）：经 iframe 边收边存，不整个取进内存
+    if (rtcMode) return saveViaFrame(`/api${ep.download(entry.path)}`, selectedDevice());
     try {
       const blob = await (await fetchRaw(ep.download(entry.path))).blob();
       const url = URL.createObjectURL(blob);

@@ -95,6 +95,34 @@ export default function UsageStatsCard() {
               </div>
             </div>
             <DayBars days={data.days} />
+            {data.accounts?.length > 0 && (
+              <div className="table-wrap">
+                <table className="table usage-table">
+                  <thead>
+                    <tr>
+                      <th>{t('usage.col_account')}</th>
+                      <th className="num">{t('usage.col_tokens')}</th>
+                      <th className="num">{t('usage.col_cost')}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.accounts.map((a) => (
+                      <tr key={`${a.agent}/${a.account}`}>
+                        <td>
+                          {a.name || t(a.kind === 'official' ? 'usage.account_default' : 'usage.account_api')}
+                          <span className="muted">
+                            {' · '}
+                            {AGENT_NAME[a.agent] ?? a.agent} · {t(`usage.kind_${a.kind || 'official'}`)}
+                          </span>
+                        </td>
+                        <td className="num">{tokens(a.tokens)}</td>
+                        <td className="num">{money(a.cost)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
             {data.models.length > 0 && (
               <div className="table-wrap">
                 <table className="table usage-table">
@@ -129,7 +157,7 @@ export default function UsageStatsCard() {
               </div>
             )}
             <p className="muted small" style={{ margin: '12px 0 0' }}>
-              {t('usage.note')}
+              {t('usage.note')} {data.accounts?.length > 1 ? t('usage.accounts_note') : ''}
               {data.pricing ? ` ${t('usage.pricing_at', { at: formatTime(data.pricing.fetched_at) })}` : ` ${t('usage.pricing_none')}`}
               {data.scanned_at && ` ${t('usage.scanned_at', { at: formatTime(data.scanned_at) })}`}
             </p>

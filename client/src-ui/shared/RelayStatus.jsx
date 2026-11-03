@@ -11,7 +11,7 @@ import { useTranslation } from 'react-i18next';
 import { useStatus } from '../App.jsx';
 import { api } from './api.js';
 import { deviceName, useDevices } from './devices.jsx';
-import { lossLevel, lossText, usePaths } from './paths.jsx';
+import { lossLevel, lossText, PathRows, usePaths, usePop } from './paths.jsx';
 import { errorText } from './i18n.js';
 import { RELAYS_ANCHOR } from './RelayPicker.jsx';
 import { Link } from './router.jsx';
@@ -131,24 +131,6 @@ const SLOW_MS = 150;
 const VERY_SLOW_MS = 400;
 
 /** 点开胶囊、点外面或按 Esc 关上。 */
-function usePop() {
-  const [open, setOpen] = useState(false);
-  const ref = useRef(null);
-  useEffect(() => {
-    if (!open) return undefined;
-    const close = (e) => {
-      if (e.type === 'keydown' ? e.key === 'Escape' : !ref.current?.contains(e.target)) setOpen(false);
-    };
-    document.addEventListener('pointerdown', close);
-    document.addEventListener('keydown', close);
-    return () => {
-      document.removeEventListener('pointerdown', close);
-      document.removeEventListener('keydown', close);
-    };
-  }, [open]);
-  return { open, setOpen, ref };
-}
-
 /** 本机打开：远程通道的状态、重连、换线路。 */
 function LocalPop() {
   const { t } = useTranslation();
@@ -200,22 +182,7 @@ function RemotePop({ ms, name, path }) {
         <dd className="ok-text">
           <Lock size={13} aria-hidden="true" /> {t('conn.e2e')}
         </dd>
-        <dt>{t('conn.latency')}</dt>
-        <dd>{ms === null ? '—' : t('nav.remote_ms', { ms })}</dd>
-        <dt>{t('conn.loss')}</dt>
-        <dd className={path?.loss != null ? `loss-${lossLevel(path.loss)}` : undefined}>{lossText(path?.loss) ?? '—'}</dd>
-        {path && (
-          <>
-            <dt>{t('path.label')}</dt>
-            <dd>
-              <span className={`dot path-${path.kind}`} aria-hidden="true" style={{ display: 'inline-block', width: 7, height: 7, marginRight: 6 }} />
-              {t(`path.${path.kind}`)}
-              <span className="muted small" style={{ display: 'block' }}>
-                {path.local} ⟷ {path.remote}
-              </span>
-            </dd>
-          </>
-        )}
+        <PathRows p={path} ms={ms} />
         {status.relay_check?.current && (
           <>
             <dt>{t('conn.route_label')}</dt>
@@ -267,7 +234,8 @@ export function ConnChip() {
     const loss = lossLevel(path?.loss) ?? 'ok';
     kind = lag === 'bad' || loss === 'bad' ? 'bad' : lag === 'warn' || loss === 'warn' ? 'warn' : 'ok';
     label = t('conn.remote');
-    sub = ms === null ? null : t('nav.remote_ms', { ms });
+    // 丢包偏高时也写在胶囊上，点开看详情
+    sub = [ms === null ? null : t('nav.remote_ms', { ms }), loss !== 'ok' ? t('path.loss', { loss: lossText(path.loss) }) : null].filter(Boolean).join(' · ') || null;
   }
   return (
     <span className="relay-pill-wrap" ref={ref}>

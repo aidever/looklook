@@ -2,7 +2,8 @@
 //   通用：电脑名称、语言、附件；终端：字体与配色、新终端的默认文件夹和 shell、新 AI 会话默认的权限；AI 模型：模型服务商；
 //   通知：飞书通知（Notify.jsx）；网络与访问：远程线路、直连（端口与公网地址）、访问控制；关于：版本、检查更新、问题记录。
 // 终端和通用里的选项改了就自动保存，不需要点保存按钮。
-import { Bell, Bot, Check, Globe, Info, SlidersHorizontal, SquareTerminal } from 'lucide-react';
+import { Bell, Bot, Check, Globe, Info, SlidersHorizontal, SquareTerminal, Eraser } from 'lucide-react';
+import { IdleCleanupDialog } from '../shared/IdleCleanup.jsx';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -72,7 +73,7 @@ function sectionOf(hash) {
 }
 
 // 自动保存的设置项（配色在终端页里换，自动更新、附件保留天数在各自的卡片里单独保存）
-const KEYS = ['font', 'font_size', 'default_workdir', 'default_shell', 'device_name', 'default_full_access'];
+const KEYS = ['font', 'font_size', 'default_workdir', 'default_shell', 'device_name', 'default_full_access', 'idle_stop_days'];
 const differs = (a, b) => (k) => String(a[k] ?? '') !== String(b[k] ?? '');
 const same = (a, b) => !KEYS.some(differs(a, b));
 
@@ -85,7 +86,7 @@ function useAutoSave(status, reload) {
   latest.current = { s, status };
 
   // 只发改了的项：其余的（包括别的电脑刚同步过来的）由后端沿用现在的值
-  const body = (v) => Object.fromEntries(KEYS.filter(differs(v, saved.current)).map((k) => [k, k === 'font_size' ? Number(v[k]) : v[k]]));
+  const body = (v) => Object.fromEntries(KEYS.filter(differs(v, saved.current)).map((k) => [k, k === 'font_size' || k === 'idle_stop_days' ? Number(v[k]) : v[k]]));
 
   // 没有未保存的改动时跟着最新状态走（比如别的电脑同步来了新字号）
   useEffect(() => {
@@ -122,6 +123,32 @@ function useAutoSave(status, reload) {
   );
 
   return [s, setS, state];
+}
+
+/** 后台会话：几天没打开就自动停掉，以及立即清理（shared/IdleCleanup.jsx） */
+function IdleCard({ value, onChange }) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  return (
+    <Card title={t('idle.card')}>
+      <Field label={t('idle.auto_label')} hint={t('idle.auto_hint')}>
+        <Seg
+          value={Number(value)}
+          label={t('idle.auto_label')}
+          onChange={onChange}
+          options={[0, 1, 3, 7, 14, 30].map((d) => [d, d ? t('idle.n_days', { n: d }) : t('idle.never')])}
+        />
+      </Field>
+      <Field label={t('idle.now_label')} hint={t('idle.now_hint')}>
+        <div>
+          <Button variant="secondary" icon={Eraser} onClick={() => setOpen(true)}>
+            {t('idle.menu')}
+          </Button>
+        </div>
+      </Field>
+      {open && <IdleCleanupDialog onClose={() => setOpen(false)} />}
+    </Card>
+  );
 }
 
 /** 使用提示：看过的一次性提示、上手清单都重新出现（shared/tips.jsx）。 */
@@ -197,6 +224,7 @@ export default function Settings() {
         </Card>
         {caps.os === 'darwin' && status.access === 'local' && <MacFoldersCard />}
         <SyncCard />
+        <IdleCard value={s.idle_stop_days ?? 7} onChange={set('idle_stop_days')} />
         <AttachmentsCard />
       </>
     ),

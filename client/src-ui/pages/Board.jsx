@@ -10,7 +10,7 @@ import { awayRecap, boardSort, boardSpan, boardState, boardSummary, useAwaySince
 import { DeviceTag, LaunchIcon } from '../shared/brands.jsx';
 import { useDevices } from '../shared/devices.jsx';
 import { errorText } from '../shared/i18n.js';
-import { baseName, useSessions } from '../shared/sessions.jsx';
+import { baseName, sessionLaunch, useSessions } from '../shared/sessions.jsx';
 import { spinnerText } from '../shared/spinner.js';
 import { spanText } from '../shared/time.js';
 import { Link, useRouter } from '../shared/router.jsx';
@@ -100,7 +100,7 @@ function Row({ i, state, selected, onSelect, now, act }) {
   return (
     <button type="button" className={`bd-row bd-${state} ${selected ? 'selected' : ''}`} onClick={onSelect} aria-expanded={selected}>
       <StateIcon state={state} outcome={c.turn?.outcome} />
-      <LaunchIcon launch={i.launch} size={18} className="bd-agent" />
+      <LaunchIcon launch={sessionLaunch(i)} size={18} className="bd-agent" />
       <span className="bd-text">
         <span className="bd-title-line">
           <b className="ellipsis">{title}</b>
@@ -379,7 +379,7 @@ export default function Board() {
                 <div className="bd-rest-list">
                   {[...groups.idle, ...groups.stopped].map((i) => (
                     <button key={i.id} type="button" className="bd-rest-row" onClick={() => openSession(i.id)}>
-                      <LaunchIcon launch={i.launch} size={16} />
+                      <LaunchIcon launch={sessionLaunch(i)} size={16} />
                       <span className="ellipsis">{i.chat?.title || i.name || baseName(i.workdir)}</span>
                       <span className="muted small">{t(boardState(i) === 'idle' ? 'board.idle' : 'board.stopped')}</span>
                     </button>
@@ -392,7 +392,7 @@ export default function Board() {
         {!narrow && selected && (
           <aside className="bd-side" aria-label={t('board.detail')}>
             <div className="bd-side-head">
-              <LaunchIcon launch={selected.launch} size={24} />
+              <LaunchIcon launch={sessionLaunch(selected)} size={24} />
               <span className="grow">
                 <b className="ellipsis">{selected.chat?.title || selected.name || baseName(selected.workdir)}</b>
                 <span className="muted small ellipsis">{selected.workdir}</span>

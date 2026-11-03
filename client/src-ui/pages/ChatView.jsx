@@ -17,6 +17,7 @@ import {
   Brain,
   Check,
   ChevronDown,
+  ChevronUp,
   ChevronLeft,
   ChevronRight,
   Copy,
@@ -40,9 +41,8 @@ import {
   Image as ImageIcon,
   Download,
   Expand,
-  ZoomIn,
-  ZoomOut,
   Layers,
+  ListEnd,
   ListTodo,
   LoaderCircle,
   MessageCircleQuestion,
@@ -56,6 +56,7 @@ import {
   Square,
   SquareTerminal,
   TriangleAlert,
+  Undo2,
   WifiOff,
   Wrench,
   X,
@@ -114,6 +115,7 @@ import { copyText } from '../shared/chatCopy.js';
 import ErrorBoundary from '../shared/ErrorBoundary.jsx';
 import { errorText } from '../shared/i18n.js';
 import Markdown from '../shared/Markdown.jsx';
+import ImageViewer from '../shared/ImageViewer.jsx';
 import { useRouter } from '../shared/router.jsx';
 import { useSessions } from '../shared/sessions.jsx';
 import { formatTime, parseInstant, relativeTime, spanText } from '../shared/time.js';
@@ -130,6 +132,7 @@ import { ChatHowTo, NotifyAsk } from './ChatTips.jsx';
 import { endpoints as fileEndpoints, Preview as FilePreview } from './FileBrowser.jsx';
 import { imeComposing } from '../shared/ime.js';
 import { shownFocus } from '../shared/termFrame.js';
+import { splitTitle } from '../shared/title.js';
 
 // ---------------- 数据 ----------------
 
@@ -743,7 +746,7 @@ function ReadImage({ id, path }) {
       <button type="button" className="chat-read-img" onClick={() => setBig(true)} disabled={!src} aria-label={t('chat.res_view')} title={path}>
         {src ? <img src={src} alt={fileName(path)} loading="lazy" decoding="async" onError={() => setBroken(true)} /> : <LoaderCircle size={16} className="spin" aria-hidden="true" />}
       </button>
-      {big && <Lightbox urls={[url]} names={[fileName(path)]} index={0} onIndex={() => {}} onClose={() => setBig(false)} />}
+      {big && <ImageViewer images={[{ url, name: fileName(path) }]} onClose={() => setBig(false)} />}
     </>
   );
 }
@@ -783,7 +786,7 @@ function GenFigure({ id, name, caption }) {
       <button type="button" className="chat-gen-zoom" onClick={() => setBig(true)} disabled={!src} aria-label={t('chat.res_view')} title={t('chat.res_view')}>
         <GenImage src={src} name={name} />
       </button>
-      {big && <Lightbox urls={[genFileUrl(id, name)]} names={[name]} index={0} onIndex={() => {}} onClose={() => setBig(false)} />}
+      {big && <ImageViewer images={[{ url: genFileUrl(id, name), name }]} onClose={() => setBig(false)} />}
       <figcaption className="chat-gen-acts">
         <span className="chat-note ellipsis" title={caption || name}>
           {caption || name}
@@ -1043,11 +1046,18 @@ function ReplyEnd({ text, all, turn }) {
 }
 
 /** 用户消息：电脑上悬停出现复制、填回输入框；手机上长按弹出菜单 */
+/** 你发的话超过这么多字或这么多行就先收起 */
+const LONG_CHARS = 800;
+const LONG_LINES = 12;
+
 function UserItem({ id, item, thumbs }) {
   const { t } = useT();
   const [sheet, setSheet] = useState(false);
   const text = item.text.trim();
   const press = useLongPress(() => text && setSheet(true));
+  // 很长的（贴进来的日志、文档）先收起，只露开头几行，点了再展开
+  const long = text.length > LONG_CHARS || text.split('\n').length > LONG_LINES;
+  const [expanded, setExpanded] = useState(false);
   return (
     <div className="chat-user" data-mid={item.mid ? '' : undefined} data-key={item.key}>
       {/* Claude 在忙时发的：这一步做完就并进了这一轮 */}
@@ -1060,10 +1070,16 @@ function UserItem({ id, item, thumbs }) {
       {/* 图片小图：从记录里取（Claude 的 transcript、Codex 的 rollout 里都有图片本身） */}
       {thumbs && <UserImages id={id} itemKey={item.key} n={item.images} />}
       {(text || (item.images > 0 && !thumbs)) && (
-        <div className="chat-bubble" {...press}>
+        <div className="chat-bubble" data-clip={long && !expanded ? '' : undefined} {...press}>
           {item.text}
           {item.images > 0 && !thumbs && <span className="chat-note">{t('chat.images', { n: item.images })}</span>}
         </div>
+      )}
+      {long && (
+        <button type="button" className="chat-more chat-user-more" onClick={() => setExpanded(!expanded)} aria-expanded={expanded}>
+          {expanded ? <ChevronUp size={14} aria-hidden="true" /> : <ChevronDown size={14} aria-hidden="true" />}
+          {expanded ? t('chat.user_collapse') : t('chat.user_expand', { n: text.length.toLocaleString() })}
+        </button>
       )}
       {text && <UserActs id={id} text={text} />}
       {sheet && <MessageSheet text={text} onFill={() => fillInput(id, text)} onClose={() => setSheet(false)} />}
@@ -1099,7 +1115,7 @@ function UserImages({ id, itemKey, n }) {
       {urls.map((url, i) => (
         <UserThumb key={url} url={url} label={t('chat.image_n', { n: i + 1, total: n })} onOpen={() => setOpen(i)} />
       ))}
-      {open != null && <Lightbox urls={urls} index={open} onIndex={setOpen} onClose={() => setOpen(null)} />}
+      {open != null && <ImageViewer images={urls.map((url) => ({ url }))} index={open} onClose={() => setOpen(null)} />}
     </div>
   );
 }
@@ -1111,88 +1127,6 @@ function UserThumb({ url, label, onOpen }) {
     <button type="button" className="chat-user-img" onClick={onOpen} aria-label={label} title={label} disabled={broken}>
       {broken ? <ImageIcon size={18} aria-hidden="true" /> : src ? <img src={src} alt="" loading="lazy" decoding="async" onError={() => setBroken(true)} /> : <LoaderCircle size={16} className="spin" aria-hidden="true" />}
     </button>
-  );
-}
-
-/** 全屏看大图：点空白处、Esc 关闭；多张时左右切换（按钮、方向键、手机上左右滑）。
- *  点图片放大到原始大小（可以拖动滚动看细节），再点回到适应屏幕；`names` 给了就显示文件名、能下载 */
-function Lightbox({ urls, names, index, onIndex, onClose }) {
-  const { t } = useT();
-  const src = useGenSrc(urls[index]);
-  const name = names?.[index];
-  const many = urls.length > 1;
-  const [zoom, setZoom] = useState(false);
-  useEffect(() => setZoom(false), [index]);
-  const go = (d) => onIndex((index + d + urls.length) % urls.length);
-  const touch = useRef(null);
-  useEffect(() => {
-    const key = (e) => {
-      if (e.key === 'Escape') onClose();
-      else if (many && e.key === 'ArrowLeft') go(-1);
-      else if (many && e.key === 'ArrowRight') go(1);
-      else if (e.key === '+' || e.key === '=' || e.key === '-' || e.key === '0') setZoom(e.key === '+' || e.key === '=');
-      else return;
-      e.preventDefault();
-      e.stopPropagation();
-    };
-    window.addEventListener('keydown', key, true);
-    return () => window.removeEventListener('keydown', key, true);
-  });
-  return createPortal(
-    <div
-      className={`chat-lightbox ${zoom ? 'zoomed' : ''}`}
-      role="dialog"
-      aria-modal="true"
-      aria-label={name ?? t('chat.image_n', { n: index + 1, total: urls.length })}
-      onClick={(e) => e.target === e.currentTarget && onClose()}
-      onTouchStart={(e) => (touch.current = e.touches[0].clientX)}
-      onTouchEnd={(e) => {
-        const dx = e.changedTouches[0].clientX - (touch.current ?? 0);
-        if (many && !zoom && Math.abs(dx) > 50) go(dx < 0 ? 1 : -1);
-      }}
-    >
-      <div className="chat-lightbox-bar">
-        {many && <span className="chat-lightbox-count">{index + 1} / {urls.length}</span>}
-        {name && <span className="chat-lightbox-name ellipsis" title={name}>{name}</span>}
-        <span className="grow" />
-        {src && (
-          <button type="button" className="chat-lightbox-btn" onClick={() => setZoom(!zoom)} aria-pressed={zoom} aria-label={t(zoom ? 'chat.image_fit' : 'chat.image_actual')} title={t(zoom ? 'chat.image_fit' : 'chat.image_actual')}>
-            {zoom ? <ZoomOut size={18} /> : <ZoomIn size={18} />}
-          </button>
-        )}
-        {src && name && (
-          <a className="chat-lightbox-btn" href={src} download={name} aria-label={t('chat.res_download')} title={t('chat.res_download')}>
-            <Download size={18} />
-          </a>
-        )}
-        {src && (
-          <a className="chat-lightbox-btn" href={src} target="_blank" rel="noopener noreferrer" aria-label={t('chat.res_open')} title={t('chat.res_open')}>
-            <ExternalLink size={18} />
-          </a>
-        )}
-        <button type="button" className="chat-lightbox-btn" onClick={onClose} aria-label={t('action.close')} title={t('action.close')} autoFocus>
-          <X size={20} />
-        </button>
-      </div>
-      {src ? (
-        <div className="chat-lightbox-stage" onClick={(e) => e.target === e.currentTarget && onClose()}>
-          <img key={src} className="chat-lightbox-img" src={src} alt={name ?? ''} onClick={() => setZoom(!zoom)} />
-        </div>
-      ) : (
-        <LoaderCircle size={28} className="spin chat-lightbox-wait" aria-hidden="true" />
-      )}
-      {many && (
-        <>
-          <button type="button" className="chat-lightbox-btn chat-lightbox-nav prev" onClick={() => go(-1)} aria-label={t('chat.image_prev')}>
-            <ChevronLeft size={22} />
-          </button>
-          <button type="button" className="chat-lightbox-btn chat-lightbox-nav next" onClick={() => go(1)} aria-label={t('chat.image_next')}>
-            <ChevronRight size={22} />
-          </button>
-        </>
-      )}
-    </div>,
-    document.body,
   );
 }
 
@@ -1336,19 +1270,36 @@ function CopyPath({ path }) {
  *  按着 Ctrl / ⌘ / Shift 点、或者中键点，照旧按链接本来的方式打开 */
 function usePreviewLinks() {
   const [target, setTarget] = useState(null);
+  const [image, setImage] = useState(null);
   const onClick = useCallback((e) => {
     if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    // 回复里的图片：页面里看大图（在链接里的也是，不跳走）
+    const img = e.target.closest?.('.md img[src]');
+    if (img && img.getAttribute('src') !== 'data:,') {
+      e.preventDefault();
+      const src = img.getAttribute('src');
+      setImage({ url: src.startsWith('/api/') ? src.slice(4) : src, name: img.getAttribute('alt') || undefined });
+      return;
+    }
     const a = e.target.closest?.('a[href]');
     if (!a) return;
     const tgt = previewTarget(a.getAttribute('href'));
     if (!tgt) return;
     e.preventDefault();
-    setTarget(tgt);
+    if (VIEW_IMAGE.test(tgt.path)) setImage({ url: tgt.ep.download(tgt.path), name: fileName(tgt.path) });
+    else setTarget(tgt);
   }, []);
   const close = useCallback(() => setTarget(null), []);
-  const viewer = target && <FileViewer target={target} onTarget={setTarget} onClose={close} />;
+  const closeImage = useCallback(() => setImage(null), []);
+  const viewer = (
+    <>
+      {target && <FileViewer target={target} onTarget={setTarget} onClose={close} />}
+      {image && <ImageViewer images={[image]} onClose={closeImage} />}
+    </>
+  );
   return { onClick, open: setTarget, viewer };
 }
+const VIEW_IMAGE = /\.(png|jpe?g|gif|webp|bmp|ico|avif)$/i;
 
 /** 不是 assistant 回复的条目（用户消息、单独的工具结果、分隔线、提示……） */
 function Item({ id, item }) {
@@ -2382,7 +2333,8 @@ function ResumeMenu({ id, status, onClose }) {
     if (!workdir) return undefined;
     let alive = true;
     deviceApi(terminalDevice(id))
-      .get(`/history?workdir=${encodeURIComponent(workdir)}&limit=50`)
+      // 按工具在电脑上筛：以前取最近 50 个（各工具混在一起）再在这里筛，常用另一个工具时这里就只剩几个
+      .get(`/history?workdir=${encodeURIComponent(workdir)}&agent=${encodeURIComponent(agentId)}&limit=200`)
       .then(
         (r) => alive && setData(r ?? { items: [] }),
         (e) => alive && setData({ error: e }),
@@ -2390,7 +2342,7 @@ function ResumeMenu({ id, status, onClose }) {
     return () => {
       alive = false;
     };
-  }, [id, workdir]);
+  }, [id, workdir, agentId]);
   const running = status?.phase === 'running';
   const isHere = (c) => c.instance_id === id || (status?.session_id && c.id === status.session_id);
   const words = q.trim().toLowerCase();
@@ -2624,7 +2576,8 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
     });
   const uploading = files.some((f) => !f.path && !f.failed);
   // now：Claude Code 的“立即发送”（Ctrl+Enter）。不带 now 时运行中发的是排队
-  const send = async (now = false) => {
+  // later：Codex 的 Tab，排到这一轮之后作为下一轮发出（不插话）
+  const send = async (now = false, later = false) => {
     const body = text.trim();
     const images = files.filter((f) => f.path).map((f) => f.path);
     if ((!body && !images.length && !now) || sending || uploading || disabled) return;
@@ -2649,7 +2602,7 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
     hist.current = -1;
     if (body && agentId !== 'claude') rememberInput(body);
     try {
-      const r = await api.post(`/instances/${id}/chat/input`, now && canNow ? { text: body, images, now: true } : { text: body, images });
+      const r = await api.post(`/instances/${id}/chat/input`, now && canNow ? { text: body, images, now: true } : later && canLater ? { text: body, images, later: true } : { text: body, images });
       inflight.current = '';
       writeDraft(id, latest.current);
       files.forEach((f) => URL.revokeObjectURL(f.url));
@@ -2771,6 +2724,10 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
     } else if (slash.length && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
       e.preventDefault();
       setSlashPick((p) => ((p ?? -1) + (e.key === 'ArrowDown' ? 1 : -1) + slash.length) % slash.length);
+    } else if (e.key === 'Tab' && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey && canLater && canSend && !slash.length && !imeComposing(e)) {
+      // 和 Codex 一样：运行中 Tab 不插话，排到这一轮之后再发
+      e.preventDefault();
+      send(false, true);
     } else if (e.key === 'Tab' && !e.shiftKey && !text && suggestion) {
       // 和 Claude Code 一样：Tab 用上推荐回复（填进输入框，可以改了再发）
       e.preventDefault();
@@ -2871,6 +2828,18 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
   const elsewhere = agentId === 'codex' && status?.cwd && workdir && !trim(status.cwd).startsWith(trim(workdir)) ? status.cwd : null;
   // 运行中能不能“立即发送”：Claude Code 2.1.275 起才有
   const canNow = running && agentId === 'claude' && versionAtLeast(status?.version, [2, 1, 275]);
+  // Codex 运行中：回车插话（这一轮里下一步就读到），Tab 排到这一轮之后
+  const canLater = running && agentId === 'codex';
+  const later = Array.isArray(status?.later) ? status.later : [];
+  const takeLater = async (n) => {
+    try {
+      const r = await api.post(`/instances/${id}/chat/later/take`, { n });
+      if (r?.text) setText((cur) => (cur.trim() ? `${cur}\n${r.text}` : r.text));
+      requestAnimationFrame(() => claimFocus(area.current));
+    } catch (e) {
+      toast(errorText(t, e), 'error');
+    }
+  };
   // 运行中打了字：讲清楚“排队”和“立即发送”
   const twoWays = running && canSend && !disabled;
   return (
@@ -2942,13 +2911,46 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
           ))}
         </div>
       )}
+      {later.length > 0 && (
+        <div className="chat-queued chat-later" role="status">
+          <span className="chat-queued-head">
+            <ListEnd size={13} aria-hidden="true" />
+            <b>{t('chat.later_title')}</b>
+            <span className="chat-note">{t('chat.later_hint')}</span>
+          </span>
+          {later.map((q, n) => (
+            <p key={n} className="chat-queued-text chat-later-row">
+              <span className="grow">{q.text || <ImageIcon size={14} aria-label={t('chat.images', { n: q.images || 1 })} />}</span>
+              <button type="button" className="btn btn-plain btn-icon btn-sm" onClick={() => takeLater(n)} aria-label={t('chat.later_take')} title={t('chat.later_take')}>
+                <Undo2 size={14} />
+              </button>
+            </p>
+          ))}
+        </div>
+      )}
       {twoWays && (
         <div className="chat-ways" role="note">
           <span>
             {touch ? <ArrowUp size={13} aria-hidden="true" /> : <kbd>Enter</kbd>}
-            <b>{t('chat.way_queue')}</b>
-            {t('chat.way_queue_hint')}
+            <b>{t(canLater ? 'chat.way_steer' : 'chat.way_queue')}</b>
+            {t(canLater ? 'chat.way_steer_hint' : 'chat.way_queue_hint')}
           </span>
+          {canLater && (
+            <span>
+              {touch ? (
+                <button type="button" className="btn btn-plain btn-sm chat-later-btn" onClick={() => send(false, true)} disabled={sending || uploading}>
+                  <ListEnd size={13} aria-hidden="true" />
+                  {t('chat.way_later')}
+                </button>
+              ) : (
+                <>
+                  <kbd>Tab</kbd>
+                  <b>{t('chat.way_later')}</b>
+                </>
+              )}
+              {t('chat.way_later_hint')}
+            </span>
+          )}
           {canNow && (
             <span>
               {touch ? <Zap size={13} aria-hidden="true" /> : <kbd>Ctrl+Enter</kbd>}
@@ -3898,9 +3900,7 @@ function useGenSrc(url) {
 
 function GenImage({ src, name }) {
   return src ? (
-    <a href={src} target="_blank" rel="noopener noreferrer" title={name}>
-      <img src={src} alt={name} />
-    </a>
+    <img src={src} alt={name} title={name} />
   ) : (
     <span className="chat-gen-wait">
       <LoaderCircle size={16} className="spin" />
@@ -4111,8 +4111,9 @@ function useAttention(id, phase, pendingKind, prev, shells, agent) {
     const what = phase === 'approval' ? `notify_${pendingKind ?? 'permission'}` : phase === 'tui' ? 'notify_tui' : phase === 'idle' && from === 'running' ? 'notify_done' : null;
     if (!what) return;
     if (!mark.current) {
-      mark.current = document.title;
-      document.title = `● ${document.title}`;
+      const { base } = splitTitle(document.title);
+      mark.current = base;
+      if (!document.title.startsWith('● ')) document.title = `● ${document.title}`;
     }
     if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
       try {

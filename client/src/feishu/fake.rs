@@ -105,7 +105,8 @@ impl Fake {
                     ] })),
                     ("POST", "/open-apis/im/v1/images") => ok(json!({ "image_key": format!("img_up{n}") })),
                     ("POST", "/open-apis/im/v1/files") => ok(json!({ "file_key": format!("file_up{n}") })),
-                    ("POST", p) if p.starts_with("/open-apis/im/v1/messages") => ok(json!({ "message_id": format!("om_b{n}") })),
+                    // 发给人（私聊）的带上私聊的 chat_id
+                    ("POST", p) if p.starts_with("/open-apis/im/v1/messages") => ok(json!({ "message_id": format!("om_b{n}"), "chat_id": if path.contains("receive_id_type=open_id") { "oc_dm" } else { "" } })),
                     _ => ok(json!({})),
                 }
             }

@@ -158,6 +158,9 @@ pub struct InputReq {
     /// 立即发送（Claude Code 的 Ctrl+X Ctrl+S）：排着的连同这条马上发出；text 可以为空
     #[serde(default)]
     now: bool,
+    /// Codex 的 Tab：排到这一轮之后再发
+    #[serde(default)]
+    later: bool,
 }
 
 pub async fn input(State(app): State<App>, Path(id): Path<String>, Json(req): Json<InputReq>) -> R<Json<Value>> {
@@ -172,7 +175,20 @@ pub async fn input(State(app): State<App>, Path(id): Path<String>, Json(req): Js
     if req.now {
         return Ok(Json(app.chat.send_now(&id, &req.text, &req.images).await?));
     }
+    if req.later {
+        return Ok(Json(app.chat.send_later(&id, &req.text, &req.images).await?));
+    }
     Ok(Json(app.chat.input(&id, &req.text, &req.images).await?))
+}
+
+#[derive(Deserialize)]
+pub struct LaterTake {
+    n: usize,
+}
+
+/// 取回 Tab 排到这一轮之后的一条（放回输入框）
+pub async fn later_take(State(app): State<App>, Path(id): Path<String>, Json(req): Json<LaterTake>) -> R<Json<Value>> {
+    Ok(Json(app.chat.later_take(&id, req.n)?))
 }
 
 /// 以前的会话“现在就转过来”：不等空闲，退出终端里以前的 Claude Code / Codex，接着同一段对话转到对话模式

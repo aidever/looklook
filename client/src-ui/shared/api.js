@@ -156,8 +156,23 @@ export const rtcMode = (() => {
 })();
 
 /**
+ * 在隐藏的 iframe 里打开下载地址：浏览器边收边存（响应带 Content-Disposition: attachment），不占页面内存。
+ * WebRTC 模式下 iframe 的请求同样经 Service Worker 转发，`device` 用 `__lldev` 指定电脑（启动页会去掉这个参数）。
+ */
+export function saveViaFrame(href, device) {
+  const url = new URL(href, location.href);
+  if (device) url.searchParams.set('__lldev', device);
+  const f = Object.assign(document.createElement('iframe'), { src: url.pathname + url.search, hidden: true });
+  f.setAttribute('aria-hidden', 'true');
+  document.body.appendChild(f);
+  // 下载开始后 iframe 就没用了；大文件要传很久，留足时间再删（删了会中断还没收完的响应）
+  setTimeout(() => f.remove(), 6 * 3600_000);
+}
+
+/**
  * WebRTC 模式下的下载链接（`<a download>`，含代码里 `a.click()` 的）：浏览器可能把它当成顶层导航直接交给平台，
- * 拿到的是启动页。改成经 Service Worker 取回、存成 blob 再保存。
+ * 拿到的是启动页。改成在隐藏的 iframe 里打开（见 [`saveViaFrame`]）。以前是取回存成 blob 再保存，
+ * 大文件要整个放在内存里，手机上常常存不下。
  */
 export function installRtcDownloads() {
   if (!rtcMode) return;
@@ -170,18 +185,7 @@ export function installRtcDownloads() {
       // blob: 链接（这里自己生成的、fetchRaw 取回后保存的）照常下载
       if (url.protocol === 'blob:' || url.origin !== location.origin) return;
       e.preventDefault();
-      const name = a.getAttribute('download') || url.pathname.split('/').pop() || 'download';
-      fetch(url, { credentials: 'same-origin', cache: 'no-store' })
-        .then((r) => (r.ok ? r.blob() : Promise.reject(new Error(String(r.status)))))
-        .then((blob) => {
-          const href = URL.createObjectURL(blob);
-          const tmp = Object.assign(document.createElement('a'), { href, download: name });
-          document.body.appendChild(tmp);
-          tmp.click();
-          tmp.remove();
-          setTimeout(() => URL.revokeObjectURL(href), 60_000);
-        })
-        .catch((err) => console.warn('download failed', err));
+      saveViaFrame(url.href);
     },
     true,
   );

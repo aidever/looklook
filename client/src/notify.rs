@@ -9,7 +9,7 @@
 //! - **只通知的渠道**（同步项 `notify/hooks`，`push.rs`）：企业微信、钉钉、Server酱、PushPlus、Bark、ntfy，和飞书同时发同样的事，只带“打开”的链接。
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -84,13 +84,19 @@ pub struct Rules {
     pub agent: bool,
     /// 私聊直接发一句时不问，直接在上次选的项目里开（`/new` 不带话照样问）
     pub agent_direct: bool,
-    /// 群里 @ 机器人也能用（只认绑定的人；回复群里的人都看得到）
+    /// 群里 @ 机器人也能用（只认绑定的人）
     pub agent_groups: bool,
+    /// 群里 @ 的回答直接发在群里（群里的人都看得到）。默认关：回答、选项目、审批都发到私聊，群里只加一个表情
+    pub agent_group_public: bool,
+    /// 每个项目一个群：这个项目的会话的通知发到它的群里，一个会话一个话题（没有就建，要“创建群”权限）
+    pub project_groups: bool,
+    /// 看看开着（在前台）时不发外部通知，改成看看里的提醒。在飞书里对话的会话照常发
+    pub fg_quiet: bool,
 }
 
 impl Default for Rules {
     fn default() -> Self {
-        Self { done: true, failed: true, actions: true, content: true, muted: vec![], lang: "zh-CN".into(), quiet: None, done_batch: 0, stall_min: 20, agent: false, agent_direct: false, agent_groups: false }
+        Self { done: true, failed: true, actions: true, content: true, muted: vec![], lang: "zh-CN".into(), quiet: None, done_batch: 0, stall_min: 20, agent: false, agent_direct: false, agent_groups: false, agent_group_public: false, project_groups: false, fg_quiet: true }
     }
 }
 
@@ -360,6 +366,22 @@ pub struct Notifier {
     pub agent: crate::feishu_agent::Agent,
     /// 正在进行的扫码建应用（一台电脑同时只有一个）
     reg: Mutex<Option<Reg>>,
+    /// 看看的页面在前台到什么时候（页面每 20 秒报一次，`POST /api/notify/foreground`）
+    fg_until: AtomicI64,
+    /// 项目群里每个会话的话题：会话 → 话题开头那条消息
+    topics: Mutex<HashMap<String, String>>,
+    /// 项目群没建成的项目（`电脑|文件夹`）→ 什么时候：半小时内不再试
+    group_failed: Mutex<HashMap<String, Instant>>,
+}
+
+/// 通知发到哪
+enum Target {
+    /// 绑定的人的私聊
+    Dm,
+    /// 回复这条消息（`true`：回复到话题里）
+    Reply(String, bool),
+    /// 项目群里给这个会话开一个话题
+    Topic { chat: String, inst: String },
 }
 
 /// 扫码建应用（[`feishu::register`]）在这台电脑上的进度，给设置页看
@@ -542,6 +564,8 @@ impl Notifier {
         let now = crate::util::system_ms();
         let own = app.account.session().map(|s| s.device_id).unwrap_or_default();
         let quiet = quiet_now(&rules);
+        // 看看开着：外部通知先不发（看看里有提醒）。在飞书里对话的会话照常发
+        let fg = rules.fg_quiet && self.fg_until.load(Ordering::SeqCst) > now;
         let ids = app.chat.ids();
         for id in &ids {
             let Some(brief) = app.chat.brief(id) else { continue };
@@ -560,9 +584,10 @@ impl Notifier {
             let anchor = self.agent.anchor(app, id);
             if let Some(k) = key.as_ref().filter(|_| !busy) {
                 let fresh = live.as_ref().is_none_or(|s| s.key.as_ref() != Some(k));
-                if fresh && !quiet && attn_due(&brief, now, muted, self.agent.following(id)) {
+                if fresh && !quiet && !(fg && anchor.is_none()) && attn_due(&brief, now, muted, self.agent.following(id)) {
                     if let Some(info) = self.info(app, id, &brief, &rules) {
-                        self.send_attn(out, &own, id, k, &brief, info, anchor.as_deref()).await;
+                        let to = self.target(app, out, id, anchor.clone(), &rules).await;
+                        self.send_attn(app, out, &own, id, k, &brief, info, to).await;
                     }
                 }
             }
@@ -573,6 +598,9 @@ impl Notifier {
             let mut notice = end_notice(&brief, last, first, &rules, muted, now);
             // 这一轮已经用流式卡片推过结果了
             if matches!(notice, EndNotice::Send { .. } | EndNotice::Wait) && turn["ended_at"].as_i64().is_some_and(|e| self.agent.covers(id, e)) {
+                notice = EndNotice::Record;
+            }
+            if fg && anchor.is_none() && matches!(notice, EndNotice::Send { .. }) {
                 notice = EndNotice::Record;
             }
             if let (EndNotice::Record | EndNotice::Send { .. }, Some(end)) = (&notice, turn["ended_at"].as_i64()) {
@@ -591,14 +619,18 @@ impl Notifier {
                 let base = Act { dev: own.clone(), inst: id.clone(), n: n.clone(), ..Default::default() };
                 let c = card::ended(&info.info(), failed, text, end - started, &base);
                 let m = push::ended(&info.info(), failed, text, end - started);
-                let msg = self.send(out, &c, &m, anchor.as_deref()).await;
+                let to = self.target(app, out, id, anchor, &rules).await;
+                let msg = self.send(app, out, &c, &m, to).await;
                 self.remember(Sent { msg, inst: id.clone(), key: None, nonce: n, busy: false, info });
             }
         }
         if !quiet && rules.stall_min > 0 {
             for id in &ids {
                 let anchor = self.agent.anchor(app, id);
-                self.check_stall(app, out, &own, id, &rules, now, anchor.as_deref()).await;
+                if fg && anchor.is_none() {
+                    continue;
+                }
+                self.check_stall(app, out, &own, id, &rules, now, anchor).await;
             }
         }
         // 会话没了：清掉记录
@@ -609,13 +641,13 @@ impl Notifier {
         if dropped > 0 && self.budget() {
             self.dropped.store(0, Ordering::SeqCst);
             let (en, url) = (rules.lang.starts_with("en"), page_url(app, "tasks"));
-            self.send(out, &card::digest(en, dropped, &url), &push::digest(en, dropped, &url), None).await;
+            self.send(app, out, &card::digest(en, dropped, &url), &push::digest(en, dropped, &url), Target::Dm).await;
         }
     }
 
     /// 卡住提醒：正在干活、但 `stall_min` 分钟没有新进展（额度用完在等重置的不算）。同一次停顿只提醒一次
     #[allow(clippy::too_many_arguments)]
-    async fn check_stall(&self, app: &App, out: &Out, own: &str, id: &str, rules: &Rules, now: i64, anchor: Option<&str>) {
+    async fn check_stall(&self, app: &App, out: &Out, own: &str, id: &str, rules: &Rules, now: i64, anchor: Option<String>) {
         let Some(brief) = app.chat.brief(id) else { return };
         if brief["board"] != "working" || !brief["limit"].is_null() || brief["watched"] == true {
             return;
@@ -640,7 +672,8 @@ impl Notifier {
         // `p` 带上这次停顿的开始时间：点“停止”时还是这次停顿才停
         let base = Act { dev: own.into(), inst: id.into(), p: active.to_string(), n: n.clone(), ..Default::default() };
         let c = card::stalled(&info.info(), &doing, now - active, &base);
-        let msg = self.send(out, &c, &push::stalled(&info.info(), &doing, now - active), anchor).await;
+        let to = self.target(app, out, id, anchor, rules).await;
+        let msg = self.send(app, out, &c, &push::stalled(&info.info(), &doing, now - active), to).await;
         self.remember(Sent { msg, inst: id.into(), key: None, nonce: n, busy: false, info });
     }
 
@@ -657,11 +690,11 @@ impl Notifier {
         };
         let (en, url) = (rules.lang.starts_with("en"), page_url(app, "tasks"));
         let c = card::summary(en, lines.1, &lines.0, rules.content, &url);
-        self.send(out, &c, &push::summary(en, lines.1, &lines.0, rules.content, &url), None).await;
+        self.send(app, out, &c, &push::summary(en, lines.1, &lines.0, rules.content, &url), Target::Dm).await;
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn send_attn(&self, out: &Out, own: &str, id: &str, key: &str, brief: &Value, info: Owned, anchor: Option<&str>) {
+    async fn send_attn(&self, app: &App, out: &Out, own: &str, id: &str, key: &str, brief: &Value, info: Owned, to: Target) {
         let a = &brief["attn"];
         let options: Vec<String> = a["options"].as_array().map(|o| o.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
         let limit_wait = options.iter().position(|o| o.starts_with(crate::chat::screen::LIMIT_AUTO));
@@ -670,8 +703,47 @@ impl Notifier {
         let n = nonce();
         let base = Act { dev: own.into(), inst: id.into(), p: key.into(), n: n.clone(), ..Default::default() };
         let c = card::attn(&info.info(), &at, &base);
-        let msg = self.send(out, &c, &push::attn(&info.info(), &at), anchor).await;
+        let msg = self.send(app, out, &c, &push::attn(&info.info(), &at), to).await;
         self.remember(Sent { msg, inst: id.into(), key: Some(key.into()), nonce: n, busy: false, info });
+    }
+
+    /// 一个会话的通知发到哪：在飞书里对话过的回复到那里；开了“每个项目一个群”时发到项目群里这个会话的话题（没有群就建）；其它发私聊
+    async fn target(&self, app: &App, out: &Out, inst: &str, anchor: Option<String>, rules: &Rules) -> Target {
+        if let Some(a) = anchor {
+            return Target::Reply(a, false);
+        }
+        let Some((api, open_id)) = out.feishu.as_ref().filter(|_| rules.project_groups && rules.actions) else { return Target::Dm };
+        if let Some(m) = lock(&self.topics).get(inst).cloned() {
+            return Target::Reply(m, true);
+        }
+        let Ok(Some(row)) = app.store.instance(inst) else { return Target::Dm };
+        let own = app.account.session().map(|s| s.device_id).unwrap_or_default();
+        let place = format!("{own}|{}", row.workdir);
+        if let Some(chat) = crate::feishu_agent::project_group_of(app, &place) {
+            return Target::Topic { chat, inst: inst.into() };
+        }
+        if lock(&self.group_failed).get(&place).is_some_and(|t| t.elapsed() < Duration::from_secs(1800)) {
+            return Target::Dm;
+        }
+        let en = rules.lang.starts_with("en");
+        let agent = if matches!(row.launch.as_str(), "claude" | "codex") { row.launch.as_str() } else { "claude" };
+        let title = format!("{} · {}", tr(en, "看看", "LookLook"), std::path::Path::new(&row.workdir).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| row.workdir.clone()));
+        match crate::feishu_agent::make_project_group(app, api, &own, &row.workdir, agent, &title, open_id, en).await {
+            Ok(chat) => Target::Topic { chat, inst: inst.into() },
+            Err(e) => {
+                tracing::warn!(error = %e, place, "飞书：项目群没建成，通知先发私聊");
+                if feishu::code_of(&e).is_some_and(feishu::is_scope_error) {
+                    crate::feishu_agent::grant(app, api, "group", &[]).await;
+                }
+                lock(&self.group_failed).insert(place, Instant::now());
+                Target::Dm
+            }
+        }
+    }
+
+    /// 看看的页面在前台（页面每 20 秒报一次）
+    pub fn foreground(&self) {
+        self.fg_until.store(crate::util::system_ms() + 45_000, Ordering::SeqCst);
     }
 
     fn remember(&self, s: Sent) {
@@ -692,8 +764,8 @@ impl Notifier {
     }
 
     /// 发一条：飞书发卡片，只通知的渠道各发一条消息（后台发，不等）。超出每分钟上限时不发、记一笔（之后合并成一条）。返回飞书的消息 id。
-    /// `anchor`：飞书卡片回复到这条消息（在飞书里对话过的会话）
-    async fn send(&self, out: &Out, c: &Value, m: &Msg, anchor: Option<&str>) -> Option<String> {
+    /// `to`：飞书卡片发到哪（私聊、回复在飞书里对话过的会话、项目群的话题）
+    async fn send(&self, app: &App, out: &Out, c: &Value, m: &Msg, to: Target) -> Option<String> {
         if !self.budget() {
             self.dropped.fetch_add(1, Ordering::SeqCst);
             return None;
@@ -713,10 +785,26 @@ impl Notifier {
         let (api, open_id) = out.feishu.as_ref()?;
         // 发给同一个人每秒最多 5 条
         tokio::time::sleep(Duration::from_millis(220)).await;
-        let r = match anchor {
+        let r = match to {
             // 普通引用回复：私聊里跟着“当前会话”出在主界面；锚点在话题里（项目群）时飞书会留在话题里
-            Some(m) => api.reply(m, "interactive", c, false).await,
-            None => api.send_card(open_id, c).await,
+            Target::Reply(m, th) => api.reply(&m, "interactive", c, th).await,
+            Target::Dm => api.send_card(open_id, c).await,
+            // 这个会话在项目群里的第一张：开一个话题，之后的都回复到这个话题里；在话题里回复 = 跟这个会话说
+            Target::Topic { chat, inst } => match api.send_to_chat(&chat, "interactive", c).await {
+                Ok(id) => {
+                    lock(&self.topics).insert(inst.clone(), id.clone());
+                    self.agent.add_route(app, &id, &inst);
+                    Ok(id)
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, chat, "飞书：项目群里发不了，改发私聊");
+                    // 群解散了、机器人被移出去了：不再记着这个群，下次重建
+                    if matches!(feishu::code_of(&e), Some(230002 | 232009 | 232011)) {
+                        crate::feishu_agent::drop_project_group(app, &chat);
+                    }
+                    api.send_card(open_id, c).await
+                }
+            },
         };
         match r {
             Ok(id) => {
@@ -1360,6 +1448,7 @@ mod tests {
         assert_eq!(r.lang, "zh-CN");
         // 旧版电脑存的规则没有这几项：用默认（不勿扰、逐条发、20 分钟卡住提醒）
         assert_eq!((r.quiet, r.done_batch, r.stall_min), (None, 0, 20));
+        assert!(r.fg_quiet && !r.project_groups && !r.agent_group_public);
     }
 
     #[test]

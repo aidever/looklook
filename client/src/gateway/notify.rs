@@ -44,6 +44,12 @@ fn view(app: &App) -> Value {
     })
 }
 
+/// 看看的页面在前台：这段时间外部通知先不发（规则 `fg_quiet`）
+pub async fn foreground(State(app): State<App>) -> StatusCode {
+    app.notify.foreground();
+    StatusCode::NO_CONTENT
+}
+
 pub async fn get(State(app): State<App>) -> Json<Value> {
     Json(view(&app))
 }

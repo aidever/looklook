@@ -181,6 +181,14 @@ impl Api {
         d["message_id"].as_str().map(String::from).ok_or_else(|| anyhow!("没有 message_id"))
     }
 
+    /// 发一条消息给某人（私聊），返回 (消息 id, 私聊的 chat_id)
+    pub async fn send_to_user(&self, open_id: &str, msg_type: &str, content: &Value) -> Result<(String, String)> {
+        let body = json!({ "receive_id": open_id, "msg_type": msg_type, "content": content.to_string() });
+        let d = self.call(reqwest::Method::POST, "/open-apis/im/v1/messages?receive_id_type=open_id", &body).await?;
+        let id = d["message_id"].as_str().ok_or_else(|| anyhow!("没有 message_id"))?;
+        Ok((id.into(), d["chat_id"].as_str().unwrap_or_default().into()))
+    }
+
     /// 发一句文字给某人（绑定成功的回复）
     pub async fn send_text(&self, open_id: &str, text: &str) -> Result<()> {
         let body = json!({ "receive_id": open_id, "msg_type": "text", "content": json!({ "text": text }).to_string() });

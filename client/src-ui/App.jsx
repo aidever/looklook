@@ -47,6 +47,8 @@ import { ConnChip } from './shared/RelayStatus.jsx';
 import { JustUpdatedBanner, shouldRemind, UpdateBanner, UpdateProvider } from './shared/Update.jsx';
 import { TransferBanner } from './pages/SshTransfer.jsx';
 import { remoteAllowed, renewSoon } from './shared/Remote.jsx';
+import { splitTitle } from './shared/title.js';
+import { useForegroundPing, useInAppAlerts } from './shared/inapp.js';
 
 const StatusCtx = createContext({ status: null, reload: () => {} });
 
@@ -307,8 +309,8 @@ function useUserMenu() {
 function useTitleCount() {
   const n = useAttnCount();
   useEffect(() => {
-    const base = document.title.replace(/^\(\d+\) /, '');
-    const want = n > 0 ? `(${n}) ${base}` : base;
+    const { dot, base } = splitTitle(document.title);
+    const want = `${dot ? '● ' : ''}${n > 0 ? `(${n}) ` : ''}${base}`;
     if (document.title !== want) document.title = want;
   });
 }
@@ -477,7 +479,7 @@ function MobileTabs({ path }) {
           <Plus size={22} aria-hidden="true" />
         </span>
       </button>
-      <PopMenu items={[{ head: t('sess.tools') }, ...tools]} className={`mtab ${onTool ? 'active' : ''}`} label={t('sess.tools')} sheet>
+      <PopMenu items={tools} className={`mtab ${onTool ? 'active' : ''}`} label={t('sess.tools')} sheet>
         <Wrench size={21} aria-hidden="true" />
         <span>{t('sess.tools')}</span>
       </PopMenu>
@@ -554,6 +556,8 @@ function ConsoleLayout({ path, stale, children }) {
   const sess = path.match(SESS)?.[1] ?? null;
   const pane = paneOpen && isSessionArea(path);
   useTitleCount();
+  useForegroundPing();
+  useInAppAlerts(sess, ui.openSession);
   return (
     <>
       {/* 手机上的顶栏；电脑上这些都在图标栏里 */}

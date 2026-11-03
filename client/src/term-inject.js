@@ -967,20 +967,29 @@
       if (!punct || e.target !== term.textarea) return;
       clearTimeout(punct.timer);
       punct = null;
-      if (e.inputType !== 'insertText' || !e.data || e.isComposing) return;
+      // 组字中的交给 xterm 的组字处理；直接上屏的（insertText，有的输入法是 insertReplacementText / insertFromComposition）由这里发
+      if (!e.data || e.isComposing || e.inputType === 'insertCompositionText' || !/^insert/.test(e.inputType || '')) return;
       e.stopImmediatePropagation();
       sendText(e.data);
     }, true);
+    document.addEventListener('compositionstart', function (e) {
+      if (punct && e.target === term.textarea) clearTimeout(punct.timer), (punct = null);
+    }, true);
     document.addEventListener('keydown', function (e) {
-      if (!term.textarea || e.target !== term.textarea || e.isComposing || e.keyCode === 229) return;
+      if (!term.textarea || e.target !== term.textarea || e.isComposing) return;
+      // macOS App（WKWebView）里中文输入法的标点：按键报 229、key 却是实际的键（Chrome 报 Process）。交给 xterm 的话，
+      // 它在 setTimeout(0) 里比对输入框找新上屏的字，WKWebView 的输入法异步上屏，比对时还没有字，这一下就丢了。
+      var ime = e.keyCode === 229;
       if (e.key && e.key.length === 1 && !/[A-Za-z ]/.test(e.key) && !e.ctrlKey && !e.altKey && !e.metaKey) {
         e.stopImmediatePropagation(); // 不 preventDefault：输入法照常处理这个键
         if (punct) clearTimeout(punct.timer);
         var key = e.key;
-        // 浏览器没有触发 input（不该发生）时按原样补发，免得丢字。
-        punct = { key: key, timer: setTimeout(function () { if (punct && punct.key === key) { punct = null; sendText(key); } }, 50) };
+        // 浏览器没有触发 input（不该发生）时按原样补发，免得丢字。输入法接手的（229）不补：它可能在组字。
+        // WKWebView 的输入法要跨进程，上屏可能晚几十毫秒，多等一会儿
+        punct = { key: key, timer: setTimeout(function () { if (punct && punct.key === key) { punct = null; if (!ime) sendText(key); } }, 400) };
         return;
       }
+      if (ime) return;
       if (e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
         e.preventDefault();
         e.stopImmediatePropagation();

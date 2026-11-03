@@ -120,9 +120,50 @@ pub struct Instances {
     first_prompt: Mutex<HashMap<String, String>>,
     /// 新建时要接着的以前的对话：同第一句话，只在第一次建会话时用一次
     first_resume: Mutex<HashMap<String, Resume>>,
-    /// agent 会话名（终端 ID → 名字）和算出来的时间
-    /// 上次算 agent 会话名的时间、终端 ID → 会话名、终端 ID → 对话号
-    titles: Mutex<(Option<Instant>, HashMap<String, String>, HashMap<String, String>)>,
+    /// 上次看会话里在跑什么的结果（见 [`Instances::probe_all`]）
+    titles: Mutex<Probed>,
+    /// 上次把“打开过”写进数据库的时间（[`Instances::mark_opened`] 一分钟最多写一次）
+    opened: Mutex<HashMap<String, Instant>>,
+}
+
+/// 最近一次在界面上打开这个会话的时间（毫秒，界面开着它时每几分钟报一次）：自动停掉很久没打开的会话用（idle_stop.rs）
+fn opened_key(id: &str) -> String {
+    format!("instance_opened.{id}")
+}
+
+/// 很久没打开被自动停掉时正在写的对话：下次启动接着它（只用一次）
+fn idle_resume_key(id: &str) -> String {
+    format!("instance_idle_resume.{id}")
+}
+
+/// tmux 会话当前面板（见 [`Instances::panes`]）
+struct PaneInfo {
+    pid: u32,
+    /// 前台程序名（tmux 的 `pane_current_command`）
+    command: String,
+    title: Option<String>,
+}
+
+/// [`Instances::probe_all`] 的结果：终端 ID → …
+#[derive(Default)]
+struct Probed {
+    at: Option<Instant>,
+    titles: HashMap<String, String>,
+    convs: HashMap<String, String>,
+    tools: HashMap<String, &'static str>,
+    busy: HashMap<String, bool>,
+    fg: HashMap<String, String>,
+}
+
+impl Probed {
+    fn fill(&self, v: &mut View) {
+        let id = &v.row.id;
+        v.agent_title = self.titles.get(id).cloned();
+        v.conv_id = self.convs.get(id).cloned();
+        v.tool = self.tools.get(id).copied();
+        v.busy = self.busy.get(id).copied();
+        v.fg = self.fg.get(id).cloned();
+    }
 }
 
 /// 接着以前的对话（会话页的“以前的对话”，见 history.rs）：`fork` 为复制一份接着，原来的不动
@@ -160,9 +201,15 @@ pub struct View {
     pub chat_ui: bool,
     /// 名字是用户自己起的（新建时填了名称、之后改过名）；界面上 agent 的会话名为主，它为辅
     pub name_custom: bool,
-    /// agent 自己的会话名：对话标题（/rename、自动标题），否则 agent 设置的终端标题（见 [`Instances::agent_titles`]）
+    /// agent 自己的会话名：对话标题（/rename、自动标题），否则 agent 设置的终端标题（见 [`Instances::probe_all`]）
     pub agent_title: Option<String>,
-    /// 正在写的是哪个对话（history.rs 的会话号，同样见 [`Instances::agent_titles`]）；不知道时 null
+    /// 现在在跑的 AI 工具（session_probe.rs 认出来的，普通终端里手动起的也算）；没有时 null
+    pub tool: Option<&'static str>,
+    /// 在忙：AI 工具在回复、跑工具，普通终端有命令在跑（不在提示符）；不知道时 null
+    pub busy: Option<bool>,
+    /// 普通终端在跑的前台程序（`npm`、`vim`…）；在提示符或认不出时 null
+    pub fg: Option<String>,
+    /// 正在写的是哪个对话（history.rs 的会话号，同样见 [`Instances::probe_all`]）；不知道时 null
     pub conv_id: Option<String>,
     /// 在 Docker 容器里运行（docker.rs）
     pub container: Option<crate::docker::Container>,
@@ -206,7 +253,7 @@ fn container_key(id: &str) -> String {
 }
 
 /// agent 会话名多久重新算一次（要读对话记录、问 tmux）
-const TITLE_TTL: Duration = Duration::from_secs(10);
+const TITLE_TTL: Duration = Duration::from_secs(5);
 
 /// Codex 也有对话界面了（docs/CODEX_UI.md）。之前 Codex 终端的 `chat_ui` 是被强制关掉的，不是用户选的，
 /// 所以升级后给已有的 Codex 终端打开一次（和新建时的默认一样），下次启动生效；之后用户关掉的不再动。
@@ -288,7 +335,8 @@ impl Instances {
             changed: tokio::sync::watch::channel(0).0,
             first_prompt: Mutex::new(HashMap::new()),
             first_resume: Mutex::new(HashMap::new()),
-            titles: Mutex::new((None, HashMap::new(), HashMap::new())),
+            titles: Mutex::new(Probed::default()),
+            opened: Mutex::new(HashMap::new()),
         })
     }
 
@@ -315,14 +363,13 @@ impl Instances {
         let rows = self.store.instances()?;
         let sessions = self.tmux_sessions().await;
         let mut views: Vec<View> = rows.into_iter().map(|r| self.view(r, sessions.as_ref())).collect();
-        let stale = lock(&self.titles).0.is_none_or(|at| at.elapsed() >= TITLE_TTL);
+        let stale = lock(&self.titles).at.is_none_or(|at| at.elapsed() >= TITLE_TTL);
         if stale {
-            let (titles, convs) = self.agent_titles(&views).await;
-            *lock(&self.titles) = (Some(Instant::now()), titles, convs);
+            let probed = self.probe_all(&views).await;
+            *lock(&self.titles) = probed;
             let cache = lock(&self.titles);
             for v in &mut views {
-                v.agent_title = cache.1.get(&v.row.id).cloned();
-                v.conv_id = cache.2.get(&v.row.id).cloned();
+                cache.fill(v);
             }
         }
         Ok(views)
@@ -339,18 +386,17 @@ impl Instances {
         let sess = sessions.and_then(|m| m.get(&Self::session_name(&row.id)));
         let ts = |s: i64| crate::util::fmt_ms(s * 1000);
         let opts = self.opts(&row.id);
-        let (agent_title, conv_id) = {
-            let titles = lock(&self.titles);
-            (titles.1.get(&row.id).cloned(), titles.2.get(&row.id).cloned())
-        };
-        View {
+        let mut v = View {
             full_access: opts.full_access,
             root_confirmed: opts.root_confirmed,
             web_port: opts.web_port,
             chat_ui: opts.chat_ui,
             name_custom: opts.name_custom,
-            agent_title,
-            conv_id,
+            agent_title: None,
+            conv_id: None,
+            tool: None,
+            busy: None,
+            fg: None,
             claude_profile: crate::claude_profiles::pinned(&self.store, &row.id),
             codex_profile: crate::codex_profiles::pinned(&self.store, &row.id),
             container: self.container(&row.id),
@@ -361,80 +407,172 @@ impl Instances {
             error: lock(&self.health).get(&row.id).and_then(|h| h.error.clone()),
             url: format!("/i/{}/", row.id),
             row,
-        }
+        };
+        lock(&self.titles).fill(&mut v);
+        v
     }
 
     pub fn container(&self, id: &str) -> Option<crate::docker::Container> {
         self.store.get::<crate::docker::Container>(&container_key(id)).ok().flatten()
     }
 
-    /// agent 的会话名（Claude Code / Codex / OpenCode 的终端，终端 ID → 名字）：
+    /// 看每个在跑的会话里现在在跑什么（session_probe.rs）：哪个 AI 工具、会话名、忙不忙。
+    /// 会话名：
     /// 1. 对话标题（history.rs：/rename > 自动标题 > 摘要 > 第一句话）。是哪个对话：对话界面 hooks 记下的会话号、
-    ///    接着以前的对话时的会话号；都没有时，同一文件夹里只有这一个该工具的终端在跑，就取它启动之后最新的那个对话。
+    ///    接着以前的对话时的会话号、工具自己说的（Claude Code 的 sessions 文件、Codex 开着的记录文件）；都没有时，
+    ///    同一文件夹里只有这一个该工具的会话，就取工具进程启动之后**开始**的最新那个对话（不按最近有动静的取，
+    ///    不然别处的对话一有动静，名字就跟着变）。
     /// 2. agent 设置的终端标题（tmux `pane_title`，例如 Claude Code 的“✳ 修登录页”），去掉前面的状态符号。
-    /// 容器里的会话拿不到对话记录，只用 2。
-    /// 同时返回 1 里认出的是哪个对话（终端 ID → 对话号），会话列表里这个对话就不再单列。
-    async fn agent_titles(&self, views: &[View]) -> (HashMap<String, String>, HashMap<String, String>) {
-        let live: Vec<&View> = views.iter().filter(|v| v.task_alive == Some(true) && crate::history::AGENTS.contains(&v.row.launch.as_str())).collect();
-        let mut out = HashMap::new();
-        let mut ids = HashMap::new();
+    /// 容器里的会话看不到进程、拿不到对话记录，只用会话的类型和 2。
+    async fn probe_all(&self, views: &[View]) -> Probed {
+        let mut out = Probed { at: Some(Instant::now()), ..Default::default() };
+        let live: Vec<&View> = views.iter().filter(|v| v.task_alive == Some(true)).collect();
         if live.is_empty() {
-            return (out, ids);
+            return out;
         }
-        let panes = self.pane_titles().await;
-        let local: Vec<&&View> = live.iter().filter(|v| v.container.is_none()).collect();
+        let panes = self.panes().await;
+        let claude_dirs = self.claude_dirs();
+        // 拍进程表、读文件：放到阻塞线程里
+        let targets: Vec<(String, u32)> =
+            live.iter().filter(|v| v.container.is_none()).filter_map(|v| Some((v.row.id.clone(), panes.get(&Self::session_name(&v.row.id))?.pid))).collect();
+        let probes: HashMap<String, crate::session_probe::Found> = tokio::task::spawn_blocking(move || {
+            let snap = crate::session_probe::Snapshot::take();
+            let dets = crate::session_probe::detectors();
+            targets
+                .into_iter()
+                .filter_map(|(id, pid)| {
+                    let tree: Vec<&crate::session_probe::ProcInfo> = snap.get(pid).into_iter().chain(snap.descendants(pid)).collect();
+                    let ctx = crate::session_probe::Ctx { tree: &tree, claude_dirs: &claude_dirs };
+                    Some((id, crate::session_probe::probe(&dets, &ctx)?))
+                })
+                .collect()
+        })
+        .await
+        .unwrap_or_default();
+        // 每个会话的工具：认出来的；看不到进程的（容器里、没有 tmux）按会话类型
+        let tool_of = |v: &View| -> Option<&'static str> {
+            match probes.get(&v.row.id) {
+                Some(f) => Some(f.tool),
+                None if v.container.is_some() || !panes.contains_key(&Self::session_name(&v.row.id)) => {
+                    crate::history::AGENTS.iter().chain(["dsh"].iter()).find(|a| **a == v.row.launch).copied()
+                }
+                None => None,
+            }
+        };
         let mut convs = vec![];
         for agent in crate::history::AGENTS {
-            if local.iter().any(|v| v.row.launch == agent) {
+            if live.iter().any(|v| v.container.is_none() && tool_of(v) == Some(agent)) {
                 convs.extend(crate::history::list(crate::history::Query { agent: Some(agent.to_string()), limit: Some(500), ..Default::default() }).await);
             }
         }
-        let bound: HashMap<&str, String> = local
+        let bound: HashMap<&str, String> = live
             .iter()
+            .filter(|v| v.container.is_none())
             .filter_map(|v| {
                 let id = v.row.id.as_str();
-                let conv = crate::chat::binding(&self.store, id).map(|b| b.session_id).or_else(|| self.store.get::<String>(&resume_key(id)).ok().flatten())?;
+                // 工具自己说的最准（终端里 /resume、/clear 换了对话也跟得上），其次对话界面记下的、接着的
+                let conv = probes
+                    .get(id)
+                    .and_then(|f| f.conv.clone())
+                    .or_else(|| crate::chat::binding(&self.store, id).map(|b| b.session_id))
+                    .or_else(|| self.store.get::<String>(&resume_key(id)).ok().flatten())?;
                 Some((id, conv))
             })
             .collect();
         let taken: HashSet<&str> = bound.values().map(String::as_str).collect();
         for v in &live {
             let id = v.row.id.as_str();
-            let conv = if v.container.is_some() {
-                None
-            } else if let Some(c) = bound.get(id) {
-                convs.iter().find(|x| x.agent == v.row.launch && &x.id == c)
-            } else {
-                // 同一文件夹里同一工具没绑定的终端只有这一个时，取它启动之后最新的对话
-                let peers = local.iter().filter(|o| o.row.launch == v.row.launch && !bound.contains_key(o.row.id.as_str()) && crate::history::same_dir(&o.row.workdir, &v.row.workdir)).count();
-                let started = v.started_at.as_deref().and_then(crate::util::parse_time_ms).unwrap_or(i64::MAX);
-                (peers == 1)
-                    .then(|| convs.iter().filter(|x| x.agent == v.row.launch && !taken.contains(x.id.as_str()) && x.updated_ms >= started - 5000 && crate::history::same_dir(&x.workdir, &v.row.workdir)).max_by_key(|x| x.updated_ms))
-                    .flatten()
+            let tool = tool_of(v);
+            let pane = panes.get(&Self::session_name(id));
+            if let Some(t) = tool {
+                out.tools.insert(id.to_string(), t);
+            }
+            // 在忙：工具自己说的；普通终端看前台程序是不是 shell
+            match (tool, probes.get(id)) {
+                (Some(_), Some(f)) => {
+                    if let Some(b) = f.busy {
+                        out.busy.insert(id.to_string(), b);
+                    }
+                }
+                (None, _) => {
+                    if let Some(p) = pane.filter(|p| !p.command.is_empty()) {
+                        let idle = crate::session_probe::is_shell(&p.command);
+                        out.busy.insert(id.to_string(), !idle);
+                        if !idle {
+                            out.fg.insert(id.to_string(), p.command.clone());
+                        }
+                    }
+                }
+                _ => {}
+            }
+            let conv = match tool.filter(|t| crate::history::AGENTS.contains(t)) {
+                None => None,
+                Some(_) if v.container.is_some() => None,
+                Some(t) => match bound.get(id) {
+                    Some(c) => convs.iter().find(|x| x.agent == t && &x.id == c),
+                    None => {
+                        // 同一文件夹里同一工具没认出对话的会话只有这一个时，取工具启动之后开始的最新那个对话
+                        let peers = live.iter().filter(|o| tool_of(o) == Some(t) && !bound.contains_key(o.row.id.as_str()) && crate::history::same_dir(&o.row.workdir, &v.row.workdir)).count();
+                        let since = probes.get(id).map(|f| f.since as i64 * 1000).or_else(|| v.started_at.as_deref().and_then(crate::util::parse_time_ms)).unwrap_or(i64::MAX);
+                        let started = |c: &crate::history::Conv| c.started_at.as_deref().and_then(crate::util::parse_time_ms);
+                        (peers == 1)
+                            .then(|| {
+                                convs
+                                    .iter()
+                                    .filter(|x| x.agent == t && !taken.contains(x.id.as_str()) && crate::history::same_dir(&x.workdir, &v.row.workdir))
+                                    .filter_map(|x| Some((started(x)?, x)))
+                                    .filter(|(at, _)| *at >= since - 5000)
+                                    .max_by_key(|(at, _)| *at)
+                                    .map(|(_, x)| x)
+                            })
+                            .flatten()
+                    }
+                },
             };
             if let Some(c) = conv {
-                ids.insert(id.to_string(), c.id.clone());
+                out.convs.insert(id.to_string(), c.id.clone());
+                // 用量统计：这段 Claude Code 对话用的哪个账号 / 接口（对话记录里没有，都写在同一个 projects/ 里）
+                if c.agent == "claude" {
+                    let acc = probes.get(id).and_then(|f| f.account.as_ref());
+                    let key = crate::usage_stats::claude_account_key(&self.store, &self.paths.home, acc, Some(id));
+                    crate::usage_stats::note_conv(&self.store, &c.id, &key);
+                }
             }
-            let title = conv.map(|c| c.title.clone()).filter(|t| !t.trim().is_empty()).or_else(|| panes.get(&Self::session_name(id)).cloned());
+            // 普通终端在提示符时 shell 的标题不算（clean_pane_title 已去掉常见的）
+            let title = conv.map(|c| c.title.clone()).filter(|t| !t.trim().is_empty()).or_else(|| pane.and_then(|p| p.title.clone()).filter(|_| tool.is_some()));
             if let Some(t) = title {
-                out.insert(id.to_string(), clip_title(&t));
+                out.titles.insert(id.to_string(), clip_title(&t));
             }
         }
-        (out, ids)
+        out
     }
 
-    /// 每个 tmux 会话当前面板的标题（agent 用 OSC 设置的）。没设置过的（默认是主机名）、shell 的提示符标题不算。
-    async fn pane_titles(&self) -> HashMap<String, String> {
+    /// Claude Code 的配置目录：本机默认的和每个另外登录的官方账号的（claude_profiles.rs 的 account_dir）
+    fn claude_dirs(&self) -> Vec<PathBuf> {
+        let mut dirs = vec![crate::chat::models::config_dir()];
+        if let Ok(rd) = std::fs::read_dir(self.paths.home.join("claude-accounts")) {
+            dirs.extend(rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()));
+        }
+        dirs
+    }
+
+    /// 每个 tmux 会话当前面板：进程号、前台程序、agent 用 OSC 设置的标题（没设置过的、shell 的提示符标题为 None）
+    async fn panes(&self) -> HashMap<String, PaneInfo> {
         let Backend::Tmux(_) = self.backend else { return HashMap::new() };
-        let Ok(out) = self.tmux(&["list-sessions", "-F", "#{session_name}\t#{host}\t#{pane_title}"]).await else { return HashMap::new() };
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter_map(|l| {
-                let mut it = l.splitn(3, '\t');
-                let (name, host, title) = (it.next()?, it.next()?, it.next()?);
-                Some((name.to_string(), clean_pane_title(title, host)?))
-            })
-            .collect()
+        let fmt = "#{session_name}\t#{window_active}#{pane_active}\t#{pane_pid}\t#{pane_current_command}\t#{host}\t#{pane_title}";
+        let Ok(out) = self.tmux(&["list-panes", "-a", "-F", fmt]).await else { return HashMap::new() };
+        let mut m = HashMap::new();
+        for l in String::from_utf8_lossy(&out.stdout).lines() {
+            let mut it = l.splitn(6, '\t');
+            let (Some(name), Some(active), Some(pid), Some(cmd), Some(host), Some(title)) = (it.next(), it.next(), it.next(), it.next(), it.next(), it.next()) else { continue };
+            let Ok(pid) = pid.trim().parse::<u32>() else { continue };
+            // 多个窗口、面板时取当前的那个
+            if active != "11" && m.contains_key(name) {
+                continue;
+            }
+            m.insert(name.to_string(), PaneInfo { pid, command: cmd.trim().to_string(), title: clean_pane_title(title, host) });
+        }
+        m
     }
 
     pub fn opts(&self, id: &str) -> Opts {
@@ -723,6 +861,39 @@ impl Instances {
 
     /// 删除终端：还在运行时先停止（结束里面启动的所有程序，见 [`Instances::stop`]），不留下没人管的进程。
     /// 界面上删除前会提示正在运行的程序会被结束。
+    /// 界面上正开着这个会话
+    pub fn mark_opened(&self, id: &str) {
+        {
+            let mut m = lock(&self.opened);
+            if m.get(id).is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
+                return;
+            }
+            m.insert(id.to_string(), Instant::now());
+        }
+        let _ = self.store.set(&opened_key(id), &crate::util::system_ms());
+    }
+
+    /// 最近一次打开的时间（毫秒）。没记过的（这个功能之前建的会话）从现在算起，免得一升级就被当成很久没打开
+    pub fn opened_at(&self, id: &str) -> i64 {
+        if let Ok(Some(at)) = self.store.get::<i64>(&opened_key(id)) {
+            return at;
+        }
+        let now = crate::util::system_ms();
+        let _ = self.store.set(&opened_key(id), &now);
+        now
+    }
+
+    /// 停掉一个很久没打开的会话（清理后台会话）：AI 工具在写的对话记下来，下次启动接着它。会话本身留着
+    pub async fn stop_idle(&self, v: &View) -> Result<(), LocalError> {
+        let resumable = v.container.is_none() && !v.chat_ui && v.tool == Some(v.row.launch.as_str()) && crate::history::AGENTS.contains(&v.row.launch.as_str());
+        if let (true, Some(conv)) = (resumable, &v.conv_id) {
+            self.store.set(&idle_resume_key(&v.row.id), conv)?;
+        }
+        self.stop(&v.row.id).await?;
+        self.bump();
+        Ok(())
+    }
+
     pub async fn delete(&self, id: &str) -> Result<(), LocalError> {
         self.get(id).await?;
         self.stop(id).await?;
@@ -732,6 +903,8 @@ impl Instances {
         let _ = self.store.remove(&opts_key(id));
         let _ = self.store.remove(&container_key(id));
         let _ = self.store.remove(&resume_key(id));
+        let _ = self.store.remove(&opened_key(id));
+        let _ = self.store.remove(&idle_resume_key(id));
         crate::claude_profiles::unpin(&self.store, id);
         crate::codex_profiles::unpin(&self.store, id);
         lock(&self.health).remove(id);
@@ -1254,7 +1427,12 @@ impl Instances {
         }
         // 第一句话只用一次：取出来，建会话失败也不再用（用户重新启动时就是普通启动）
         let prompt = lock(&self.first_prompt).remove(&row.id);
-        let resume = lock(&self.first_resume).remove(&row.id);
+        // 很久没打开被自动停掉的：接着停掉时的那段对话（也只用一次）
+        let resume = lock(&self.first_resume).remove(&row.id).or_else(|| {
+            let conv = self.store.get::<String>(&idle_resume_key(&row.id)).ok().flatten()?;
+            let _ = self.store.remove(&idle_resume_key(&row.id));
+            Some(Resume { id: conv, fork: false })
+        });
         let (program, typed) = self.program_with(row, prompt.as_deref(), resume.as_ref())?;
         let mut args: Vec<String> = ["new-session", "-d", "-s", &name, "-c", &row.workdir, "-x", "120", "-y", "36"].map(String::from).to_vec();
         args.extend(self.session_env_args(row));
@@ -1761,9 +1939,20 @@ impl Instances {
     }
 }
 
-/// 子进程环境：保证 UTF-8（中文输入输出正常），并去掉外层 tmux 的变量。
+/// 外层 Claude Code 给它自己的子进程设的标记：看看是在 Claude Code 的终端里启动的时候（比如让 AI 重启看看）会传下去，
+/// 会话里的 Claude Code 就以为自己是子会话，不存对话记录（“Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION”）。
+/// `CLAUDE_CONFIG_DIR` 不在里面：那是用户自己设的
+const OUTER_AGENT_ENV: &[&str] = &[
+    "CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_PID", "CLAUDE_EFFORT",
+];
+
+/// 子进程环境：保证 UTF-8（中文输入输出正常），并去掉外层 tmux、外层 Claude Code 的变量。
 fn apply_env(cmd: &mut Command) {
     cmd.env_remove("TMUX").env_remove("TMUX_PANE");
+    for k in OUTER_AGENT_ENV {
+        cmd.env_remove(k);
+    }
     let utf8 = ["LC_ALL", "LC_CTYPE", "LANG"]
         .iter()
         .find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))

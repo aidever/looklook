@@ -111,9 +111,9 @@ export function Switch({ checked, onChange, disabled, label }) {
   return <button type="button" role="switch" className="switch" aria-checked={checked} aria-label={label} disabled={disabled} onClick={() => onChange(!checked)} />;
 }
 
-export function Card({ title, actions, children, className = '' }) {
+export function Card({ id, title, actions, children, className = '' }) {
   return (
-    <section className={`card ${className}`}>
+    <section id={id} className={`card ${className}`}>
       {(title || actions) && (
         <header className="card-head">
           {title && <h2>{title}</h2>}

@@ -118,6 +118,30 @@ export function useSeenPing(id, on) {
   }, [id, on]);
 }
 
+/**
+ * 会话开着（页面可见）时每 3 分钟告诉电脑一次：很久没打开的后台会话才会被自动停掉（电脑端 idle_stop.rs）。
+ * 旧版客户端没有这个接口：出错就不再报。
+ */
+export function useOpenedPing(id, on) {
+  useEffect(() => {
+    if (!on || !id) return undefined;
+    let dead = false;
+    const ping = () => {
+      if (dead || document.hidden) return;
+      api.post(`/instances/${id}/opened`, {}).catch((e) => {
+        if (e?.status === 404 || e?.status === 405) dead = true;
+      });
+    };
+    ping();
+    const timer = setInterval(ping, 180000);
+    document.addEventListener('visibilitychange', ping);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', ping);
+    };
+  }, [id, on]);
+}
+
 // “你离开期间”（docs/PLAN_2026-10-27.md §2.3）：上次看看板是什么时候，存在这个浏览器里（本机优先，不同步）
 const AWAY_KEY = 'looklook.board.left_at';
 /** 离开多久才算“离开过”（毫秒） */

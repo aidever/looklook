@@ -14,7 +14,7 @@ import { deviceName, useDevices } from '../shared/devices.jsx';
 import { errorText } from '../shared/i18n.js';
 import PopMenu from '../shared/PopMenu.jsx';
 import { Link, query, useRouter } from '../shared/router.jsx';
-import { AGENTS, projectEntries, projectPath, sessionState, sessionTitle, useSessions } from '../shared/sessions.jsx';
+import { AGENTS, projectEntries, projectPath, sessionLaunch, sessionState, sessionTitle, useSessions } from '../shared/sessions.jsx';
 import { Spinner, useConfirm, useToast } from '../shared/ui.jsx';
 import { ConvRow, timeBucket } from './History.jsx';
 import { QUICK_LAUNCHES, shortAgo, useActions, useSessionUi } from './Sessions.jsx';
@@ -352,7 +352,7 @@ function InstRow({ inst }) {
   return (
     <div className="conv proj-inst">
       <button type="button" className="conv-row" onClick={a.primary} disabled={a.busy || !a.allowed} title={inst.workdir}>
-        <LaunchIcon launch={inst.launch} size={18} className="conv-icon" />
+        <LaunchIcon launch={sessionLaunch(inst)} size={18} className="conv-icon" />
         <span className="conv-title ellipsis">{sessionTitle(inst)}</span>
         <span className="conv-when">{a.busy ? <Spinner size={13} /> : badge ? <span className={`badge ${badge}`}>{t(`sess.state.${state}`)}</span> : when > 0 && shortAgo(t, when)}</span>
         <span className="conv-sub">

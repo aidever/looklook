@@ -4,7 +4,7 @@
 // 侧栏每个项目只列最近几个，其余在项目页（Project.jsx）。
 // 项目 = 某台电脑上的一个文件夹（见 shared/sessions.jsx）。电脑用颜色 + 系统图标区分（shared/brands.jsx）。
 // 电脑上会话在右边打开，最近打开的几个在后台保持连接；手机上整页打开 /t/{id}（有按键条）。
-import { AlertCircle, Check, ChevronDown, Container, Copy, X, ChevronsDownUp, ChevronsUpDown, EyeOff, Folder, FolderPlus, History, Laptop, Lightbulb, ListTree, Moon, Pin, PinOff, Play, Plus, Search, SlidersHorizontal, PanelLeftClose, Trash2 } from 'lucide-react';
+import { AlertCircle, Check, ChevronDown, ChevronsDownUp, ChevronsUpDown, Container, Copy, Eraser, EyeOff, Folder, FolderPlus, History, Laptop, Lightbulb, ListTree, Moon, PanelLeftClose, Pin, PinOff, Play, Plus, Search, SlidersHorizontal, Trash2, X } from 'lucide-react';
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -18,7 +18,8 @@ import { linkFailure, linkLabel, linkState, useLinks } from '../shared/paths.jsx
 import { isTouch } from '../shared/KeyBar.jsx';
 import PopMenu from '../shared/PopMenu.jsx';
 import { Link, useRouter } from '../shared/router.jsx';
-import { baseName, customName, groupProjects, isActive as isLive, isDraftProject, lastUsed, projectEntries, projectPath, sessionDir, sessionState, sessionTitle, startedAt, useSessions } from '../shared/sessions.jsx';
+import { IdleCleanupDialog } from '../shared/IdleCleanup.jsx';
+import { baseName, customName, groupProjects, isActive as isLive, isDraftProject, lastUsed, projectEntries, projectPath, sessionDir, sessionLaunch, sessionState, sessionTitle, startedAt, useSessions } from '../shared/sessions.jsx';
 import { isMod, keyLabel } from '../shared/hotkeys.js';
 import { ErrorNote, Spinner, useToast } from '../shared/ui.jsx';
 import { AddProjectDialog } from './AddProject.jsx';
@@ -293,11 +294,11 @@ function SessionRow({ inst, current, attn, devTag = false }) {
   const title = sessionTitle(inst);
   const mine = customName(inst);
   const dir = sessionDir(inst);
-  const tip = [title, mine && t('sess.my_name', { name: mine }), inst.container ? `${inst.container.name}:${dir}` : dir].filter(Boolean).join('\n');
+  const tip = [title, mine && t('sess.my_name', { name: mine }), inst.fg && t('sess.running_cmd', { cmd: inst.fg }), inst.container ? `${inst.container.name}:${dir}` : dir].filter(Boolean).join('\n');
   return (
     <div className={`srow ${attn ? 'srow-attn' : ''} ${current ? 'current' : ''}`}>
       <button type="button" className="srow-main" {...press} disabled={a.busy || !a.allowed} aria-current={current ? 'page' : undefined} title={tip}>
-        <LaunchIcon launch={inst.launch} size={16} className="srow-icon" />
+        <LaunchIcon launch={sessionLaunch(inst)} size={16} className="srow-icon" />
         <span className="srow-text">
           <span className="ellipsis">{title}</span>
           {attn && (
@@ -718,6 +719,7 @@ export function SessionList({ currentId, onCollapse }) {
     writeStore(sessionStorage, STATUS_KEY, v);
   };
   // 折叠：用户点过的记住；没点过的，最近一周用过的项目展开，其他收起
+  const [cleanup, setCleanup] = useState(false);
   const [fold, setFoldState] = useState(() => readStore(localStorage, FOLD_KEY, {}));
   const setFold = (key, open) =>
     setFoldState((f) => {
@@ -882,10 +884,13 @@ export function SessionList({ currentId, onCollapse }) {
     groupBy !== 'recent' && projects.length > 0 && { icon: allOpen ? ChevronsDownUp : ChevronsUpDown, label: t(allOpen ? 'sess.fold_all' : 'sess.unfold_all'), onClick: foldAll },
     { icon: FolderPlus, label: t('sess.add_project'), onClick: () => ui.addProject() },
     { icon: History, label: t('hist.title'), onClick: () => navigate('/history') },
+    'sep',
+    { icon: Eraser, label: t('idle.menu'), onClick: () => setCleanup(true) },
   ];
   const searchable = s.items.length > 0 || s.projects.length > 3 || s.projects.some((p) => p.total > 0);
   return (
     <div className="slist">
+      {cleanup && <IdleCleanupDialog keep={s.tabs} onClose={() => setCleanup(false)} onDone={() => s.reload?.()} />}
       <div className="slist-top">
         <div className="slist-titlebar">
           <h2 className="slist-title grow">{t('sess.title')}</h2>
@@ -1122,7 +1127,7 @@ export function SessionStage({ activeId }) {
             missing={missing(id)}
             offline={s.offline(id)}
             active={id === activeId}
-            lead={inst && <LaunchIcon launch={inst.launch} size={16} />}
+            lead={inst && <LaunchIcon launch={sessionLaunch(inst)} size={16} />}
             sub={<SessionLead inst={inst} />}
             named={!opensInPage()}
             menu={inst && <SessionMenu inst={inst} />}
@@ -1290,7 +1295,7 @@ export function SessionTabs({ activeId }) {
                       }}
                       title={tip(inst)}
                     >
-                      <LaunchIcon launch={inst?.launch} size={15} />
+                      <LaunchIcon launch={sessionLaunch(inst)} size={15} />
                       <span className="stabs-row-text">
                         <span className="ellipsis">{inst ? sessionTitle(inst) : id}</span>
                         {inst && <SessionLead inst={inst} />}
@@ -1360,7 +1365,7 @@ function SessionTab({ id, index, active, title, dragging, onDragStart, onDragEnd
       }}
     >
       <button type="button" role="tab" aria-selected={active} className="stab-main" {...press} title={title}>
-        <LaunchIcon launch={inst?.launch} size={14} />
+        <LaunchIcon launch={sessionLaunch(inst)} size={14} />
         <span className="ellipsis">{inst ? sessionTitle(inst) : '…'}</span>
         <TabState inst={inst} />
       </button>

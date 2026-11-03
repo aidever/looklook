@@ -441,6 +441,8 @@ impl Chat {
             "cwd": st.codex.cwd.as_ref().or(st.dsh.cwd.as_ref()),
             // Claude Code 队列里的（读 transcript）；Codex 是插话（`turn/steer`）发出去、还没进对话的
             "queued": st.queued.iter().chain(&st.codex.steered).chain(&st.dsh.queued).collect::<Vec<_>>(),
+            // Codex：Tab 排到这一轮之后的（这一轮结束后作为下一轮发出）
+            "later": st.codex.later.iter().map(|(t, i)| json!({ "text": t, "images": i.len() })).collect::<Vec<_>>(),
             "limit": (st.limit_wait.is_some() || st.limit_auto_at.is_some()).then(|| json!({ "waiting": st.limit_wait, "auto_at": st.limit_auto_at })),
             "dialog": st.dialog,
             "effort": st.effort,
@@ -1372,7 +1374,17 @@ impl Chat {
     /// 发消息：文字按“打字”的方式送进去，图片路径用粘贴（TUI 才会变成图片附件），再按回车。
     /// 返回是否确认送达（收到了对应的 UserPromptSubmit）；没接上 hooks 时为 null。
     pub async fn input(self: &Arc<Self>, id: &str, text: &str, images: &[String]) -> Result<Value, LocalError> {
-        self.submit(id, text, images, false).await
+        self.submit(id, text, images, false, false).await
+    }
+
+    /// Codex 的 Tab：不插话，排到这一轮之后作为下一轮发出（别的工具、没在跑时同普通发送）
+    pub async fn send_later(self: &Arc<Self>, id: &str, text: &str, images: &[String]) -> Result<Value, LocalError> {
+        self.submit(id, text, images, false, true).await
+    }
+
+    pub fn later_take(&self, id: &str, n: usize) -> Result<Value, LocalError> {
+        self.require(id)?;
+        self.codex_later_take(id, n)
     }
 
     /// 立即发送：Claude Code 的 `chat:sendNow`（Ctrl+X Ctrl+S，2.1.275 起）。排着的消息连同这条马上发出：
@@ -1380,10 +1392,10 @@ impl Chat {
     /// 只在写回复、或者在做转不到后台的事时，打断这一轮、先回应。没在运行时就是普通发送。
     /// `text` 可以为空：只把排着的发出去。
     pub async fn send_now(self: &Arc<Self>, id: &str, text: &str, images: &[String]) -> Result<Value, LocalError> {
-        self.submit(id, text, images, true).await
+        self.submit(id, text, images, true, false).await
     }
 
-    async fn submit(self: &Arc<Self>, id: &str, text: &str, images: &[String], now: bool) -> Result<Value, LocalError> {
+    async fn submit(self: &Arc<Self>, id: &str, text: &str, images: &[String], now: bool, later: bool) -> Result<Value, LocalError> {
         self.require(id)?;
         let inst = self.inst(id);
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
@@ -1402,6 +1414,9 @@ impl Chat {
             }
         }
         if inst.agent.launch() == "codex" {
+            if later {
+                return self.codex_later(id, text, images).await;
+            }
             return self.codex_input(id, text, images).await;
         }
         if inst.agent.launch() == "dsh" {

@@ -92,12 +92,24 @@ pub struct CodexSt {
     preview_at: Option<Instant>,
     /// 运行中插话发出去、Codex 还没读到的（做完正在跑的这一步才会进对话），界面上显示成“排队中”
     pub steered: Vec<String>,
+    /// Tab 排到这一轮之后的（Codex TUI 的 Tab：不插话，这一轮结束后作为下一轮发出）：(文字, 图片)。
+    /// 一轮结束发出第一条；被停下的那一轮之后不自动发（和 TUI 一样，留给用户决定）
+    pub later: Vec<(String, Vec<String>)>,
     /// 正在重连模型服务（`error` 带 `willRetry`）：活动文字是 Codex 的提示，有新进展就去掉
     retrying: bool,
     /// 这段对话的工作目录（app-server 的 `thread.cwd`；在托管工作树里时不是终端的工作目录）
     pub cwd: Option<String>,
     /// 界面上选的权限（[`PERMS`] 之一）：之后每一轮、重新加载对话都带上；没选过是 None，按 Codex 自己的配置
     pub perm: Option<String>,
+}
+
+/// 发出排在一轮之后的消息（在通知处理里起任务；装箱是为了断开 codex_input → 通知处理 → codex_input 的类型递归）
+fn send_later(me: Arc<Chat>, id: String, text: String, images: Vec<String>) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(async move {
+        if let Err(e) = me.codex_input(&id, &text, &images).await {
+            tracing::warn!(instance = %id, "排在这一轮之后的消息没发出去：{e:?}");
+        }
+    })
 }
 
 /// 权限模式，和 TUI 的 `/permissions` 一样三档：只读（改文件、联网要问）、默认（工作目录里随便改，出了目录要问）、完全访问（不问、不用沙箱）
@@ -656,6 +668,13 @@ impl Chat {
                         st.end_hint = Some(super::board::Outcome::Interrupted);
                     }
                     Self::set_phase(&inst, &mut st, Phase::Idle, None);
+                    // Tab 排在这一轮之后的：发出第一条（下一轮结束时再发下一条）
+                    if p["turn"]["status"] != "interrupted" && !st.codex.later.is_empty() {
+                        let (text, images) = st.codex.later.remove(0);
+                        if let Some(me) = self.me.upgrade() {
+                            tokio::spawn(send_later(me, inst.id.clone(), text, images));
+                        }
+                    }
                     Self::emit_status(&inst, &st);
                     poll = true;
                     // 这一轮没跑成（比如连不上模型服务）就先不起名，那句话留到下一轮
@@ -848,6 +867,35 @@ impl Chat {
     }
 
     // ---------------- 界面的操作 ----------------
+
+    /// Tab：排到这一轮之后再发（见 [`CodexSt::later`]）；没在跑时就是普通发送
+    pub(super) async fn codex_later(&self, id: &str, text: &str, images: &[String]) -> Result<Value, LocalError> {
+        let inst = self.inst(id);
+        {
+            let mut st = lock(&inst.st);
+            if matches!(st.phase, Phase::Running | Phase::Approval) {
+                if st.codex.later.len() >= 20 {
+                    return Err(LocalError::invalid("text", "too_many"));
+                }
+                st.codex.later.push((text.to_string(), images.to_vec()));
+                Self::emit_status(&inst, &st);
+                return Ok(json!({ "delivered": true, "later": true }));
+            }
+        }
+        self.codex_input(id, text, images).await
+    }
+
+    /// 取回排在这一轮之后的第 `n` 条（界面放回输入框）
+    pub fn codex_later_take(&self, id: &str, n: usize) -> Result<Value, LocalError> {
+        let inst = self.inst(id);
+        let mut st = lock(&inst.st);
+        if n >= st.codex.later.len() {
+            return Err(LocalError::not_found());
+        }
+        let (text, images) = st.codex.later.remove(n);
+        Self::emit_status(&inst, &st);
+        Ok(json!({ "text": text, "images": images }))
+    }
 
     pub(super) async fn codex_input(&self, id: &str, text: &str, images: &[String]) -> Result<Value, LocalError> {
         let inst = self.inst(id);

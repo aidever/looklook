@@ -2030,6 +2030,20 @@ button.chat-task-head.chat-task-main { flex-direction: row; align-items: center;
   padding: 10px 12px calc(16px + env(safe-area-inset-bottom)); border-radius: 22px 22px 0 0; animation: fade .12s;
 }
 .menu-pop-sheet button { min-height: 52px; }
+/* 底部弹出：顶上一条标题（拖动条、名字、关闭），滚动时一直在 */
+.menu-pop-sheet-head {
+  position: sticky; top: -10px; z-index: 1; display: flex; align-items: center; gap: 8px; margin: -10px -12px 4px; padding: 16px 8px 8px 16px;
+  list-style: none; background: inherit; border-bottom: 1px solid var(--line); font-size: 15px;
+}
+.menu-pop-sheet-head b { flex: 1; min-width: 0; }
+.menu-pop-grab { position: absolute; top: 6px; left: 50%; width: 36px; height: 4px; margin-left: -18px; border-radius: 2px; background: var(--line); }
+.menu-pop-sheet .menu-pop-close { flex: none; display: grid; place-items: center; width: 40px; min-height: 40px; height: 40px; padding: 0; border-radius: 12px; color: var(--muted); }
+/* 从底部标签栏弹出的：停在标签栏上面，标签栏还能点（再点一下同一个标签就关）；顶上留出一截空白，点它也关 */
+.menu-pop-backdrop.over-tabs { bottom: calc(61px + env(safe-area-inset-bottom)); }
+.menu-pop-list.menu-pop-sheet.over-tabs {
+  bottom: calc(61px + env(safe-area-inset-bottom)); max-height: calc(100vh - 140px); max-height: calc(100dvh - 120px - env(safe-area-inset-bottom));
+  padding-bottom: 12px; box-shadow: 0 -8px 30px rgba(0, 0, 0, .18);
+}
 .menu-pop-head { padding: 8px 12px 2px; font-size: 11.5px; font-weight: 600; color: var(--muted); list-style: none; }
 .menu-pop-head:first-child { padding-top: 2px; }
 .ppick {
@@ -2320,7 +2334,10 @@ button.chat-task-head.chat-task-main { flex-direction: row; align-items: center;
 @media (prefers-color-scheme: dark) { .chat-bubble { background: linear-gradient(135deg, color-mix(in srgb, var(--claude) 80%, #000), color-mix(in srgb, var(--claude) 62%, #000)); } }
 
 /* 用户发的图片：气泡上方一排小图；点开全屏看 */
-.chat-user:has(.chat-user-imgs) { flex-direction: column; align-items: flex-end; gap: 6px; }
+.chat-user:has(.chat-user-imgs), .chat-user:has(.chat-user-more) { flex-direction: column; align-items: flex-end; gap: 6px; }
+/* 很长的话先收起：露出开头十来行，下面渐隐（mask，不管气泡是什么底色） */
+.chat-bubble[data-clip] { max-height: calc(1.55em * 10 + 18px); overflow: hidden; -webkit-mask-image: linear-gradient(to bottom, #000 65%, transparent); mask-image: linear-gradient(to bottom, #000 65%, transparent); }
+.chat-user-more { align-self: flex-end; display: inline-flex; align-items: center; gap: 4px; }
 .chat-user-imgs { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; max-width: min(80%, 640px); }
 .chat-user-img { width: 88px; height: 88px; padding: 0; border: 1px solid var(--line); border-radius: 14px; overflow: hidden; display: grid; place-items: center; background: var(--panel-2); color: var(--muted); cursor: zoom-in; transition: transform .15s, box-shadow .15s; }
 .chat-user-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
@@ -2328,23 +2345,7 @@ button.chat-task-head.chat-task-main { flex-direction: row; align-items: center;
 .chat-user-img:focus-visible { outline: 2px solid var(--claude); outline-offset: 2px; }
 .chat-user-img:disabled { cursor: default; }
 @media (max-width: 480px) { .chat-user-img { width: 72px; height: 72px; border-radius: 12px; } }
-.chat-lightbox {
-  position: fixed; inset: 0; z-index: 95; display: grid; place-items: center; padding: calc(56px + env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) calc(24px + env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
-  background: rgba(8, 10, 16, .9); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); animation: fade .15s; touch-action: pan-y;
-}
-.chat-lightbox-img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 6px; box-shadow: 0 20px 60px rgba(0, 0, 0, .5); cursor: zoom-out; animation: lightbox-in .2s ease-out; }
-@keyframes lightbox-in { from { opacity: 0; transform: scale(.96); } }
-.chat-lightbox-wait { color: rgba(255, 255, 255, .7); }
-.chat-lightbox-bar { position: absolute; top: 0; left: 0; right: 0; display: flex; align-items: center; gap: 6px; padding: calc(8px + env(safe-area-inset-top)) max(10px, env(safe-area-inset-right)) 8px max(14px, env(safe-area-inset-left)); color: #fff; }
-.chat-lightbox-count { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; color: rgba(255, 255, 255, .85); }
-.chat-lightbox-btn { width: 42px; height: 42px; display: grid; place-items: center; border: 0; border-radius: 50%; background: rgba(255, 255, 255, .12); color: #fff; cursor: pointer; }
-.chat-lightbox-btn:hover { background: rgba(255, 255, 255, .22); }
-.chat-lightbox-btn:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
-.chat-lightbox-nav { position: absolute; top: 50%; transform: translateY(-50%); }
-.chat-lightbox-nav.prev { left: max(12px, env(safe-area-inset-left)); }
-.chat-lightbox-nav.next { right: max(12px, env(safe-area-inset-right)); }
-@media (hover: none) { .chat-lightbox-nav { display: none; } }
-@media (prefers-reduced-motion: reduce) { .chat-lightbox, .chat-lightbox-img, .chat-user-img { animation: none; transition: none; } }
+@media (prefers-reduced-motion: reduce) { .chat-user-img { animation: none; transition: none; } }
 
 /* 新出现的一条从下面浮上来 */
 .chat-items > :last-child { animation: rise .32s cubic-bezier(.2, .8, .2, 1) both; }
@@ -2542,6 +2543,10 @@ button.chat-task-head.chat-task-main { flex-direction: row; align-items: center;
 .chat-ways { display: flex; flex-direction: column; gap: 3px; padding: 0 6px; font-size: 12px; line-height: 1.5; color: var(--muted); animation: rise .2s ease-out both; }
 .chat-ways span { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
 .chat-ways b { flex: none; font-weight: 600; color: var(--text); }
+.chat-later .chat-queued-head svg { flex: none; }
+.chat-later-row { display: flex; align-items: flex-start; gap: 6px; }
+.chat-later-row .btn { flex: none; margin: -4px -6px -4px 0; }
+.chat-ways .chat-later-btn { flex: none; min-height: 24px; padding: 0 8px; font-size: 12px; display: inline-flex; align-items: center; gap: 4px; }
 .chat-ways kbd, .chat-ways svg { flex: none; align-self: center; }
 .chat-ways kbd { min-width: 72px; text-align: center; padding: 0 5px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px; font: 11px/16px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--text); background: var(--panel); }
 .chat-now-btn { flex: none; color: var(--claude); border: 1px solid color-mix(in srgb, var(--claude) 40%, var(--line)); }
@@ -2861,6 +2866,15 @@ button.chat-task-head.chat-task-main { flex-direction: row; align-items: center;
 .md-copy .md-copy-ok, .md-copy[data-done] .md-copy-i { display: none; }
 .md-copy[data-done] .md-copy-ok { display: block; color: var(--ok, #16a34a); }
 .md-copy[data-done] { opacity: 1; }
+/* mermaid 图：画好后默认看图，点 </> 看源码 */
+.md-src { pointer-events: auto; display: grid; place-items: center; min-width: 30px; height: 30px; padding: 0 6px; border: 1px solid transparent; border-radius: 8px; background: color-mix(in srgb, var(--panel) 85%, transparent); color: var(--muted); font: 11px var(--mono); cursor: pointer; opacity: 0; transition: opacity .15s; }
+.md-code:hover .md-src, .md-src:focus-visible, .md-code[data-src] .md-src { opacity: 1; }
+.md-code[data-lang="mermaid"]:not([data-drawn]) .md-src { display: none; }
+.md-code[data-drawn]:not([data-src]) > pre { display: none; }
+.md-code[data-drawn][data-src] > .md-mermaid { display: none; }
+.md-mermaid { overflow-x: auto; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); text-align: center; }
+.md-mermaid svg { max-width: 100%; height: auto; }
+@media (hover: none) { .md-src { opacity: 1; } }
 @media (hover: none) { .md-copy { opacity: .85; width: 36px; height: 36px; } }
 
 /* 命令、工具输出：右上角复制 */
@@ -3042,14 +3056,10 @@ button.chat-task-head.chat-task-main { flex-direction: row; align-items: center;
 
 /* 对话里点到的文件：页面里预览（ChatView 的 FileViewer，里面是“文件”页的预览） */
 .chat-file-viewer { position: fixed; inset: 0; z-index: 95; display: grid; place-items: center; padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); background: rgba(8, 10, 16, .55); animation: fade .15s; }
+@keyframes lightbox-in { from { opacity: 0; transform: scale(.96); } }
 .chat-file-viewer .fb-preview { width: min(960px, 100%); height: min(86vh, 100%); flex: none; border: 1px solid var(--line); border-radius: 14px; overflow: hidden; box-shadow: 0 24px 70px rgba(0, 0, 0, .35); animation: lightbox-in .18s ease-out; }
 @media (max-width: 640px) { .chat-file-viewer { padding: 0; } .chat-file-viewer .fb-preview { width: 100%; height: 100%; border-radius: 0; border: 0; } }
 /* 大图：适应屏幕 / 原始大小（可以滚动） */
-.chat-lightbox-name { min-width: 0; font-size: 14px; color: rgba(255, 255, 255, .85); }
-.chat-lightbox-stage { position: absolute; inset: calc(56px + env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) calc(24px + env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); display: grid; place-items: center; overflow: hidden; }
-.chat-lightbox-stage .chat-lightbox-img { cursor: zoom-in; }
-.chat-lightbox.zoomed .chat-lightbox-stage { overflow: auto; place-items: start center; touch-action: pan-x pan-y; }
-.chat-lightbox.zoomed .chat-lightbox-img { max-width: none; max-height: none; cursor: zoom-out; }
 .chat-gen-zoom { display: block; width: 100%; padding: 0; border: 0; background: none; cursor: zoom-in; }
 .chat-gen-zoom:disabled { cursor: default; }
 
@@ -3171,7 +3181,8 @@ button.chat-read-no:hover { color: var(--brand); opacity: 1; }
 .draft-hint { display: grid; gap: 2px; }
 .draft-tip { display: inline-flex; align-items: center; justify-content: center; gap: 2px; }
 .draft-tip .btn { width: 24px; min-height: 24px; padding: 0; color: var(--muted); }
-.onboard-foot { justify-content: space-between; }
+.onboard-foot { justify-content: space-between; flex-wrap: wrap; gap: 2px 8px; }
+.onboard-foot .btn { white-space: normal; text-align: left; min-width: 0; }
 .onboard-foot .onboard-more { color: var(--brand); }
 .discover-lead { margin: 0 0 12px; }
 .discover-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; }
@@ -3216,3 +3227,35 @@ button.chat-read-no:hover { color: var(--brand); opacity: 1; }
 @keyframes pet-z { 0% { opacity: 0; transform: translate(0, 0) scale(.8); } 30% { opacity: 1; } 100% { opacity: 0; transform: translate(-8px, -14px) scale(1.2); } }
 @keyframes pet-bubble { 0% { opacity: 0; transform: translateY(0) scale(.6); } 20% { opacity: 1; } 100% { opacity: 0; transform: translateY(-26px) scale(1.1); } }
 @media (prefers-reduced-motion: reduce) { .chat-pet-body, .chat-pet-mark, .chat-pet-z, .chat-pet-bubbles i, .chat-pet[data-mood] .chat-pet-body { animation: none; } .chat-pet-bubbles i { opacity: .6; } .chat-pet-z { opacity: 1; } }
+.chat-view .md img { cursor: zoom-in; }
+/* 手机会话页顶栏：工具图标 + 右下角在线点 */
+.term-lead { position: relative; flex: none; display: inline-grid; place-items: center; }
+.term-lead .dot { position: absolute; right: -3px; bottom: -3px; width: 8px; height: 8px; box-shadow: 0 0 0 2px var(--term-chrome, var(--panel)); }
+/* 清理后台会话（shared/IdleCleanup.jsx） */
+.idle-dlg .muted.small { margin: 0 0 10px; line-height: 1.6; }
+.idle-head { display: flex; align-items: center; gap: 4px; margin: 6px 0; font-size: 13px; font-weight: 600; }
+.idle-list { display: flex; flex-direction: column; gap: 2px; max-height: min(46vh, 380px); overflow-y: auto; margin: 0 -6px 10px; padding: 2px; }
+.idle-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 10px; cursor: pointer; }
+.idle-row:hover { background: var(--panel-2); }
+.idle-row input { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--brand); }
+.idle-row .brand-icon, .idle-row .lucide { flex: none; }
+.idle-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; font-size: 14px; }
+.idle-sub { font-size: 12px; color: var(--muted); }
+.idle-busy { font-weight: 600; color: var(--warn); }
+.idle-sure { display: flex; align-items: flex-start; gap: 8px; margin: 10px 0 4px; font-size: 13px; line-height: 1.5; cursor: pointer; }
+.idle-sure input { flex: none; margin: 3px 0 0; accent-color: var(--danger); }
+
+/* 通知设置页最上面的说明：现在配到哪一步，点一下跳到那张卡片 */
+.nt-intro { margin: 0; padding-left: 18px; display: grid; gap: 4px; font-size: 13px; line-height: 1.55; }
+.nt-intro-rows { display: grid; gap: 2px; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.nt-intro-row { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: none; border: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.nt-intro-row + .nt-intro-row { border-top: 1px solid var(--line); }
+.nt-intro-row:hover { background: var(--panel-2); }
+#nt-feishu, #nt-hooks, #nt-agent { scroll-margin-top: 16px; }
+
+/* 终端顶栏的延迟标签：点开看连接方式、丢包率、两端地址 */
+.link-badge-wrap { flex: none; }
+button.link-badge { border: 0; font-family: inherit; cursor: pointer; }
+button.link-badge:hover { filter: brightness(1.15); }
+.link-pop { width: min(320px, calc(100vw - 24px)); }
+@media (max-width: 520px) { .link-pop { position: fixed; top: calc(52px + env(safe-area-inset-top, 0px)); left: 12px; right: 12px; width: auto; } }

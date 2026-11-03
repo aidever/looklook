@@ -80,6 +80,8 @@ export const isActive = (i) => Boolean(i.running || i.task_alive);
 export const bySessionOrder = (a, b) => isActive(b) - isActive(a) || startedAt(b) - startedAt(a);
 /** 会话显示的名字：agent 自己的会话名为主，没有时用会话名。 */
 export const sessionTitle = (i) => i?.agent_title || i?.name || '';
+/** 图标用的类型：现在在跑的 AI 工具（普通终端里手动起的 claude、codex 也算，电脑端 session_probe.rs 认的），否则会话的类型 */
+export const sessionLaunch = (i) => i?.tool || i?.launch;
 /** 用户自己起的名字（和 agent 的会话名不一样时作为次要信息显示）。 */
 export const customName = (i) => (i?.agent_title && i.name_custom && i.name !== i.agent_title ? i.name : null);
 /** 会话的目录：容器里的会话是容器里的目录。 */
@@ -123,6 +125,8 @@ export function sessionState(i) {
   if (i.running && i.chat?.phase === 'running') return 'working';
   // 这一轮做完了、还没看过：完成蓝点，出错红点（打开看过就回到普通的运行中）
   if (i.running && i.chat?.board === 'ended') return i.chat.turn?.outcome === 'failed' ? 'failed' : 'done';
+  // 没有对话界面的：AI 工具在回复、普通终端有命令在跑（电脑端看进程认出来的）
+  if (i.running && !i.chat && i.busy) return 'working';
   if (i.running) return 'idle';
   return i.task_alive ? 'paused' : 'stopped';
 }

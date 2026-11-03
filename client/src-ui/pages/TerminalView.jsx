@@ -10,7 +10,7 @@ import { useTranslation } from 'react-i18next';
 import { useStatus } from '../App.jsx';
 import { api, selectedDevice, terminalDevice } from '../shared/api.js';
 import { CHAT_LAUNCHES } from '../shared/chat.js';
-import { usePaths } from '../shared/paths.jsx';
+import { lossLevel, lossText, PathRows, usePaths, usePop } from '../shared/paths.jsx';
 import { termFit, termFocus, termOffline, termPaste, termSrc, useFocusWhenReady, useRefitOnReturn, useTermConn, useTermTheme } from '../shared/termFrame.js';
 import { backToDraft, retryFirst, useFirstSend } from '../shared/firstSend.js';
 import ErrorBoundary from '../shared/ErrorBoundary.jsx';
@@ -19,7 +19,8 @@ import { AI_LAUNCHES } from '../shared/keys.js';
 import KeyBar, { isTouch, keepFocus, useKeybarShown, useTouchTerminal } from '../shared/KeyBar.jsx';
 import PopMenu from '../shared/PopMenu.jsx';
 import { useRouter } from '../shared/router.jsx';
-import { customName, sessionTitle, useSessions } from '../shared/sessions.jsx';
+import { customName, sessionLaunch, sessionTitle, useSessions } from '../shared/sessions.jsx';
+import { LaunchIcon } from '../shared/brands.jsx';
 import TextSelect, { useTextSelect } from '../shared/TextSelect.jsx';
 import { TermThemeModal } from '../shared/ThemePicker.jsx';
 import { Button, Card, useLoad, useToast } from '../shared/ui.jsx';
@@ -29,7 +30,7 @@ import GitPanel from './GitPanel.jsx';
 import { WebPage } from './WebPane.jsx';
 import { useTermFiles } from './TermFiles.jsx';
 import { APP_CHROME, termTheme, termVars } from '../shared/termTheme.js';
-import { useSeenPing } from '../shared/board.js';
+import { useOpenedPing, useSeenPing } from '../shared/board.js';
 import { TipPop, useTip } from '../shared/tips.jsx';
 
 /** 终端页面加载期间的提示：跳动的小点 + 一句人话；等得久了给出刷新按钮。 */
@@ -68,15 +69,35 @@ function LinkBadge({ id }) {
   const { t } = useTranslation();
   const { status } = useStatus();
   const paths = usePaths();
+  const pop = usePop();
   const dev = terminalDevice(id) ?? selectedDevice();
   const p = dev ? paths[dev] : status.access === 'remote' ? Object.values(paths)[0] : null;
   if (!p) return null;
   const ms = p.rtt_ms;
-  const tip = [t(`path.${p.kind}`), ms != null ? `${ms} ms` : null].filter(Boolean).join(' · ');
+  const loss = lossLevel(p.loss);
+  const tip = [t(`path.${p.kind}`), ms != null ? `${ms} ms` : null, lossText(p.loss) ? t('path.loss', { loss: lossText(p.loss) }) : null].filter(Boolean).join(' · ');
+  // 点开看连接方式、丢包率和两端地址（手机上没有悬停）
   return (
-    <span className={`link-badge ${ms != null && ms >= SLOW_MS ? 'link-slow' : ''}`} title={tip}>
-      <span className={`dot path-${p.kind}`} aria-hidden="true" style={{ width: 7, height: 7 }} />
-      {ms != null ? `${ms} ms` : t(`path.${p.kind}`)}
+    <span className="relay-pill-wrap link-badge-wrap" ref={pop.ref}>
+      <button
+        type="button"
+        className={`link-badge ${(ms != null && ms >= SLOW_MS) || loss === 'warn' || loss === 'bad' ? 'link-slow' : ''}`}
+        title={tip}
+        aria-expanded={pop.open}
+        aria-haspopup="dialog"
+        onClick={() => pop.setOpen(!pop.open)}
+      >
+        <span className={`dot path-${p.kind}`} aria-hidden="true" style={{ width: 7, height: 7 }} />
+        {ms != null ? `${ms} ms` : t(`path.${p.kind}`)}
+        {loss && loss !== 'ok' && <span> · {lossText(p.loss)}</span>}
+      </button>
+      {pop.open && (
+        <div className="relay-pop link-pop" role="dialog" aria-label={t('conn.title')}>
+          <dl className="kv conn-kv">
+            <PathRows p={p} />
+          </dl>
+        </div>
+      )}
     </span>
   );
 }
@@ -334,6 +355,7 @@ export function TermPane({ id, inst, active, missing, offline = false, onStart, 
   const { t } = useTranslation();
   // 有人正在看这个会话（任务看板：结束的这一轮算看过，不发通知）
   useSeenPing(id, Boolean(active && hasChat(inst) && !offline));
+  useOpenedPing(id, Boolean(active && !missing && !offline));
   const { status } = useStatus();
   const wrap = useRef(null);
   const frame = useRef(null);
@@ -572,6 +594,7 @@ function TermPage({ id }) {
   const link = { src: termSrc(id) };
   const [loadedInst, loadError, reload] = useLoad(() => api.get(`/instances/${id}`), [id]);
   useSeenPing(id, hasChat(loadedInst));
+  useOpenedPing(id, true);
   // 连不上电脑（重连中、网络断了）时轮询会失败：沿用上一次的终端信息，不把终端换成错误页（那样会关掉终端、要点“返回”）
   const last = useRef(null);
   if (loadedInst) last.current = { id, inst: loadedInst };
@@ -739,7 +762,11 @@ function TermPage({ id }) {
           <ArrowLeft size={20} />
         </button>
         <span className="term-title">
-          <span className={`dot ${live ? 'on' : ''}`} />
+          {/* 手机上的会话页：工具图标，右下角一个在线小点 */}
+          <span className="term-lead">
+            <LaunchIcon launch={sessionLaunch(inst) ?? 'shell'} size={18} />
+            <span className={`dot ${live ? 'on' : ''}`} />
+          </span>
           <span className="ellipsis">{inst ? sessionTitle(inst) : "…"}</span>
           {live && <LinkBadge id={id} />}
         </span>

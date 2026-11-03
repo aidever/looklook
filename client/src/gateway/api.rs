@@ -42,6 +42,8 @@ pub fn routes(app: App) -> Router<App> {
         .route("/rtc/net/detect", post(crate::rtc::net::post_detect))
         .route("/platform/{*rest}", get(platform_web).post(platform_web).put(platform_web).patch(platform_web).delete(platform_web))
         .route("/instances", get(list_instances).post(create_instance))
+        .route("/instances/idle", get(list_idle).post(stop_idle))
+        .route("/instances/{id}/opened", post(instance_opened))
         .route("/instances/{id}", get(get_instance).patch(update_instance).delete(delete_instance))
         .route("/instances/{id}/start", post(start_instance))
         .route("/instances/{id}/stop", post(stop_instance))
@@ -80,6 +82,7 @@ pub fn routes(app: App) -> Router<App> {
         .route("/instances/{id}/chat/mentions", get(super::chat::mentions))
         .route("/instances/{id}/chat/prompts", get(super::chat::prompts))
         .route("/instances/{id}/chat/input", post(super::chat::input))
+        .route("/instances/{id}/chat/later/take", post(super::chat::later_take))
         .route("/instances/{id}/chat/interrupt", post(super::chat::interrupt))
         .route("/instances/{id}/chat/permission", post(super::chat::permission))
         .route("/instances/{id}/chat/plan", post(super::chat::plan))
@@ -162,6 +165,7 @@ pub fn routes(app: App) -> Router<App> {
         .route("/notify/unbind", post(super::notify::unbind))
         .route("/notify/rules", put(super::notify::put_rules))
         .route("/notify/test", post(super::notify::test))
+        .route("/notify/foreground", post(super::notify::foreground))
         .route("/notify/hooks", put(super::notify::put_hook))
         .route("/notify/hooks/{id}", delete(super::notify::delete_hook))
         .route("/notify/hooks/{id}/test", post(super::notify::test_hook))
@@ -437,6 +441,33 @@ async fn platform_web(State(app): State<App>, Path(rest): Path<String>, req: Req
 async fn list_instances(State(app): State<App>) -> R<Json<Value>> {
     let items: Vec<Value> = app.instances.list().await?.into_iter().map(|v| with_chat(&app, v)).collect();
     Ok(Json(json!({ "items": items })))
+}
+
+/// 清理后台会话：在后台跑着的会话（很久没打开的在前），带上自动清理的天数（idle_stop.rs）
+async fn list_idle(State(app): State<App>) -> R<Json<Value>> {
+    let items = crate::idle_stop::list(&app.instances, &app.chat).await;
+    Ok(Json(json!({ "items": items, "days": Settings::load(&app.store).normalized().idle_stop_days })))
+}
+
+#[derive(Deserialize)]
+struct StopIdleReq {
+    ids: Vec<String>,
+}
+
+/// 停掉勾选的后台会话（会话留着，下次点开重新启动）
+async fn stop_idle(State(app): State<App>, Json(req): Json<StopIdleReq>) -> R<Json<Value>> {
+    if req.ids.len() > 500 {
+        return Err(LocalError::invalid("ids", "too_many"));
+    }
+    let n = crate::idle_stop::stop(&app.instances, &req.ids).await;
+    Ok(Json(json!({ "stopped": n })))
+}
+
+/// 界面上正开着这个会话（几分钟报一次）：很久没打开的才会被自动停掉
+async fn instance_opened(State(app): State<App>, Path(id): Path<String>) -> R<StatusCode> {
+    app.instances.get(&id).await?;
+    app.instances.mark_opened(&id);
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// 带对话界面的终端加上对话状态（会话卡片上的“等待确认”角标）

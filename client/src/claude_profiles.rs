@@ -638,7 +638,9 @@ pub async fn status(shell: &str, home: &Path, p: &Profile) -> Value {
     }
     let Some(cli) = crate::agents::claude_cli(shell).await else { return json!({ "error": "not_installed" }) };
     let dir = account_dir(home, &p.id);
-    let mut env: Vec<(&str, Option<&std::ffi::OsStr>)> = vec![];
+    // 不让 Claude Code 自己打开浏览器：看看可能装在别的电脑上，用户在界面上点“打开”才开。
+    // BROWSER 指向一个不存在的程序，它打开失败后照常打印授权页地址、等授权码
+    let mut env: Vec<(&str, Option<&std::ffi::OsStr>)> = vec![("BROWSER", Some(std::ffi::OsStr::new("looklook-no-browser")))];
     if p.id != OFFICIAL {
         env.push(("CLAUDE_CONFIG_DIR", Some(dir.as_os_str())));
     }
@@ -705,8 +707,7 @@ fn parse_status(stdout: &str) -> Value {
 //
 // 在后台运行 Claude Code 自己的 `claude auth login`：它没有终端时打印授权页地址，然后从标准输入读授权码。
 // 界面显示这个地址（用户自己打开、在 claude.com 上登录），把用户粘贴的授权码原样写给它；换令牌、保存令牌都是
-// Claude Code 自己做的。看看不保存、不记录授权码，也碰不到令牌。看看就在这台电脑上时，Claude Code 也可能自己
-// 打开浏览器、走本机回调，不用粘贴就完成。
+// Claude Code 自己做的。看看不保存、不记录授权码，也碰不到令牌。不让它自己打开浏览器（见 login_start）。
 
 /// 一次登录最长等多久（用户去浏览器里登录）
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -744,7 +745,9 @@ pub async fn login_start(shell: &str, home: &Path, store: std::sync::Arc<Store>,
     login_cancel(&p.id);
     let cli = crate::agents::claude_cli(shell).await.ok_or_else(|| LocalError::new("AGENT_NOT_FOUND").with("agent", "claude"))?;
     let dir = account_dir(home, &p.id);
-    let mut env: Vec<(&str, Option<&std::ffi::OsStr>)> = vec![];
+    // 不让 Claude Code 自己打开浏览器：看看可能装在别的电脑上，用户在界面上点“打开”才开。
+    // BROWSER 指向一个不存在的程序，它打开失败后照常打印授权页地址、等授权码
+    let mut env: Vec<(&str, Option<&std::ffi::OsStr>)> = vec![("BROWSER", Some(std::ffi::OsStr::new("looklook-no-browser")))];
     if p.id != OFFICIAL {
         prepare_dir(home, &p.id)?;
         env.push(("CLAUDE_CONFIG_DIR", Some(dir.as_os_str())));

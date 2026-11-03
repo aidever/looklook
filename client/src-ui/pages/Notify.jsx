@@ -3,7 +3,9 @@
 //   公司不让建、或者已有应用的，展开手动配置的向导（建应用 → 权限 → 填 App ID / Secret → 长连接和回调 → 发布 → 绑定）；
 //   配好后显示连接状态、绑定、测试，以及“扫码补全权限”；
 // - HooksCard：只通知的渠道（企业微信、钉钉、Server酱、PushPlus、Bark、ntfy），和飞书同时发，只带“打开”的链接；
-// - RulesCard：发哪些通知、能不能在飞书里处理、卡片里显示不显示内容、静音的项目。
+// - IntroCard：通知什么时候发、发到哪、现在配到哪一步了（点一下跳到那张卡片）；
+// - RulesCard：发哪些通知、看看开着时不发、能不能在飞书里处理、卡片里显示不显示内容、每个项目一个群、少打扰、静音的项目；
+// - AgentCard：飞书机器人（在飞书里和 AI 对话）：开关、怎么用、群里的隐私、机器人菜单。
 // 配置经“设置同步”在用户自己的电脑之间传；连接状态是当前这台电脑的。
 import { CheckCircle2, ExternalLink } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
@@ -50,6 +52,74 @@ const KINDS = {
   bark: { secret: false, help: 'https://bark.day.app/' },
   ntfy: { secret: true, help: 'https://docs.ntfy.sh/' },
 };
+
+function Toggle({ r, k, title, hint, busy, save, disabled }) {
+  return (
+    <div className="between" style={{ flexWrap: 'nowrap', gap: 12 }}>
+      <span>
+        <b>{title}</b>
+        {hint && (
+          <span className="small muted" style={{ display: 'block' }}>
+            {hint}
+          </span>
+        )}
+      </span>
+      <Switch checked={Boolean(r[k])} disabled={busy || disabled} onChange={(v) => save({ [k]: v })} label={title} />
+    </div>
+  );
+}
+
+/** 保存规则（带上界面语言：卡片跟着界面语言） */
+function useRules(data, reload) {
+  const { i18n } = useTranslation();
+  const { busy, error, run } = useAction();
+  const r = data?.rules;
+  const lang = i18n.language?.startsWith('en') ? 'en-US' : 'zh-CN';
+  const save = async (patch) => {
+    if (await run(() => api.put('/notify/rules', { ...r, ...patch, lang }))) reload();
+  };
+  return { r, lang, save, busy, error };
+}
+
+const jump = (id) => document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+/** 最上面：通知什么时候发、发到哪，现在配到哪一步了 */
+function IntroCard({ data }) {
+  const { t } = useTranslation();
+  if (!data) return null;
+  const f = data.feishu;
+  const hooks = data.hooks?.length ?? 0;
+  const r = data.rules ?? {};
+  const rows = [
+    { id: 'nt-feishu', ok: Boolean(f?.bound), label: t('notify.intro_feishu'), state: f?.bound ? t('notify.intro_feishu_on') : f ? t('notify.intro_feishu_unbound') : t('notify.intro_off') },
+    { id: 'nt-hooks', ok: hooks > 0, label: t('notify.intro_hooks'), state: hooks > 0 ? t('notify.intro_hooks_n', { n: hooks }) : t('notify.intro_off') },
+  ];
+  if (f?.bound) rows.push({ id: 'nt-agent', ok: Boolean(r.agent && r.actions), label: t('notify.intro_agent'), state: r.agent && r.actions ? t('notify.intro_on') : t('notify.intro_off') });
+  return (
+    <Card title={t('notify.intro_title')}>
+      <div className="stack" style={{ gap: 10 }}>
+        <p className="small muted" style={{ margin: 0 }}>
+          {t('notify.intro_lead')}
+        </p>
+        <ul className="nt-intro">
+          <li>{t('notify.intro_what')}</li>
+          <li>{t('notify.intro_where')}</li>
+          <li>{t('notify.intro_fg')}</li>
+        </ul>
+        <div className="nt-intro-rows">
+          {rows.map((x) => (
+            <button key={x.id} type="button" className="nt-intro-row" onClick={() => jump(x.id)}>
+              <span className={`nt-dot ${x.ok ? 'ok' : ''}`} aria-hidden="true" />
+              <span className="grow">{x.label}</span>
+              <span className="small muted">{x.state}</span>
+            </button>
+          ))}
+        </div>
+        {!f && !hooks && <Note>{t('notify.intro_start')}</Note>}
+      </div>
+    </Card>
+  );
+}
 
 function Code({ text }) {
   return (
@@ -342,7 +412,7 @@ export function FeishuCard({ data, reload }) {
   );
 
   return (
-    <Card title={t('notify.feishu_title')}>
+    <Card id="nt-feishu" title={t('notify.feishu_title')}>
       <p className="small muted" style={{ marginTop: 0 }}>
         {t('notify.feishu_lead')}
       </p>
@@ -481,7 +551,7 @@ export function HooksCard({ data, reload }) {
   const hooks = data?.hooks ?? [];
   if (!data) return null;
   return (
-    <Card title={t('notify.hooks_title')}>
+    <Card id="nt-hooks" title={t('notify.hooks_title')}>
       <div className="stack" style={{ gap: 14 }}>
         <p className="small muted" style={{ margin: 0 }}>
           {t('notify.hooks_lead')}
@@ -513,34 +583,17 @@ export function HooksCard({ data, reload }) {
 }
 
 export function RulesCard({ data, reload }) {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const sessions = useSessions();
-  const { busy, error, run } = useAction();
-  const r = data?.rules;
+  const { r, lang, save, busy, error } = useRules(data, reload);
   const [adding, setAdding] = useState('');
-  const lang = i18n.language?.startsWith('en') ? 'en-US' : 'zh-CN';
-  const save = async (patch) => {
-    if (await run(() => api.put('/notify/rules', { ...r, ...patch, lang }))) reload();
-  };
   // 卡片跟着界面语言：换了语言后下次打开这里时顺手更新
   useEffect(() => {
     if (r && r.lang !== lang && (data?.feishu || data?.hooks?.length)) save({});
   }, [lang, Boolean(r)]);
   const dirs = useMemo(() => [...new Set((sessions.items ?? []).map((i) => i.workdir).filter(Boolean))].sort(), [sessions.items]);
   if (!r) return null;
-  const toggle = (k, title, hint) => (
-    <div className="between" style={{ flexWrap: 'nowrap', gap: 12 }}>
-      <span>
-        <b>{title}</b>
-        {hint && (
-          <span className="small muted" style={{ display: 'block' }}>
-            {hint}
-          </span>
-        )}
-      </span>
-      <Switch checked={Boolean(r[k])} disabled={busy} onChange={(v) => save({ [k]: v })} label={title} />
-    </div>
-  );
+  const toggle = (k, title, hint) => <Toggle r={r} k={k} title={title} hint={hint} busy={busy} save={save} />;
   const name = (d) => d.split(/[\\/]/).filter(Boolean).pop() || d;
   const pick = (k, title, hint, options) => (
     <div className="between" style={{ flexWrap: 'nowrap', gap: 12 }}>
@@ -572,22 +625,14 @@ export function RulesCard({ data, reload }) {
         </p>
         {toggle('done', t('notify.rule_done'), t('notify.rule_done_hint'))}
         {toggle('failed', t('notify.rule_failed'))}
-        {data.feishu && toggle('actions', t('notify.rule_actions'), t('notify.rule_actions_hint'))}
+        {toggle('fg_quiet', t('notify.rule_fg_quiet'), t('notify.rule_fg_quiet_hint'))}
         {toggle('content', t('notify.rule_content'), t('notify.rule_content_hint'))}
-        {r.actions && toggle('agent', t('notify.rule_agent'), t('notify.rule_agent_hint'))}
-        {r.actions && r.agent && (
-          <>
-            <Note>{t('notify.rule_agent_note')}</Note>
-            {toggle('agent_groups', t('notify.rule_agent_groups'), t('notify.rule_agent_groups_hint'))}
-            <div className="stack" style={{ gap: 6 }}>
-              <span className="small muted">{t('notify.agent_menu')}</span>
-              {MENU_KEYS.map((k) => (
-                <span key={k} className="small">
-                  {t(`notify.agent_menu_${k}`)} <Code text={k} />
-                </span>
-              ))}
-            </div>
-          </>
+        {data.feishu && (
+          <div className="stack nt-calm" style={{ gap: 14 }}>
+            <b className="nt-calm-title">{t('notify.feishu_rules_title')}</b>
+            {toggle('actions', t('notify.rule_actions'), t('notify.rule_actions_hint'))}
+            {toggle('project_groups', t('notify.rule_project_groups'), t('notify.rule_project_groups_hint'))}
+          </div>
         )}
         <div className="stack nt-calm" style={{ gap: 14 }}>
           <b className="nt-calm-title">{t('notify.calm_title')}</b>
@@ -667,15 +712,71 @@ export function RulesCard({ data, reload }) {
   );
 }
 
-/** 设置页“通知”分区 */
+const HOW = ['dm', 'reply', 'new', 'stop', 'forward', 'group', 'help'];
+
+/** 飞书机器人：在飞书里和 AI 对话（docs/FEISHU_AGENT.md）。绑定好飞书以后才有 */
+export function AgentCard({ data, reload }) {
+  const { t } = useTranslation();
+  const { r, save, busy, error } = useRules(data, reload);
+  if (!r || !data.feishu?.bound) return null;
+  const toggle = (k, title, hint, disabled) => <Toggle r={r} k={k} title={title} hint={hint} busy={busy} save={save} disabled={disabled} />;
+  const on = r.agent && r.actions;
+  return (
+    <Card id="nt-agent" title={t('notify.agent_title')}>
+      <div className="stack" style={{ gap: 14 }}>
+        <p className="small muted" style={{ margin: 0 }}>
+          {t('notify.agent_lead')}
+        </p>
+        {toggle('agent', t('notify.rule_agent'), t('notify.rule_agent_hint'), !r.actions)}
+        {!r.actions && <Note>{t('notify.agent_need_actions')}</Note>}
+        {on && (
+          <>
+            <div className="stack" style={{ gap: 6 }}>
+              <b>{t('notify.agent_how_title')}</b>
+              <ul className="nt-intro">
+                {HOW.map((k) => (
+                  <li key={k}>{t(`notify.agent_how_${k}`)}</li>
+                ))}
+              </ul>
+            </div>
+            <Note>{t('notify.rule_agent_note')}</Note>
+            <div className="stack nt-calm" style={{ gap: 14 }}>
+              <b className="nt-calm-title">{t('notify.agent_groups_title')}</b>
+              {toggle('agent_groups', t('notify.rule_agent_groups'), t('notify.rule_agent_groups_hint'))}
+              {r.agent_groups && toggle('agent_group_public', t('notify.rule_agent_group_public'), t('notify.rule_agent_group_public_hint'))}
+              {r.agent_groups && r.agent_group_public && <Note kind="warn">{t('notify.agent_group_public_warn')}</Note>}
+            </div>
+            <details className="nt-manual">
+              <summary className="small">{t('notify.agent_menu_title')}</summary>
+              <div className="stack" style={{ gap: 6, marginTop: 8 }}>
+                <span className="small muted">{t('notify.agent_menu')}</span>
+                {MENU_KEYS.map((k) => (
+                  <span key={k} className="small">
+                    {t(`notify.agent_menu_${k}`)} <Code text={k} />
+                  </span>
+                ))}
+              </div>
+            </details>
+          </>
+        )}
+        <ErrorNote error={error} />
+      </div>
+    </Card>
+  );
+}
+
+/** 设置页“通知”分区：先说清楚怎么发，再配渠道（飞书在前），配好了才有规则和飞书机器人 */
 export default function NotifySection() {
   const [data, error, reload] = useLoad(() => api.get('/notify'));
+  const configured = data?.feishu || data?.hooks?.length > 0;
   return (
     <>
       <ErrorNote error={error} />
+      <IntroCard data={data} />
       <FeishuCard data={data} reload={reload} />
       <HooksCard data={data} reload={reload} />
-      {(data?.feishu || data?.hooks?.length > 0) && <RulesCard data={data} reload={reload} />}
+      {configured && <RulesCard data={data} reload={reload} />}
+      <AgentCard data={data} reload={reload} />
     </>
   );
 }

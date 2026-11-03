@@ -2,7 +2,7 @@
 // 绿 = 局域网直连，蓝 = 公网直连，黄 = 中转，灰 = 还没连（不会为了显示它去建连接）。
 // 网页（WebRTC）由启动页的 PeerConnection 统计给出（server-web/rtc/boot.js 的 __llrtc.paths）；
 // 本机 App 连其他电脑由客户端给出（GET /api/rtc/paths，src/rtc/outbound.rs）。本机自己不走 WebRTC，只写“本机”。
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { localApi, rtcMode } from './api.js';
@@ -66,6 +66,55 @@ export function lossLevel(loss) {
   return loss >= 0.15 ? 'bad' : loss >= 0.05 ? 'warn' : 'ok';
 }
 
+/** 点开的小弹层：点外面、按 Esc 关 */
+export function usePop() {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return undefined;
+    const close = (e) => {
+      if (e.type === 'keydown' ? e.key === 'Escape' : !ref.current?.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener('pointerdown', close);
+    document.addEventListener('keydown', close);
+    return () => {
+      document.removeEventListener('pointerdown', close);
+      document.removeEventListener('keydown', close);
+    };
+  }, [open]);
+  return { open, setOpen, ref };
+}
+
+/** 连接的详情（放在 `dl.kv` 里）：延迟、丢包率、连接方式（带一句说明）、两端地址。`ms` 不给时用路径自己的往返时间 */
+export function PathRows({ p, ms = p?.rtt_ms ?? null }) {
+  const { t } = useTranslation();
+  return (
+    <>
+      <dt>{t('conn.latency')}</dt>
+      <dd>{ms == null ? '—' : `${ms} ms`}</dd>
+      <dt>{t('conn.loss')}</dt>
+      <dd className={p?.loss != null ? `loss-${lossLevel(p.loss)}` : undefined}>{lossText(p?.loss) ?? '—'}</dd>
+      {p && (
+        <>
+          <dt>{t('path.label')}</dt>
+          <dd>
+            <span className={`dot path-${p.kind}`} aria-hidden="true" style={{ display: 'inline-block', width: 7, height: 7, marginRight: 6 }} />
+            {t(`path.${p.kind}`)}
+            <span className="muted small" style={{ display: 'block' }}>
+              {t(`path.${p.kind}_hint`)}
+            </span>
+            {(p.local || p.remote) && (
+              <span className="muted small mono" style={{ display: 'block', wordBreak: 'break-all' }}>
+                {p.local} ⟷ {p.remote}
+              </span>
+            )}
+          </dd>
+        </>
+      )}
+    </>
+  );
+}
+
 function pathTip(t, p) {
   if (!p) return t('path.none');
   const loss = lossText(p.loss);
@@ -80,10 +129,13 @@ export function PathDot({ device, self = false }) {
   const kind = p?.kind ?? 'none';
   const ms = p?.rtt_ms;
   const tip = pathTip(t, p);
+  // 丢包偏高时跟在延迟后面写出来（只看延迟会以为连接很好）
+  const bad = lossLevel(p?.loss);
   return (
     <span className="path-dot" title={tip} aria-label={tip}>
       <span className={`dot path-${kind}`} aria-hidden="true" />
       {ms != null ? `${ms} ms` : '—'}
+      {bad && bad !== 'ok' && <span className={`loss-${bad}`}> · {t('path.loss', { loss: lossText(p.loss) })}</span>}
     </span>
   );
 }

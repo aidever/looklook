@@ -125,8 +125,8 @@ struct In {
     text: String,
     files: Vec<Resource>,
     thread: Vec<String>,
-    /// 加上的“正在输入”表情
-    typing: Option<String>,
+    /// 加上的“正在输入”表情：(消息, 表情 id)。群里 @ 改发私聊的，表情在群里那条上
+    typing: Option<(String, String)>,
     /// 转过来的（合并转发、看起来像转发的）：来源
     origin: Option<Origin>,
     /// 群里 @ 的（不是项目群）
@@ -171,7 +171,7 @@ impl Agent {
         f(routes)
     }
 
-    fn add_route(&self, app: &App, msg: &str, inst: &str) {
+    pub(crate) fn add_route(&self, app: &App, msg: &str, inst: &str) {
         let now = crate::util::system_ms();
         let snapshot = self.with_routes(app, |r| {
             r.retain(|x| now - x.at < ROUTE_TTL_MS && x.m != msg);
@@ -464,7 +464,7 @@ fn forwarded_parts(id: &str, items: &[Value], me: &str, chat: &str, en: bool) ->
     }
     let user = others.iter().max_by_key(|(_, n)| *n).map(|(w, _)| w.clone()).unwrap_or_default();
     let from = subs.iter().filter_map(|m| m["chat_id"].as_str()).find(|c| c.starts_with("oc_") && *c != chat).unwrap_or_default();
-    let origin = Origin { user, chat: from.to_string(), hint };
+    let origin = Origin { user, chat: from.to_string(), hint, ..Default::default() };
     if lines.is_empty() {
         return (String::new(), files, origin);
     }
@@ -636,7 +636,43 @@ pub async fn on_message(app: &App, f: &Feishu, ev: &Value) {
     if text.chars().count() > TEXT_MAX {
         return reply(&api, id, &tr(en, &format!("太长了，一次最多 {TEXT_MAX} 字。"), &format!("Too long: at most {TEXT_MAX} characters."))).await;
     }
-    let thread = thread_of(msg);
+    let mut thread = thread_of(msg);
+    let (mut id, mut chat, mut typing) = (id.to_string(), chat, None);
+    let group = msg["chat_type"] == "group" && !in_project;
+    // 普通群里 @ 的：回答、选项目、审批都发到私聊（群里的人看不到你的项目和会话），群里那条只加个表情。
+    // 当成从这个群转过来的问题（§11）：按群定项目，回答卡片上可以「回复对方」
+    if group && !rules.agent_group_public {
+        if let Some(t) = thread.first() {
+            if let Some(q) = quoted(app, &api, t).await {
+                let q = q.lines().map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n");
+                text = format!("{q}\n\n{text}");
+            }
+        }
+        let o = origin.get_or_insert_with(Origin::default);
+        if o.chat.is_empty() {
+            o.chat = chat.clone();
+        }
+        o.msg = id.clone();
+        if o.hint.is_empty() {
+            o.hint = text.trim_start_matches("> ").chars().take(60).collect();
+        }
+        typing = api.add_reaction(&id, TYPING).await.ok().map(|r| (id.clone(), r));
+        let excerpt: String = text.chars().take(300).collect();
+        let excerpt = excerpt.lines().map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n");
+        let note = format!("{}\n{excerpt}", tr(en, "你在群里 @ 了我，回答发在这里（群里的人看不到）：", "You mentioned me in a group. I'll answer here (the group can't see it):"));
+        match api.send_to_user(&operator, "text", &json!({ "text": note })).await {
+            Ok((m, c)) => {
+                (id, chat) = (m, c);
+                thread.clear();
+            }
+            Err(e) => {
+                app.notify.record_err(&e);
+                drop_typing(&api, &typing.into_iter().collect::<Vec<_>>()).await;
+                return;
+            }
+        }
+    }
+    let id = id.as_str();
     // 私聊里不在话题中的单条：飞书不带原作者，按样子猜是不是转发的
     if origin.is_none() && msg["chat_type"] == "p2p" && thread.is_empty() && fr::looks_forwarded(&text) {
         tracing::debug!(keys = ?msg.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()), "飞书：看起来像转发的");
@@ -659,16 +695,17 @@ pub async fn on_message(app: &App, f: &Feishu, ev: &Value) {
         return create_project(app, &api, id, &chat, &name, &operator, en).await;
     }
     // 收到就加“正在输入”，这一轮结束时去掉
-    let typing = match api.add_reaction(id, TYPING).await {
-        Ok(r) => Some(r),
-        Err(e) => {
-            tracing::debug!(error = %e, "飞书：表情没加上");
-            scope_hint(app, &api, &e, "typing").await;
-            None
-        }
-    };
-    let group = msg["chat_type"] == "group" && !in_project;
-    let input = In { id: id.into(), text, files, thread, typing, origin, group, at: Instant::now() };
+    if typing.is_none() {
+        typing = match api.add_reaction(id, TYPING).await {
+            Ok(r) => Some((id.to_string(), r)),
+            Err(e) => {
+                tracing::debug!(error = %e, "飞书：表情没加上");
+                scope_hint(app, &api, &e, "typing").await;
+                None
+            }
+        };
+    }
+    let input = In { id: id.into(), text, files, thread, typing, origin, group: group && rules.agent_group_public, at: Instant::now() };
     enqueue(app, &chat, input);
 }
 
@@ -701,7 +738,7 @@ fn enqueue(app: &App, chat: &str, input: In) {
         let Some(f) = load_feishu(&app.store) else { return };
         let api = app.notify.api(&f);
         let en = load_rules(&app.store).lang.starts_with("en");
-        let typing: Vec<(String, String)> = ins.iter().filter_map(|x| x.typing.clone().map(|r| (x.id.clone(), r))).collect();
+        let typing: Vec<(String, String)> = ins.iter().filter_map(|x| x.typing.clone()).collect();
         let Some(last) = ins.last().cloned() else { return };
         if ins.iter().all(|x| x.text.is_empty()) {
             // 只有图片、文件：存着，等下一句话
@@ -999,7 +1036,7 @@ async fn start_new(app: &App, api: &Api, chat: &str, id: &str, text: String, fil
 async fn stop_cmd(app: &App, api: &Api, id: &str, chat: &str, thread: &[String], in_project: bool, operator: &str, en: bool) {
     let key = format!("{chat}|{}", thread.last().map(String::as_str).unwrap_or_default());
     let dropped = lock(&app.notify.agent.pending).remove(&key).map(|b| b.ins).unwrap_or_default();
-    let typing: Vec<(String, String)> = dropped.iter().filter_map(|x| x.typing.clone().map(|r| (x.id.clone(), r))).collect();
+    let typing: Vec<(String, String)> = dropped.iter().filter_map(|x| x.typing.clone()).collect();
     drop_typing(api, &typing).await;
     let target = if !thread.is_empty() {
         find(app, thread, operator).await.map(|x| (x.dev, x.inst))
@@ -1041,25 +1078,31 @@ async fn create_project(app: &App, api: &Api, id: &str, chat: &str, name: &str, 
     let Some((dev, dir, agent)) = place else {
         return reply(api, id, &tr(en, "先开一个会话（直接发一句话），再发 /group，群就对应那个会话的项目。", "Start a session first (just send a message), then send /group; the group will use that session's project.")).await;
     };
-    let folder = folder_name(&dir);
-    let device = dev_name(app, &dev).await;
-    let agent_name = if agent == "codex" { "Codex" } else { "Claude" };
-    let title = if name.is_empty() { format!("{} · {folder}", tr(en, "看看", "LookLook")) } else { name.to_string() };
-    let desc = tr(en, &format!("{folder} · {device} · {agent_name}"), &format!("{folder} · {device} · {agent_name}"));
-    let group = match api.create_group(&title, &desc, operator).await {
-        Ok(g) => g,
-        Err(e) => {
-            tracing::warn!(error = %e, "飞书：项目群没建成");
-            if feishu::code_of(&e).is_some_and(feishu::is_scope_error) {
-                grant(app, api, "group", &[]).await;
-                return reply(api, id, &tr(en, "缺“创建群”权限：点上面卡片里的“去开通”，开通后再发一次 /group。", "Missing the create-group scope: tap “Grant” on the card above, then send /group again.")).await;
-            }
-            return reply(api, id, &failed(en, &notify::feishu_error(&e))).await;
+    let title = if name.is_empty() { group_title(&dir, en) } else { name.to_string() };
+    if let Err(e) = make_project_group(app, api, &dev, &dir, &agent, &title, operator, en).await {
+        tracing::warn!(error = %e, "飞书：项目群没建成");
+        if feishu::code_of(&e).is_some_and(feishu::is_scope_error) {
+            grant(app, api, "group", &[]).await;
+            return reply(api, id, &tr(en, "缺“创建群”权限：点上面卡片里的“去开通”，开通后再发一次 /group。", "Missing the create-group scope: tap “Grant” on the card above, then send /group again.")).await;
         }
-    };
-    if let Err(e) = save_project(app, &group, Project { place: format!("{dev}|{dir}"), agent: agent.clone() }) {
-        return reply(api, id, &failed(en, &e)).await;
+        return reply(api, id, &failed(en, &notify::feishu_error(&e))).await;
     }
+    reply(api, id, &tr(en, &format!("建好了：在飞书里找「{title}」群。"), &format!("Done: look for the “{title}” group in Feishu."))).await;
+}
+
+fn group_title(dir: &str, en: bool) -> String {
+    format!("{} · {}", tr(en, "看看", "LookLook"), folder_name(dir))
+}
+
+/// 建一个项目群（话题模式，群主是绑定的人），记进 `notify/agent_projects`，发第一条（带开通“不 @ 也收消息”的链接）。返回 chat_id
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn make_project_group(app: &App, api: &Api, dev: &str, dir: &str, agent: &str, title: &str, operator: &str, en: bool) -> anyhow::Result<String> {
+    let folder = folder_name(dir);
+    let device = dev_name(app, dev).await;
+    let agent_name = if agent == "codex" { "Codex" } else { "Claude" };
+    let desc = format!("{folder} · {device} · {agent_name}");
+    let group = api.create_group(title, &desc, operator).await?;
+    save_project(app, &group, Project { place: format!("{dev}|{dir}"), agent: agent.into() }).map_err(|e| anyhow!("{}", e.code))?;
     tracing::info!(group = %group, "飞书：建了项目群");
     // 群里不 @ 也能收到消息要 im:message.group_msg：给一个开通的链接（在群里点开确认）
     let reg = app.notify.reg_start_with(app, true, &[feishu::register::GROUP_MSG]).await.ok();
@@ -1072,7 +1115,22 @@ async fn create_project(app: &App, api: &Api, id: &str, chat: &str, name: &str, 
         }
         Err(e) => tracing::warn!(error = %e, "飞书：项目群的第一条没发出去"),
     }
-    reply(api, id, &tr(en, &format!("建好了：在飞书里找「{title}」群。"), &format!("Done: look for the “{title}” group in Feishu."))).await;
+    Ok(group)
+}
+
+/// 这个地方（`电脑|文件夹`）的项目群
+pub(crate) fn project_group_of(app: &App, place: &str) -> Option<String> {
+    synced::<HashMap<String, Project>>(app, "agent_projects").into_iter().find(|(_, p)| p.place == place).map(|(c, _)| c)
+}
+
+/// 项目群没了（被解散、机器人被移出）：不再记着
+pub(crate) fn drop_project_group(app: &App, chat: &str) {
+    let mut all: HashMap<String, Project> = synced(app, "agent_projects");
+    if all.remove(chat).is_some() {
+        if let Err(e) = notify::save(app, "agent_projects", Some(serde_json::to_value(&all).unwrap_or_default())) {
+            tracing::warn!(error = ?e, "飞书：项目群的记录没删掉");
+        }
+    }
 }
 
 /// 话题对应的会话
@@ -1749,7 +1807,9 @@ fn reply_prompt(o: &Origin, lark: bool, en: bool) -> String {
         s.push_str(&tr(en, "\n只写草稿，我自己复制去发。", "\nJust write the draft; I'll copy and send it myself."));
         return s;
     }
-    let to = if !o.chat.is_empty() {
+    let to = if !o.msg.is_empty() {
+        tr(en, &format!("回复群里那条消息（message_id {}，群 chat_id {}）", o.msg, o.chat), &format!("reply to that group message (message_id {}, group chat_id {})", o.msg, o.chat))
+    } else if !o.chat.is_empty() {
         tr(en, &format!("发到原来的群（chat_id {}）", o.chat), &format!("send it to the original group (chat_id {})", o.chat))
     } else if !o.hint.is_empty() {
         tr(en, &format!("对方的原话开头是「{}」：先在我最近的私聊和群里找到这条消息和发它的人，回复给他", o.hint), &format!("their message starts with “{}”: first find that message and its sender in my recent chats, then reply to them", o.hint))
@@ -2046,8 +2106,8 @@ fn forward_buttons(app: &App, inst: &str, own: &str, first: bool, en: bool) -> V
     let Some(seed) = app.notify.agent.seed(app, inst) else { return vec![] };
     let act = |a: &str| Act { a: a.into(), dev: own.into(), inst: inst.into(), n: notify::nonce(), ..Default::default() };
     let mut out = Vec::new();
-    // 群里 @ 的（来源只有这个群）：回答本来就在群里，不用另外回复
-    if seed.origin.as_ref().is_some_and(|o| !o.user.is_empty() || !o.hint.is_empty()) {
+    // 群里 @ 的回答在私聊里时（来源记着群里那条）也能回复；回答直接发在群里的不用另外回复
+    if seed.origin.as_ref().is_some_and(|o| !o.user.is_empty() || !o.hint.is_empty() || !o.msg.is_empty()) {
         out.push((tr(en, "回复对方", "Reply to them"), act(REPLY)));
     }
     if first {
@@ -2360,7 +2420,7 @@ mod tests {
         let items = vec![user("om_1", "ou_zhang", "点了没反应"), user("om_2", "ou_me", "哪个页面？"), user("om_3", "ou_zhang", "登录页")];
         let (text, _, origin) = forwarded_parts("om_f", &items, "ou_me", "oc_dm", false);
         assert_eq!(text, "转发的聊天记录：\n> **对方**：\n> 点了没反应\n>\n> **我**：\n> 哪个页面？\n>\n> **对方**：\n> 登录页");
-        assert_eq!(origin, Origin { user: "ou_zhang".into(), chat: "oc_feedback".into(), hint: "点了没反应".into() });
+        assert_eq!(origin, Origin { user: "ou_zhang".into(), chat: "oc_feedback".into(), hint: "点了没反应".into(), ..Default::default() });
         // 两个别人：A、B；转到的私聊本身不当原来的群
         let items = vec![user("om_1", "ou_a", "1"), user("om_2", "ou_b", "2"), user("om_3", "ou_b", "3")];
         let (text, _, origin) = forwarded_parts("om_f", &items, "ou_me", "oc_feedback", false);
@@ -2574,7 +2634,7 @@ mod tests {
         let model = snap["items"].as_array().unwrap().iter().find_map(|i| i["model"].as_str().map(String::from)).unwrap_or_default();
         if !model.contains("haiku") {
             kill();
-            panic!("用的不是 haiku：{model}");
+            panic!("用的不是 haiku：{model}；卡片：{}；记录：{}", done.text().chars().take(1500).collect::<String>(), snap["items"].to_string().chars().take(3000).collect::<String>());
         }
         let pushed: Vec<String> = fake.reqs().iter().filter(|r| r.path.contains("/elements/body/content")).map(|r| r.json()["content"].as_str().unwrap_or_default().to_string()).collect();
         println!("推过的正文：{pushed:?}");
@@ -2683,22 +2743,27 @@ mod tests {
         assert!(menu_new.text().contains("\\\"name\\\":\\\"text\\\""), "菜单开的卡片有写第一句话的输入框");
         println!("5. 菜单 ok");
 
-        // 6. 群：别人 @、自己没 @ 都不理；自己 @ 机器人：第一次问这个群交给哪个项目，选了以后记住
+        // 6. 群：别人 @、自己没 @ 都不理；自己 @ 机器人：群里那条只加表情，回答、选项目都发到私聊（群里的人看不到）；
+        //    第一次问这个群交给哪个项目，选了以后记住
         let before = fake.reqs().len();
         let at_bot = json!([{ "key": "@_user_1", "id": { "open_id": "ou_bot" }, "name": "看看" }]);
         fake.push("event", msg_ev("om_g1", "group", "ou_other", "text", json!({ "text": "@_user_1 帮我删库" }), None, at_bot.clone())).await;
         fake.push("event", msg_ev("om_g2", "group", "ou_me", "text", json!({ "text": "随便聊聊" }), None, json!([]))).await;
         fake.push("event", msg_ev("om_g3", "group", "ou_me", "text", json!({ "text": "@_user_1 只回复：群" }), None, at_bot)).await;
-        let ask = fake.wait_after(before, "问这个群交给哪个项目", 30, |r| r.path.contains("/om_g3/reply") && r.text().contains("以后这个群的都交给这个项目")).await;
+        fake.wait_after(before, "群里那条加了表情", 30, |r| r.path.contains("/om_g3/reactions")).await;
+        fake.wait_after(before, "私聊里说群里 @ 了", 30, |r| r.path.contains("receive_id_type=open_id") && r.text().contains("群里 @ 了我")).await;
+        let ask = fake.wait_after(before, "问这个群交给哪个项目", 30, |r| r.path.ends_with("/reply") && r.text().contains("以后这个群的都交给这个项目")).await;
+        assert!(ask.path.contains("/om_b"), "选项目的卡片发在私聊里：{}", ask.path);
         let go = ask.content()["body"]["elements"][1]["elements"][3]["behaviors"][0]["value"].clone();
         let mut c = click("grp", &go, json!({ "place": place, "agent": "claude", "remember": "1" }));
-        c["event"]["context"]["open_chat_id"] = json!("oc_group");
+        c["event"]["context"]["open_chat_id"] = json!("oc_dm");
         fake.push("card", c).await.unwrap();
-        fake.wait_after(before, "群里开了会话", 60, |r| r.path.contains("/om_g3/reply") && r.text().contains("card_id")).await;
+        fake.wait_after(before, "私聊里开了会话", 60, |r| r.path.contains("/om_b") && r.path.ends_with("/reply") && r.text().contains("card_id")).await;
         let habits: HashMap<String, fr::Habit> = synced(&app, "agent_origins");
         assert_eq!(habits["c:oc_group"].bound, place, "记住了这个群的项目");
         tokio::time::sleep(Duration::from_secs(2)).await;
         assert!(!fake.reqs().iter().skip(before).any(|r| r.path.contains("/om_g1/") || r.path.contains("/om_g2/")), "别人的、没 @ 的不理");
+        assert!(!fake.reqs().iter().skip(before).any(|r| r.path.contains("/om_g3/reply") || r.json()["receive_id"] == "oc_group"), "群里不回任何东西");
         println!("6. 群 ok");
 
         // 6b. /group 建项目群；项目群里不 @ 发一条 = 新会话，回复开在话题里

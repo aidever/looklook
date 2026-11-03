@@ -1,7 +1,7 @@
 // Markdown 预览（“文件”页、终端的“文件”标签）。文件来自用户的电脑，内容不可信：
 // marked 转成 HTML 后用 DOMPurify 清洗（去掉脚本、事件属性、iframe、表单等），再放进管理台。
 // 两个库按需加载，不进首屏的包。外部链接在新标签页打开；相对路径的图片交给调用方换成这台电脑上的文件地址。
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { localFilePath } from './chat.js';
@@ -17,6 +17,44 @@ const load = () => {
 
 const EXTERNAL = /^(https?:|mailto:)/i;
 
+// ```mermaid 代码块画成图（mermaid 按需加载，几 MB，不进首屏）。securityLevel strict：图里的文字当纯文本，不执行脚本、
+// 不能点链接跳走。同一段源码画过就复用（对话还在输出时整段 Markdown 会反复重画）；画不出来（还没写完、写错了）就显示源码
+let mermaidLib = null;
+let mermaidSeq = 0;
+const mermaidCache = new Map();
+const darkScheme = () => window.matchMedia?.('(prefers-color-scheme: dark)').matches === true;
+async function renderMermaid(src) {
+  const dark = darkScheme();
+  const key = `${dark ? 'd' : 'l'}:${src}`;
+  if (mermaidCache.has(key)) return mermaidCache.get(key);
+  mermaidLib ??= import('mermaid').then((m) => m.default);
+  const mermaid = await mermaidLib;
+  mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: dark ? 'dark' : 'default', fontFamily: 'inherit' });
+  const job = mermaid
+    .parse(src, { suppressErrors: true })
+    .then((ok) => (ok ? mermaid.render(`md-mermaid-${++mermaidSeq}`, src).then((r) => r.svg) : null))
+    .catch(() => null);
+  mermaidCache.set(key, job);
+  if (mermaidCache.size > 200) mermaidCache.delete(mermaidCache.keys().next().value);
+  return job;
+}
+
+/** 文章里的 mermaid 代码块换成图；代码块还留着（“源码”切换着看、复制） */
+async function drawMermaid(root, alive) {
+  for (const box of root.querySelectorAll('.md-code[data-lang="mermaid"]:not([data-drawn])')) {
+    const pre = box.querySelector('pre');
+    const src = pre?.textContent ?? '';
+    if (!src.trim()) continue;
+    const svg = await renderMermaid(src);
+    if (!alive() || !svg || !box.isConnected) continue;
+    box.dataset.drawn = '';
+    const fig = document.createElement('div');
+    fig.className = 'md-mermaid';
+    fig.innerHTML = svg;
+    box.append(fig);
+  }
+}
+
 // 代码块右上角的复制按钮（清洗之后才加上，按钮本身不来自文件）。图标是 lucide 的 copy / check
 const COPY_SVG = '<svg class="md-copy-i" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><svg class="md-copy-ok" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>';
 
@@ -25,6 +63,7 @@ function addCopyButtons(root, label) {
     const box = document.createElement('div');
     box.className = 'md-code';
     const lang = /language-([\w+#.-]+)/.exec(pre.querySelector('code')?.className ?? '')?.[1];
+    if (lang) box.dataset.lang = lang.toLowerCase();
     pre.replaceWith(box);
     box.append(pre);
     const bar = document.createElement('div');
@@ -34,6 +73,15 @@ function addCopyButtons(root, label) {
       tag.className = 'md-code-lang';
       tag.textContent = lang;
       bar.append(tag);
+    }
+    if (lang?.toLowerCase() === 'mermaid') {
+      const src = document.createElement('button');
+      src.type = 'button';
+      src.className = 'md-src';
+      src.textContent = '</>';
+      src.setAttribute('aria-label', 'source');
+      src.setAttribute('title', 'source');
+      bar.append(src);
     }
     const btn = document.createElement('button');
     btn.type = 'button';
@@ -48,6 +96,13 @@ function addCopyButtons(root, label) {
 
 /** 点了代码块的复制：复制这个代码块的文字，按钮变成对勾 1.5 秒 */
 async function onCopyClick(e) {
+  const toggle = e.target.closest?.('.md-src');
+  if (toggle) {
+    e.preventDefault();
+    const box = toggle.closest('.md-code');
+    if (box) box.toggleAttribute('data-src');
+    return;
+  }
   const btn = e.target.closest?.('.md-copy');
   if (!btn) return;
   e.preventDefault();
@@ -196,8 +251,18 @@ export default function Markdown({ text, imageUrl, links, fileUrl }) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- t 只用于按钮的文字
   }, [text, links, fileUrl]);
+  const ref = useRef(null);
+  useEffect(() => {
+    const root = ref.current;
+    if (!root || html == null || !root.querySelector('.md-code[data-lang="mermaid"]')) return undefined;
+    let alive = true;
+    drawMermaid(root, () => alive).catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [html]);
   if (failed) return <pre className="fb-text fb-wrap">{text}</pre>;
   if (html == null) return <p className="muted small fb-pad">{t('fb.loading')}</p>;
   // eslint-disable-next-line react/no-danger -- 已用 DOMPurify 清洗
-  return <article className="md" onClick={onCopyClick} dangerouslySetInnerHTML={{ __html: html }} />;
+  return <article ref={ref} className="md" onClick={onCopyClick} dangerouslySetInnerHTML={{ __html: html }} />;
 }

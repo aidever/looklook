@@ -285,11 +285,108 @@ pub async fn run(home: PathBuf) {
 fn codex_catalog(c: &crate::pricing::Catalog, store: &crate::store::Store, provider: Option<&str>) -> Option<String> {
     match provider? {
         "openai" => Some("openai".into()),
-        p => {
-            let id = p.strip_prefix(crate::codex_profiles::PROVIDER_PREFIX)?;
-            let prof = crate::codex_profiles::get(store, id)?;
-            prof.preset.as_deref().and_then(crate::model_presets::get).map(|x| x.catalog.to_string()).or_else(|| crate::pricing::provider_for_url(c, prof.base_url.as_deref()?))
+        p => match p.strip_prefix(crate::codex_profiles::PROVIDER_PREFIX) {
+            Some(id) => {
+                let prof = crate::codex_profiles::get(store, id)?;
+                prof.preset.as_deref().and_then(crate::model_presets::get).map(|x| x.catalog.to_string()).or_else(|| crate::pricing::provider_for_url(c, prof.base_url.as_deref()?))
+            }
+            // 用户自己在 ~/.codex/config.toml 里定义的服务商：名字就是 models.dev 的、或者按它的 base_url 认
+            None => c.providers.contains_key(p).then(|| p.to_string()).or_else(|| crate::pricing::provider_for_url(c, &codex_provider_url(p)?)),
+        },
+    }
+}
+
+/// `~/.codex/config.toml` 里 `[model_providers.<名字>]` 的 `base_url`
+fn codex_provider_url(name: &str) -> Option<String> {
+    let text = std::fs::read_to_string(crate::agents::codex_home().join("config.toml")).ok()?;
+    let doc: toml_edit::DocumentMut = text.parse().ok()?;
+    doc.get("model_providers")?.get(name)?.get("base_url")?.as_str().map(String::from)
+}
+
+/// 记下的“对话 → 账号”（kv `usage_convs`，最多 [`CONVS_MAX`] 个）：读一次 store，之后在内存里改，改完写回
+static CONVS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+const CONVS_KEY: &str = "usage_convs";
+const CONVS_MAX: usize = 20_000;
+
+/// 一段 Claude Code 对话用的账号：`claude:<配置 ID>`（看看里的账号、第三方接口），认不出的第三方接口是 `url:<地址>`。
+/// 先看进程（配置目录、`ANTHROPIC_BASE_URL`），看不到时用会话新建时定下的
+pub fn claude_account_key(store: &crate::store::Store, home: &Path, acc: Option<&crate::session_probe::Account>, inst: Option<&str>) -> String {
+    use crate::claude_profiles as cp;
+    let profiles = cp::list(store);
+    if let Some(url) = acc.and_then(|a| a.base_url.as_deref()) {
+        let url = url.trim().trim_end_matches('/');
+        return match profiles.iter().find(|p| p.kind == cp::Kind::Api && p.base_url.as_deref().map(|u| u.trim_end_matches('/')) == Some(url)) {
+            Some(p) => format!("claude:{}", p.id),
+            None => format!("url:{url}"),
+        };
+    }
+    if let Some(dir) = acc.and_then(|a| a.dir.as_deref()) {
+        if let Some(p) = profiles.iter().find(|p| p.kind == cp::Kind::Official && p.id != cp::OFFICIAL && cp::account_dir(home, &p.id) == dir) {
+            return format!("claude:{}", p.id);
         }
+        return format!("claude:{}", cp::OFFICIAL);
+    }
+    let id = inst.map(|i| cp::for_instance(store, i).id).unwrap_or_else(|| cp::OFFICIAL.into());
+    format!("claude:{id}")
+}
+
+/// 记下一段对话用的账号（变了才写）
+pub fn note_conv(store: &crate::store::Store, conv: &str, key: &str) {
+    let mut g = CONVS.lock().unwrap_or_else(|e| e.into_inner());
+    let m = g.get_or_insert_with(|| store.get(CONVS_KEY).ok().flatten().unwrap_or_default());
+    if m.get(conv).map(String::as_str) == Some(key) {
+        return;
+    }
+    // 太多了：去掉一些（记录文件早被 Claude Code 清理掉的那些对话，统计里已经算好了，只是以后不会再变）
+    if m.len() >= CONVS_MAX {
+        let old: Vec<String> = m.keys().take(CONVS_MAX / 10).cloned().collect();
+        for k in old {
+            m.remove(&k);
+        }
+    }
+    m.insert(conv.into(), key.into());
+    if let Err(e) = store.set(CONVS_KEY, &*m) {
+        tracing::debug!(error = %e, "用量统计：对话的账号没记上");
+    }
+}
+
+fn conv_accounts(store: &crate::store::Store) -> HashMap<String, String> {
+    let mut g = CONVS.lock().unwrap_or_else(|e| e.into_inner());
+    g.get_or_insert_with(|| store.get(CONVS_KEY).ok().flatten().unwrap_or_default()).clone()
+}
+
+/// Claude Code 记录文件 → 对话号（UUID）：`<对话号>.jsonl`，子代理的在 `<对话号>/subagents/agent-*.jsonl`
+fn claude_conv_of(path: &str) -> Option<String> {
+    let uuid = |s: &str| s.len() == 36 && s.split('-').map(str::len).eq([8, 4, 4, 4, 12]) && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+    let p = Path::new(path);
+    let stem = p.file_stem()?.to_string_lossy().into_owned();
+    if uuid(&stem) {
+        return Some(stem);
+    }
+    p.ancestors().skip(1).filter_map(|a| a.file_name()).map(|n| n.to_string_lossy().into_owned()).find(|n| uuid(n))
+}
+
+/// 账号的名字和价格按哪家算：(名字, 种类 official / api / unknown, models.dev 的服务商)
+fn account_info(c: Option<&crate::pricing::Catalog>, store: &crate::store::Store, agent: &str, key: &str) -> (String, &'static str, Option<String>) {
+    if agent == "codex" {
+        let name = match key {
+            "openai" => String::new(),
+            p => p.strip_prefix(crate::codex_profiles::PROVIDER_PREFIX).and_then(|id| crate::codex_profiles::get(store, id)).map(|x| x.name).unwrap_or_else(|| p.to_string()),
+        };
+        let kind = if key == "openai" { "official" } else { "api" };
+        return (name, kind, c.and_then(|c| codex_catalog(c, store, Some(key))));
+    }
+    if let Some(url) = key.strip_prefix("url:") {
+        return (url.to_string(), "api", c.and_then(|c| crate::pricing::provider_for_url(c, url)));
+    }
+    let id = key.strip_prefix("claude:").unwrap_or(crate::claude_profiles::OFFICIAL);
+    match crate::claude_profiles::get(store, id) {
+        Some(p) if p.kind == crate::claude_profiles::Kind::Api => {
+            let hint = p.preset.as_deref().and_then(crate::model_presets::get).map(|x| x.catalog.to_string()).or_else(|| c.and_then(|c| crate::pricing::provider_for_url(c, p.base_url.as_deref()?)));
+            (p.name, "api", hint)
+        }
+        Some(p) => (p.name, "official", Some("anthropic".into())),
+        None => (String::new(), "official", Some("anthropic".into())),
     }
 }
 
@@ -333,14 +430,20 @@ pub fn report(store: &crate::store::Store, days: u32, tz: i32) -> Value {
     let mut by_day: BTreeMap<i64, BTreeMap<String, Sum>> = BTreeMap::new();
     // (助手, 模型) → (用量, 价格来自哪家)
     let mut by_model: BTreeMap<(String, String), (Sum, Option<String>)> = BTreeMap::new();
+    // (助手, 账号) → 用量
+    let mut by_account: BTreeMap<(String, String), Sum> = BTreeMap::new();
     let mut total = Sum::default();
     let mut today_sum = Sum::default();
-    let mut catalog_of: HashMap<Option<String>, Option<String>> = HashMap::new();
-    for f in st.files.values() {
-        let hint = match (&cat, f.agent.as_str()) {
-            (Some(c), "codex") => catalog_of.entry(f.provider.clone()).or_insert_with(|| codex_catalog(c, store, f.provider.as_deref())).clone(),
-            _ => None,
+    // 账号 → (名字, 种类, 价格按哪家)
+    let mut info_of: HashMap<(String, String), (String, &'static str, Option<String>)> = HashMap::new();
+    let convs = conv_accounts(store);
+    for (path, f) in &st.files {
+        // Claude Code 的账号、第三方接口都写在同一个 projects/ 里：按记下的“对话 → 账号”分；Codex 的记录里写着服务商
+        let account = match f.agent.as_str() {
+            "codex" => f.provider.clone().unwrap_or_else(|| "openai".into()),
+            _ => claude_conv_of(path).and_then(|c| convs.get(&c).cloned()).unwrap_or_else(|| format!("claude:{}", crate::claude_profiles::OFFICIAL)),
         };
+        let hint = info_of.entry((f.agent.clone(), account.clone())).or_insert_with(|| account_info(cat.as_deref(), store, &f.agent, &account)).2.clone();
         for r in &f.rows {
             let day = (r.h * 3600 + tz_secs).div_euclid(86400);
             if day < first {
@@ -349,6 +452,7 @@ pub fn report(store: &crate::store::Store, days: u32, tz: i32) -> Value {
             let priced = cat.as_ref().and_then(|c| crate::pricing::price(c, hint.as_deref(), &r.m));
             let cost = priced.as_ref().map(|(p, _)| cost_of(r, p)).unwrap_or(0.0);
             by_day.entry(day).or_default().entry(f.agent.clone()).or_default().add(r, cost);
+            by_account.entry((f.agent.clone(), account.clone())).or_default().add(r, cost);
             let e = by_model.entry((f.agent.clone(), r.m.clone())).or_default();
             e.0.add(r, cost);
             if let Some((_, pid)) = priced {
@@ -373,6 +477,19 @@ pub fn report(store: &crate::store::Store, days: u32, tz: i32) -> Value {
         })
         .collect();
     models.sort_by(|a, b| b["cost"].as_f64().partial_cmp(&a["cost"].as_f64()).unwrap_or(std::cmp::Ordering::Equal).then(b["tokens"].as_u64().cmp(&a["tokens"].as_u64())));
+    let mut accounts: Vec<Value> = by_account
+        .iter()
+        .map(|((agent, key), s)| {
+            let (name, kind, _) = info_of.get(&(agent.clone(), key.clone())).cloned().unwrap_or_default();
+            let mut v = s.view();
+            v["agent"] = json!(agent);
+            v["account"] = json!(key);
+            v["name"] = json!(name);
+            v["kind"] = json!(kind);
+            v
+        })
+        .collect();
+    accounts.sort_by(|a, b| b["cost"].as_f64().partial_cmp(&a["cost"].as_f64()).unwrap_or(std::cmp::Ordering::Equal).then(b["tokens"].as_u64().cmp(&a["tokens"].as_u64())));
     let days: Vec<Value> = (first..=today)
         .map(|d| {
             let agents = by_day.get(&d);
@@ -398,6 +515,7 @@ pub fn report(store: &crate::store::Store, days: u32, tz: i32) -> Value {
         "today": today_sum.view(),
         "days": days,
         "models": models,
+        "accounts": accounts,
     })
 }
 
@@ -475,6 +593,14 @@ mod tests {
             println!("{} {} tokens={} cost={} 价格={}", m["agent"], m["model"], m["tokens"], m["cost"], m["price_from"]);
         }
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn claude_conv_from_path() {
+        let id = "e7256753-67bc-473c-89c9-63df2a292e33";
+        assert_eq!(claude_conv_of(&format!("/h/.claude/projects/-w/{id}.jsonl")).as_deref(), Some(id));
+        assert_eq!(claude_conv_of(&format!("/h/.claude/projects/-w/{id}/subagents/agent-a1b2c3.jsonl")).as_deref(), Some(id));
+        assert_eq!(claude_conv_of("/h/.claude/projects/-w/notes.jsonl"), None);
     }
 
     #[test]

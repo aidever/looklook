@@ -51,6 +51,8 @@ mod paths;
 mod platform;
 mod ports;
 mod proctree;
+mod session_probe;
+mod idle_stop;
 mod pricing;
 mod prompts;
 mod provider_quota;
@@ -613,6 +615,7 @@ async fn run(home: Option<PathBuf>, listen: Option<SocketAddr>, server: Option<S
         tokio::spawn(rtc::signal::run(app.clone(), shutdown.clone())),
         tokio::spawn(app.sync.clone().run(app.clone(), shutdown.clone())),
         tokio::spawn(chat.clone().background()),
+        tokio::spawn(idle_stop::run(store.clone(), instances.clone(), chat.clone())),
         tokio::spawn(pricing::run(paths.home.clone())),
         tokio::spawn(rtc::net::resolve_loop()),
         tokio::spawn({

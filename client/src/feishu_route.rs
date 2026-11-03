@@ -28,6 +28,9 @@ pub struct Origin {
     /// 原话的开头（让 AI 回复时找人）
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub hint: String,
+    /// 群里 @ 机器人的那条消息（回答改发私聊时记着，回复对方时回复它）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub msg: String,
 }
 
 impl Origin {
@@ -274,7 +277,7 @@ mod tests {
     #[test]
     fn origin_keys() {
         assert!(Origin::default().keys().is_empty());
-        assert_eq!(Origin { user: "ou_a".into(), chat: "oc_g".into(), hint: String::new() }.keys(), vec!["c:oc_g", "u:ou_a"]);
+        assert_eq!(Origin { user: "ou_a".into(), chat: "oc_g".into(), hint: String::new(), ..Default::default() }.keys(), vec!["c:oc_g", "u:ou_a"]);
     }
 
     #[test]

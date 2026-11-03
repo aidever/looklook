@@ -22,12 +22,14 @@
     "lucide-react": "^0.500.0",
     "mammoth": "^1.13.0",
     "marked": "^16.4.2",
+    "mermaid": "12.2.0",
     "qrcode-generator": "^2.0.4",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-i18next": "^15.0.0",
     "read-excel-file": "^9.3.12",
-    "trzsz": "1.1.6"
+    "trzsz": "1.1.6",
+    "yet-another-react-lightbox": "3.32.2"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.12.1",

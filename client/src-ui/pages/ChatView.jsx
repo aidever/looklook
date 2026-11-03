@@ -97,6 +97,7 @@ import {
   insertMention,
   latestTodos,
   maskEmail,
+  maskEmails,
   mentionAt,
   modelLabel,
   modelView,
@@ -3738,10 +3739,9 @@ function ResetAt({ at }) {
 }
 const resetText = (_t, iso) => (iso ? <ResetAt at={iso} /> : '');
 
-/** 账号邮箱：默认打码，点眼睛显示完整的（截屏、共享屏幕时不露出来） */
-function MaskedEmail({ email }) {
+/** 账号邮箱：默认打码，点眼睛显示完整的（截屏、共享屏幕时不露出来）；show 由外面管，组织名跟着一起切 */
+function MaskedEmail({ email, show, setShow }) {
   const { t } = useT();
-  const [show, setShow] = useState(false);
   const label = t(show ? 'chat.email_hide' : 'chat.email_show');
   return (
     <>
@@ -3759,6 +3759,7 @@ function UsageTab({ id, status, onCompact }) {
   const { t } = useT();
   const { id: agentId, name: agentName } = useContext(AgentCtx);
   const { data, error } = usePoll(`/instances/${id}/chat/usage`, { deps: [status?.context, status?.actual_model] });
+  const [showAcct, setShowAcct] = useState(false);
   if (!data) return error ? <p className="chat-note">{errorText(t, error)}</p> : <LoaderCircle size={16} className="spin" />;
   const used = data.context ?? 0;
   const win = data.window || 200000;
@@ -3786,12 +3787,12 @@ function UsageTab({ id, status, onCompact }) {
       {(data.account?.email || lim?.account) && (
         <dl className="chat-kv">
           <dt>{t('chat.usage_account')}</dt>
-          <dd className="chat-account">{data.account?.email || lim?.account?.email ? <MaskedEmail email={data.account?.email || lim.account.email} /> : lim.account.type ?? '—'}</dd>
+          <dd className="chat-account">{data.account?.email || lim?.account?.email ? <MaskedEmail email={data.account?.email || lim.account.email} show={showAcct} setShow={setShowAcct} /> : lim.account.type ?? '—'}</dd>
           {data.account?.org && (
             <>
               <dt>{t('chat.usage_org')}</dt>
-              <dd className="ellipsis" title={data.account.org}>
-                {data.account.org}
+              <dd className="ellipsis" title={showAcct ? data.account.org : undefined}>
+                {showAcct ? data.account.org : maskEmails(data.account.org)}
               </dd>
             </>
           )}

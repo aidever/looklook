@@ -589,6 +589,11 @@ export function maskEmail(email) {
   return `${keep(email.slice(0, at))}***@${keep(dot < 0 ? domain : domain.slice(0, dot))}***${dot < 0 ? '' : domain.slice(dot)}`;
 }
 
+/** 文本里出现的邮箱都打码（组织名常是 `xx@xx.com's Organization`） */
+export function maskEmails(text) {
+  return String(text).replace(/[^\s@'"<>()]+@[^\s@'"<>()]+/g, (m) => maskEmail(m));
+}
+
 /**
  * 对话里派出的子代理（Agent / Task 工具调用），从已经载入的条目里找，先派的在前。
  * 同一个子代理（Codex 的子会话 id）再次交回答复会另起一张卡片：合成一个，状态按最后一张。

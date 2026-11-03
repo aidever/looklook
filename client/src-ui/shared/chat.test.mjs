@@ -228,6 +228,9 @@ test('emails are masked', async () => {
   assert.equal(maskEmail('john@example.com'), 'jo***@ex***.com');
   assert.equal(maskEmail('a@b.co'), 'a***@b***.co');
   assert.equal(maskEmail('ab@host'), 'a***@ho***');
+  const { maskEmails } = await import('./chat.js');
+  assert.equal(maskEmails("john@example.com's Organization"), "jo***@ex***.com's Organization");
+  assert.equal(maskEmails('Acme Inc'), 'Acme Inc');
 });
 
 test('sub-agents from the conversation', async () => {

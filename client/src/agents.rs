@@ -76,11 +76,6 @@ pub fn codex_home() -> PathBuf {
     Agent::Codex.dir()
 }
 
-/// DSH 的数据目录（`$DSH_HOME`，默认 `~/.dsh`）
-pub fn dsh_home() -> PathBuf {
-    Agent::Dsh.dir()
-}
-
 fn home() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }

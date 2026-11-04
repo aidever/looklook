@@ -2473,7 +2473,33 @@ impl Chat {
         // 状态栏上说在跑、这段对话记录里却找不到的（子代理启动的、/clear 之前启动的）：告诉界面有几个
         let listed = shells.iter().filter(|s| s["state"] == "running").count();
         let unlisted = if alive { live_shells.unwrap_or(0).saturating_sub(listed) } else { 0 };
-        Ok(json!({ "agents": agents, "shells": shells, "unlisted_shells": unlisted }))
+        // 它们是哪几条：从进程表里找（claude 下面包了一层的 shell），列出来、可以停
+        let others = if unlisted > 0 {
+            let known: HashSet<&str> = calls
+                .iter()
+                .filter(|c| c.name == "Bash" && (c.result.is_none() || shells.iter().any(|s| s["tool_use_id"] == c.id && s["state"] == "running")))
+                .filter_map(|c| c.input["command"].as_str().map(str::trim))
+                .collect();
+            let known: HashSet<String> = known.into_iter().map(String::from).collect();
+            drop(cache);
+            drop(tr);
+            self.unlisted_shells(id, &known, unlisted).await
+        } else {
+            vec![]
+        };
+        let others: Vec<Value> = others.into_iter().map(|(cmd, age)| json!({ "command": cmd.chars().take(500).collect::<String>(), "age": age })).collect();
+        Ok(json!({ "agents": agents, "shells": shells, "unlisted_shells": unlisted, "unlisted": others }))
+    }
+
+    /// 状态栏上算着、对话记录里没有的后台命令：claude 下面正在跑、不是记录里那些的 shell，老的在前，最多 `n` 条
+    async fn unlisted_shells(&self, id: &str, known: &HashSet<String>, n: usize) -> Vec<(String, Option<u64>)> {
+        let Some(pane) = self.instances.pane(id).await else { return vec![] };
+        let mut all = tokio::task::spawn_blocking(move || crate::proctree::claude_shells(pane.pid)).await.unwrap_or_default();
+        all.retain(|(cmd, _)| !known.contains(cmd.trim()));
+        // 前台正在跑的是刚启动的：老的才是后台的
+        all.sort_by_key(|(_, age)| std::cmp::Reverse(age.unwrap_or(0)));
+        all.truncate(n);
+        all
     }
 
     /// 后台命令的输出（最后 32 KB）。输出文件的路径来自 transcript，不接受界面传路径。
@@ -2509,13 +2535,20 @@ impl Chat {
 
     /// 停止一个后台任务：和在终端里一样，输入框里按 ↓ 选中状态栏上的任务、回车打开列表，选中这一项按 x。
     /// 每一步都抓屏核对，对不上就按 Esc 退出来、交给终端。
-    pub async fn stop_task(&self, id: &str, tool: &str) -> Result<(), LocalError> {
+    /// `tool` 为空时停的是对话记录里没有的（`command` 是 [`Self::tasks`] 列出来的那条）。
+    pub async fn stop_task(&self, id: &str, tool: &str, command: Option<&str>) -> Result<(), LocalError> {
         self.require(id)?;
         let inst = self.inst(id);
         if !matches!(lock(&inst.st).phase, Phase::Idle | Phase::Running) {
             return Err(LocalError::new("CHAT_BUSY"));
         }
-        let label = {
+        let label = if let Some(cmd) = command.filter(|_| tool.is_empty()) {
+            // 只认 claude 下面确实在跑的
+            let pane = self.instances.pane(id).await.ok_or_else(LocalError::not_found)?;
+            let live = tokio::task::spawn_blocking(move || crate::proctree::claude_shells(pane.pid)).await.unwrap_or_default();
+            let c = live.into_iter().find(|(c, _)| c.chars().take(500).eq(cmd.chars())).ok_or_else(LocalError::not_found)?.0;
+            c.lines().next().unwrap_or("").split_whitespace().collect::<Vec<_>>().join(" ")
+        } else {
             let tr = inst.tr.lock().await;
             let t = tr.as_ref().and_then(Reader::claude).ok_or_else(LocalError::not_found)?;
             let calls = t.tool_calls();
@@ -3562,7 +3595,7 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(3)).await;
         let out = chat.task_output(&id, &tool).await.unwrap();
         assert!(out["text"].as_str().unwrap().contains("tick1"), "{out}");
-        chat.stop_task(&id, &tool).await.unwrap();
+        chat.stop_task(&id, &tool, None).await.unwrap();
         let s = wait(&chat, &id, "停止后", 15, |s| !s["status"]["background"].as_array().unwrap().iter().any(|x| x["kind"] == "shell")).await;
         assert_eq!(s["status"]["phase"], "idle");
         let tasks = chat.tasks(&id).await.unwrap();

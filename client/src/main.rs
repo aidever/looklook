@@ -207,9 +207,9 @@ enum Cmd {
 enum PetCmd {
     /// 检查一个宠物包文件夹（装了 ffmpeg 时还会看尺寸、透明通道、首尾帧）/ Check a pet pack folder
     Check { dir: PathBuf },
-    /// 安装 .llpet / .zip，或 GitHub 仓库（owner/repo、仓库链接；同 id 覆盖）/ Install a .llpet / .zip or a GitHub repo (replaces the same id)
+    /// 安装 .llpet / .zip、解开的宠物文件夹，或 GitHub 仓库（owner/repo、仓库链接；同 id 覆盖）/ Install a .llpet / .zip, a pet folder or a GitHub repo (replaces the same id)
     Install {
-        /// 文件，或 GitHub 仓库：owner/repo、owner/repo@分支、https://github.com/owner/repo/tree/main/pets/cat
+        /// 文件 / 文件夹，或 GitHub 仓库：owner/repo、owner/repo@分支、https://github.com/owner/repo/tree/main/pets/cat
         source: String,
         /// 仓库里有好几只时装哪几只（id 或仓库里的文件夹，逗号分隔）/ Which pets to install from a multi-pet repo (ids or folders, comma-separated)
         #[arg(long, value_delimiter = ',')]
@@ -380,7 +380,7 @@ fn main() -> Result<()> {
                     let r = if pet_github::looks_like(&source) {
                         pet_github_cli(&rt, &paths.home, &source, &pick, all)
                     } else {
-                        pets::import(&paths.home, Path::new(&source)).map(|p| vec![p])
+                        pets::import_path(&paths.home, Path::new(&source)).map(|p| vec![p])
                     };
                     match r {
                         Ok(ps) => {

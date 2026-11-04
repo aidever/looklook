@@ -6,19 +6,13 @@
 点它、拖它、甩它都有反应，闲着时自己玩、走来走去、困了睡觉。宠物是**宠物包**：一个文件夹或 zip，里面一份 `pet.json` 加一组透明动画。
 
 - 看看**不自带任何第三方形象**，只认格式；用户自己装，或者自己做（教程面向所有人）。
-- 动画有两种：**透明视频**（一个动作一段，好玩，推荐）和 **精灵图**（Codex 宠物那种 8×9 格子，省事）。
-- 兼容两种现成的包：Codex 宠物（`pet.json` + `spritesheet.webp`）和 dsh-pet 的宠物（`<种类>-config.json` + `<种类>-animation/`），读进来时自动换算成本格式，不改原文件。
+- 动画有两种：**透明视频**（一个动作一段，好玩，推荐）和 **精灵图**（8×9 格子，省事）。
+- 只认本格式（`format: "looklook-pet"`）；别家的宠物格式不兼容、不换算（2026-11-04 去掉了 Codex 宠物和 dsh-pet 的兼容）。
 
-## 1. 参考
+## 1. 原则
 
-| 来源 | 借鉴什么 |
-| --- | --- |
-| [dsh-pet](https://github.com/PC2005-cloud/dsh-pet)（代码 MIT，素材禁止商用） | 一个动作一段透明 webm；动画池分待机 / 转向 / 拖拽 / 点击 / 移动 / 分类随机 / 工作状态 6 档 / 三段式睡觉；苹果设备另备 HEVC 透明 mov；绿幕视频 → 抠像的素材链 |
-| Codex 宠物（`~/.codex/pets`） | 8 列 × 9 行、每格 192×208 的精灵图，行固定为 idle / running-right / running-left / waving / jumping / failed / waiting / running / review |
-| [zhu1090093659/dsh-pet](https://github.com/zhu1090093659/dsh-pet)（Apache-2.0） | 清单里可选 `frames`、按场景排列的动作序列 |
-
-和 dsh-pet 的区别：dsh-pet 的配置是“整只插件的配置”（实例、位置、物理、模型、余额都在里面），本格式只描述**宠物本身**（长什么样、有哪些动作、什么时候播），
-摆在哪、多大、开不开是看看的设置。文件名统一用 ASCII，zip 在各系统上解压不乱码。
+本格式只描述**宠物本身**（长什么样、有哪些动作、什么时候播），摆在哪、多大、开不开是看看的设置。
+文件名统一用 ASCII，zip 在各系统上解压不乱码。
 
 ## 2. 包的结构
 
@@ -102,7 +96,7 @@ JSON（允许 `//` 注释和尾逗号，按 JSONC 解析）。下面每个字段
 ```jsonc
 "sprite": {
   "image": "sprite.webp",            // 必需
-  "cell": [192, 208],                // 可选，缺省 Codex 的 192×208
+  "cell": [192, 208],                // 可选，缺省 192×208
   "columns": 8                       // 可选，缺省 8
 }
 ```
@@ -132,7 +126,7 @@ JSON（允许 `//` 注释和尾逗号，按 JSONC 解析）。下面每个字段
 | `turn` | false | 播完朝向反过来 |
 | `mirror` | true | 能不能左右翻转着播 |
 | `move` | 无 | 这是一段“原地走 / 跑”：播的时候看看把宠物沿地面平移。`min`/`max` 是单次距离（以 `stage.width` = 640 为准，按实际大小缩放），`lead`/`tail` 是开头、结尾原地不动的秒数；`pace`（缺省 120）只对 `loop: true` 的走动段有用：每秒走多少（同样以 640 宽为准），走完距离才算这段结束 |
-| `dir` | 无 | `left` / `right`：这段只往这个方向走、不镜像（素材里左右各画了一段时用，比如 Codex 的两行跑步） |
+| `dir` | 无 | `left` / `right`：这段只往这个方向走、不镜像（素材里左右各画了一段时用，比如精灵图里分左右的两行跑步） |
 | `speed` | 1 | 播放速度 |
 | `row`, `frames`, `fps`, `durations` | — | 仅 sprite：在第几行、用前几格、帧率或每帧毫秒数组 |
 
@@ -221,39 +215,9 @@ JSON（允许 `//` 注释和尾逗号，按 JSONC 解析）。下面每个字段
 - 系统开了“减少动态效果”：只显示封面，状态变化只换气泡。
 - 页面在后台（`document.hidden`）时暂停播放。
 
-## 5. 兼容现成的包
+## 5. 别家格式
 
-读进来时换算成第 3 节的模型，原文件不动、不复制。
-
-**Codex 宠物**（有 `spritesheetPath`、没有 `format` 字段）：`renderer = sprite`，行号按 Codex 约定：
-
-| Codex 行 | 帧数 | 对到 |
-| --- | --- | --- |
-| 0 idle | 6 | `idle` |
-| 1 running-right / 2 running-left | 8 | `move`（两个方向各一段，不镜像） |
-| 3 waving | 4 | `click`、`done` |
-| 4 jumping | 5 | `click`、`done` |
-| 5 failed | 8 | `error` |
-| 6 waiting | 6 | `waiting`、`terminal` |
-| 7 running | 6 | `tool` |
-| 8 review | 6 | `thinking` |
-
-1536×2288 的 v2（11 行）只用前 9 行。许可显示“未声明”。
-
-**dsh-pet**（`<种类>-config.json` + `<种类>-animation/`，以及默认宠物的 `main-config.jsonc` + 素材目录）：
-
-| dsh-pet | 对到 |
-| --- | --- |
-| `animations.idle` | `states.idle` |
-| `animations.events.workStatus[0..5]` | `thinking` / `tool` / `toolDone` / `waiting` / `done` / `error` |
-| `clicks` / `drag` / `turn` / `moves.actions` | `actions.click` / `drag` / `turn` / `move`（`minDist` 等按 462 px 基准换算） |
-| `categories`（`noMirror` → 片段 `mirror: false`） | `actions.random` |
-| `animations.sleep` | `actions.sleep` |
-| `animationWeights` | `behavior` |
-| `workStatusTexts` / `sleep*Texts` | `lines.zh-CN` |
-
-碎碎念、表情包、余额、待办、语音不换算。画面按 16:9 处理，`ground` 取 0.85。许可显示“未声明（dsh-pet 默认素材：禁止商用）”。
-苹果设备上找 `mov/` 子目录里的同名 `.mov`。
+不兼容。`pet.json` 的 `format` 不是 `looklook-pet` 的一律报 `pet_format`（“不是看看的宠物包”），扫描、导入、从 GitHub 装都一样。
 
 ## 6. 看看这边怎么实现
 
@@ -261,17 +225,15 @@ JSON（允许 `//` 注释和尾逗号，按 JSONC 解析）。下面每个字段
 
 | 来源 id | 目录 | 能删 |
 | --- | --- | --- |
-| `local` | `{LOOKLOOK_HOME}/pets/<id>/`（导入的都放这） | 能 |
-| `codex` | `${CODEX_HOME:-~/.codex}/pets/*/` | 不能（只读） |
-| `dsh` | `${DSH_HOME}/dsh-pet/`（默认宠物 + `pet/`） | 不能（只读） |
+| `local` | `{LOOKLOOK_HOME}/pets/<id>/`（导入的、从 GitHub 装的都放这） | 能 |
 
 启动时和打开设置页时扫一次，结果缓存；单个包出错只跳过它，错误显示在设置里。
-`{source}:{id}` 是宠物的全局标识。
+`{source}:{id}` 是宠物的全局标识（现在只有 `local`）。
 
 ### 6.2 接口（客户端，`src/pets.rs`）
 
 - `GET /api/pets` → `[{ key, source, id, name, author, license, renderer, preview, agents, error? }]`
-- `GET /api/pets/{source}/{id}` → 换算后的完整清单（第 3 节的模型，文件换成 URL）
+- `GET /api/pets/{source}/{id}` → 完整清单（第 3 节的模型，文件换成 URL）
 - `GET /api/pets/{source}/{id}/file/{name}` → 片段 / 封面 / 精灵图。支持 Range（视频要），`ETag` + `Cache-Control: max-age=31536000, immutable`（URL 带内容哈希）。
   路径只认清单里登记过的文件名，其余 404。
 - `POST /api/pets/import`（multipart，`.llpet` / `.zip`）→ 解压到临时目录 → 校验（§2 限制、§3 字段、片段都在、视频能读出尺寸）→ 原子改名进 `pets/<id>/`；同 id 覆盖。
@@ -280,14 +242,11 @@ JSON（允许 `//` 注释和尾逗号，按 JSONC 解析）。下面每个字段
   - `POST /api/pets/from-github {url}`：认 `owner/repo`、`owner/repo@ref`、仓库链接、`/tree/<ref>/<文件夹>` 链接 → 下载 `github.com/<owner>/<repo>/archive/<ref|HEAD>.zip`（≤ 600 MB）→
     找出所有宠物（套在别的宠物文件夹里的、`.` 开头的、`node_modules` 里的不算；最多 60 只）→ 每只只解它自己的文件到 `pets/.gh-<令牌>/p/<序号>/`，按导入一样校验 →
     返回 `{token, repo, items: [摘要 + path + index]}`，坏的也列出来写原因。仓库里别的文件不解。
-    认三种：带 `pet.json` 的文件夹（本格式、Codex 宠物）；dsh-pet 插件本体（`<dir>/assets/config.jsonc` + `assets/webm/`，只解这两样和 `assets/mov/`，
-    id 取文件夹名，带 dsh-pet 的许可和署名）；dsh-pet 种类（`<dir>/<种类>-config.json` + `<种类>-animation/`，中文名的 id 是 `dsh-<名字哈希>`）。
-    dsh-pet 格式的装好后包里是一份安装时写的 `pet.json`：`{"format": "dsh-pet", "id", "config", "webm", "mov", "license"?, "credits"?}`，扫描时按 §5 换算。
-    看看只是替用户从原仓库下载、在本机换算，不托管、不推荐第三方形象。
+    只认带 `pet.json` 的文件夹，且要是本格式。看看只是替用户从原仓库下载，不托管、不推荐第三方形象。
   - `GET /api/pets/from-github/preview/{token}/{index}`：挑的时候看封面。
   - `POST /api/pets/from-github/install {token, indexes}`：装挑中的，同 id 覆盖；挑的里面 id 重复 → `dup_id`。装完删临时目录；没装的 1 小时后下次查找时清掉。
   - 装好的包里写 `.origin.json`（`{github, ref, path}`），列表摘要带 `origin`，卡片上显示“来自 GitHub”并链回仓库。
-- 命令行：`looklook pet check <目录>`（制作时自查，见教程）、`looklook pet install <文件 | GitHub 仓库> [--pick id,… | --all]`
+- 命令行：`looklook pet check <目录>`（制作时自查，见教程）、`looklook pet install <文件 | 文件夹 | GitHub 仓库> [--pick id,… | --all]`
   （仓库里只有一只直接装；好几只又没写 `--pick` / `--all` 时列出来、退出码 2）。
 
 远程（中转 / WebRTC）打开时文件也从这台电脑拿；片段按需加载，一个状态只先拿池子里抽中的那段。
@@ -299,7 +258,7 @@ JSON（允许 `//` 注释和尾逗号，按 JSONC 解析）。下面每个字段
 ```jsonc
 "pet": {
   "enabled": true,
-  "byAgent": { "claude": "local:claude-girl", "codex": "codex:chatgpt", "dsh": "dsh:main", "opencode": null },
+  "byAgent": { "claude": "local:claude-girl", "codex": "local:robot", "dsh": null },
   "default": null,            // 上面没配的对话类型用哪只
   "size": 1,                  // 缩放，1 = 桌面 160 px 高、手机 112 px 高
   "lines": true               // 显示气泡
@@ -319,12 +278,12 @@ JSON（允许 `//` 注释和尾逗号，按 JSONC 解析）。下面每个字段
 
 ### 6.5 分期
 
-1. 第一期：格式、导入、三种来源、视频 + 精灵图播放、状态联动、点击、拖拽甩抛、闲时随机 / 走动 / 睡觉、气泡、`looklook pet check`。
+1. 第一期：格式、导入、视频 + 精灵图播放、状态联动、点击、拖拽甩抛、闲时随机 / 走动 / 睡觉、气泡、`looklook pet check`。
 2. 第二期：碎碎念（`persona`，用哪个模型、费用怎么控制另行设计）。
 3. 第三期：做包的辅助（从立绘出提示词、批量抠像脚本）。
 
 ## 7. 许可
 
-- 看看的代码（含播放器）MIT。参考 dsh-pet 的行为设计和 MIT 代码时，在 `THIRD_PARTY` 里署名并附仓库地址（dsh-pet 的二创约定要求）。
+- 看看的代码（含播放器）MIT。
 - 看看发布包和开源仓库里**不放任何第三方宠物素材**。测试用的宠物包由脚本生成（色块小人），CC0。
 - 用户装的包授权归各自作者；看看只显示 `license` / `credits`，不做判断。

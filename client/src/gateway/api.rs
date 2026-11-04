@@ -155,6 +155,7 @@ pub fn routes(app: App) -> Router<App> {
         .route("/pets", get(pets_list))
         .route("/pets/settings", get(pets_settings).put(put_pets_settings))
         .route("/pets/import", post(pets_import).layer(DefaultBodyLimit::max(crate::pets::MAX_PACK as usize + (1 << 20))))
+        .route("/pets/import-path", post(pets_import_path))
         .route("/pets/from-github", post(pets_github_scan))
         .route("/pets/from-github/install", post(pets_github_install))
         .route("/pets/from-github/preview/{token}/{index}", get(pets_github_preview))
@@ -1916,8 +1917,10 @@ async fn list_history(State(app): State<App>, Query(q): Query<crate::history::Qu
     Ok(Json(json!({ "items": items, "marks": marks, "persistent": matches!(app.instances.backend, Backend::Tmux(_)) })))
 }
 
-/// 正开在看看会话里的对话：对话号 → 会话 ID。按这个会话接着的对话号、Claude Code 对话界面 hooks 记下的当前会话号，
-/// 还有从记录里认出来的（[`crate::instances::View::conv_id`]）。
+/// 正开在看看会话里的对话：对话号 → 会话 ID。每个会话只算它**现在**在的那一个：对话界面记下的当前会话号
+/// （hooks / app-server，`/resume`、`/clear` 后马上换）> 从进程、记录里认出来的（[`crate::instances::View::conv_id`]）
+/// > 新建时接着的对话号。接着的对话号新建后就不再变：`/resume` 换走以后还算它，原来那段对话就会标成开在这里，
+/// 名字和这个会话实际在的对话对不上。
 fn open_convs(app: &App, views: &[crate::instances::View]) -> std::collections::HashMap<String, String> {
     let mut open = std::collections::HashMap::new();
     for v in views {
@@ -1925,14 +1928,12 @@ fn open_convs(app: &App, views: &[crate::instances::View]) -> std::collections::
             continue;
         }
         let id = &v.row.id;
-        if let Ok(Some(conv)) = app.store.get::<String>(&crate::instances::resume_key(id)) {
+        let conv = crate::chat::binding(&app.store, id)
+            .map(|b| b.session_id)
+            .or_else(|| v.conv_id.clone())
+            .or_else(|| app.store.get::<String>(&crate::instances::resume_key(id)).ok().flatten());
+        if let Some(conv) = conv {
             open.insert(conv, id.clone());
-        }
-        if let Some(b) = crate::chat::binding(&app.store, id) {
-            open.insert(b.session_id, id.clone());
-        }
-        if let Some(c) = &v.conv_id {
-            open.insert(c.clone(), id.clone());
         }
     }
     open
@@ -3012,6 +3013,25 @@ async fn pets_import(State(app): State<App>, body: axum::body::Body) -> R<Json<V
     .await
     .map_err(anyhow::Error::from)?
     .map_err(crate::pets::pack_error)?;
+    Ok(Json(pack.summary()))
+}
+
+#[derive(Deserialize)]
+struct ImportPathQ {
+    path: String,
+}
+
+/// 从这台电脑上选的文件 / 文件夹装（设置页“从电脑里选”）：不用经浏览器上传，远程打开时也能装电脑上的包
+async fn pets_import_path(State(app): State<App>, Json(q): Json<ImportPathQ>) -> R<Json<Value>> {
+    let home = app.paths.home.clone();
+    let path = std::path::PathBuf::from(q.path.trim());
+    if !path.is_absolute() {
+        return Err(LocalError::invalid("path", "absolute"));
+    }
+    let pack = tokio::task::spawn_blocking(move || crate::pets::import_path(&home, &path))
+        .await
+        .map_err(anyhow::Error::from)?
+        .map_err(crate::pets::pack_error)?;
     Ok(Json(pack.summary()))
 }
 

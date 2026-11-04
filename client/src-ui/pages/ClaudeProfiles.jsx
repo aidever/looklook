@@ -96,6 +96,13 @@ function UsageLine({ limits }) {
           {t(`cprof.${key}`, { used: Math.round(w.used) })}
         </span>
       ))}
+      {/* 开了额外用量（额度用完后按量付费）：这个月花了多少 */}
+      {limits.extra?.enabled && (
+        <span className="muted">
+          {' · '}
+          {t('cprof.usage_extra', { used: `${limits.extra.currency === 'USD' ? '$' : ''}${(limits.extra.used ?? 0).toFixed(2)}${limits.extra.currency === 'USD' ? '' : ` ${limits.extra.currency}`}` })}
+        </span>
+      )}
       {/* 第三方接口的用量是问服务商的（不是正式接口），标明出处 */}
       {limits.provider && <span className="muted"> · {t('cprof.usage_from', { provider: limits.provider })}</span>}
     </>

@@ -7,7 +7,8 @@ AI 在思考时托腮，跑命令时敲键盘，等你确认时朝你招手，�
 
 - 不会画画也能做：动作用 AI 视频生成，抠像和转码用 ffmpeg 命令。
 - 最少 1 段动画就能装上，7 段就能把所有状态演出来，之后想加多少加多少。
-- 想更省事，可以做成精灵图（第 8 节），或者直接用现成的 Codex 宠物、dsh-pet 宠物（不用转换，看看直接认）。
+- 想更省事，可以做成精灵图（第 8 节）。
+- 看看只认自己的格式（`pet.json` 里 `"format": "looklook-pet"`），别家的宠物包不能直接装。
 
 ## 0. 先想好授权
 
@@ -233,7 +234,7 @@ my-pet/
 
 ## 8. 省事的做法：精灵图
 
-不想做视频，可以做一张 8 列 × 9 行的精灵图（每格 192×208，透明底），和 Codex 宠物同一个规格，按行放这些动作：
+不想做视频，可以做一张 8 列 × 9 行的精灵图（每格 192×208，透明底），按行放这些动作（行的安排可以自己定，下面是推荐的）：
 
 | 行 | 动作 | 用几格 |
 | --- | --- | --- |
@@ -246,8 +247,31 @@ my-pet/
 | 7 | 干活 | 6 |
 | 8 | 检查 | 6 |
 
-文件夹里只放 `pet.json`（Codex 格式：`id`、`displayName`、`description`、`spritesheetPath`）和 `spritesheet.webp`，看看就能认；
-想自己定状态对应哪一行，写成本格式的 `"renderer": "sprite"`（见 PET_PACK.md 3.2、3.3）。
+文件夹里放 `pet.json`、`preview.webp` 和 `spritesheet.webp`。`pet.json` 照上面的行写（字段见 PET_PACK.md 3.2、3.3）：
+
+```jsonc
+{
+  "format": "looklook-pet", "version": 1, "id": "my-sprite", "name": "我的宠物",
+  "author": { "name": "你的名字" }, "license": { "spdx": "CC-BY-4.0", "commercial": true },
+  "renderer": "sprite",
+  "sprite": { "image": "spritesheet.webp", "cell": [192, 208], "columns": 8 },
+  "stage": { "ground": 0.95 },
+  "clips": {
+    "idle":      { "row": 0, "frames": 6, "fps": 6, "loop": true },
+    "run-right": { "row": 1, "frames": 8, "fps": 10, "loop": true, "mirror": false, "dir": "right", "move": {} },
+    "run-left":  { "row": 2, "frames": 8, "fps": 10, "loop": true, "mirror": false, "dir": "left", "move": {} },
+    "wave":      { "row": 3, "frames": 4, "fps": 6 },
+    "jump":      { "row": 4, "frames": 5, "fps": 8 },
+    "fail":      { "row": 5, "frames": 8, "fps": 8 },
+    "wait":      { "row": 6, "frames": 6, "fps": 6, "loop": true },
+    "work":      { "row": 7, "frames": 6, "fps": 8, "loop": true },
+    "review":    { "row": 8, "frames": 6, "fps": 6, "loop": true }
+  },
+  "states": { "idle": ["idle"], "thinking": ["review"], "tool": ["work"], "waiting": ["wait"], "done": ["jump"], "error": ["fail"] },
+  "actions": { "click": ["wave", "jump"], "move": ["run-right", "run-left"] },
+  "behavior": { "idle": 70, "turn": 0, "move": 15, "sleepAfter": 0 }
+}
+```
 
 从视频均匀取 N 帧拼成一行（不满 8 格的地方保持透明），9 行拼好后再竖着叠：
 
@@ -285,13 +309,5 @@ my-pets/
 
 - 填 `owner/repo` 或仓库链接；只想装其中一只，贴那个文件夹的链接（`…/tree/main/pets/blue-cat`）；指定分支或标签写 `owner/repo@v1`。
 - 命令行：`looklook pet install owner/repo`，好几只时加 `--pick orange-girl,blue-cat` 或 `--all`。
-- dsh-pet 格式的仓库也能直接装（插件本体的 `assets/config.jsonc` + `assets/webm/`，或者自己做的 `<种类>-config.json` + `<种类>-animation/`），只解配置和动画。
 - 只能装公开仓库；整个仓库的 zip 不超过 600 MB，每只宠物的限制和导入一样。
 - 在 README 和 `pet.json` 的 `license` 里写清楚授权。
-
-## 10. 已有的宠物直接用
-
-- **Codex 宠物**：放在 `~/.codex/pets/` 里的，看看直接列出来；
-- **dsh-pet 宠物**：装过 [dsh-pet](https://github.com/PC2005-cloud/dsh-pet) 的，它的默认宠物和 `pet/` 下的种类看看也直接列出来（碎碎念、余额这些 dsh-pet 独有的功能不带过来）。
-
-这些都是只读的，看看不会改、不会复制它们。用之前同样留意各自的素材授权。

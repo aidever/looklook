@@ -1,6 +1,6 @@
-//! 对话宠物（docs/PET_PACK.md）：找宠物包、把 Codex 宠物和 dsh-pet 换算成同一种清单、提供文件、导入和删除。
+//! 对话宠物（docs/PET_PACK.md）：找宠物包、校验清单、提供文件、导入和删除。
 //!
-//! - 三个来源：`local`（`{LOOKLOOK_HOME}/pets/`，导入的放这里）、`codex`（`$CODEX_HOME/pets/`）、`dsh`（`$DSH_HOME/dsh-pet/`），后两个只读；
+//! - 只认本格式（looklook-pet），只有一个来源：`local`（`{LOOKLOOK_HOME}/pets/`，导入、从 GitHub 装的都放这里）；
 //! - 换算后的清单里文件都写成相对的键（`anim/idle.webm?v=…`），前端按场合拼前缀（设置页 `/pets/…`，对话页 `/instances/{id}/pet/…`）；
 //! - 文件只认清单里登记过的键，其余一律 404。
 
@@ -210,10 +210,6 @@ impl From<PickIn> for Pick {
     }
 }
 
-fn picks(names: &[&str]) -> Vec<Pick> {
-    names.iter().map(|n| Pick { clip: (*n).into(), weight: 1.0 }).collect()
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SleepSet {
@@ -380,7 +376,7 @@ fn version(p: &Path) -> String {
     format!("{t:x}{:x}", m.map(|m| m.len()).unwrap_or(0))
 }
 
-/// 路径里每一段做百分号编码（dsh-pet 的片段名是中文）
+/// 路径里每一段做百分号编码
 fn enc_path(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
@@ -401,11 +397,6 @@ pub fn valid_id(id: &str) -> bool {
 fn valid_name(n: &str) -> bool {
     let b = n.as_bytes();
     !b.is_empty() && b.len() <= 64 && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit()) && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"._-".contains(c))
-}
-
-/// dsh-pet 的名字（中文）：只要求能当一段路径
-fn safe_segment(n: &str) -> bool {
-    !n.is_empty() && n.len() <= 120 && n != "." && n != ".." && !n.chars().any(|c| matches!(c, '/' | '\\' | '\0' | ':' | '?' | '#' | '%')) && !n.starts_with('.')
 }
 
 // ---------------- JSONC ----------------
@@ -554,7 +545,7 @@ fn load_ours(source: &'static str, dir: &Path, v: Value) -> Result<Pack, PackErr
             m.stage.height = s.cell[1];
         }
     }
-    validate(&m, true)?;
+    validate(&m)?;
     let mut files = BTreeMap::new();
     let preview = ["preview.webp", "preview.png"].iter().find_map(|n| small_file(dir, n).transpose()).transpose()?;
     files.insert("preview".into(), preview.ok_or_else(|| perr("missing_file", "preview.webp"))?);
@@ -595,31 +586,29 @@ fn check_sheet(m: &Manifest, p: &Path, name: &str) -> Result<(), PackError> {
     Ok(())
 }
 
-/// 清单的字段和引用都对（§3）。`strict`：本格式要求的署名、许可、文件名规则（换算来的包不查这些）
-pub fn validate(m: &Manifest, strict: bool) -> Result<(), PackError> {
-    if strict {
-        if m.format != "looklook-pet" {
-            return Err(perr("field", "format"));
-        }
-        if m.version != 1 {
-            return Err(perr("version", m.version.to_string()));
-        }
-        if !valid_id(&m.id) {
-            return Err(perr("field", "id"));
-        }
-        if m.author.as_ref().is_none_or(|a| a.name.trim().is_empty()) {
-            return Err(perr("field", "author.name"));
-        }
-        let lic = m.license.as_ref().ok_or_else(|| perr("field", "license"))?;
-        if lic.spdx.trim().is_empty() {
-            return Err(perr("field", "license.spdx"));
-        }
-        if lic.commercial.is_none() {
-            return Err(perr("field", "license.commercial"));
-        }
-        if let Some(a) = m.agents.iter().find(|a| !AGENTS.contains(&a.as_str())) {
-            return Err(perr("field", format!("agents: {a}")));
-        }
+/// 清单的字段和引用都对（§3）
+pub fn validate(m: &Manifest) -> Result<(), PackError> {
+    if m.format != "looklook-pet" {
+        return Err(perr("field", "format"));
+    }
+    if m.version != 1 {
+        return Err(perr("version", m.version.to_string()));
+    }
+    if !valid_id(&m.id) {
+        return Err(perr("field", "id"));
+    }
+    if m.author.as_ref().is_none_or(|a| a.name.trim().is_empty()) {
+        return Err(perr("field", "author.name"));
+    }
+    let lic = m.license.as_ref().ok_or_else(|| perr("field", "license"))?;
+    if lic.spdx.trim().is_empty() {
+        return Err(perr("field", "license.spdx"));
+    }
+    if lic.commercial.is_none() {
+        return Err(perr("field", "license.commercial"));
+    }
+    if let Some(a) = m.agents.iter().find(|a| !AGENTS.contains(&a.as_str())) {
+        return Err(perr("field", format!("agents: {a}")));
     }
     if m.name.as_ref().is_none_or(Text::is_blank) {
         return Err(perr("field", "name"));
@@ -641,7 +630,7 @@ pub fn validate(m: &Manifest, strict: bool) -> Result<(), PackError> {
         return Err(perr("field", "clips"));
     }
     for (name, c) in &m.clips {
-        if strict && !valid_name(name) {
+        if !valid_name(name) {
             return Err(perr("bad_name", name));
         }
         if !(c.speed > 0.0 && c.speed <= 4.0) {
@@ -710,321 +699,13 @@ pub fn validate(m: &Manifest, strict: bool) -> Result<(), PackError> {
     Ok(())
 }
 
-// ---------------- Codex 宠物（§5） ----------------
-
-/// Codex 宠物：8 列 × 9 行（或 11 行的 v2），每格 192×208，行的含义固定
-fn load_codex(source: &'static str, dir: &Path, v: Value) -> Result<Pack, PackError> {
-    let image = v["spritesheetPath"].as_str().unwrap_or("spritesheet.webp").to_string();
-    if !safe_segment(&image) {
-        return Err(perr("bad_name", image));
-    }
-    let p = small_file(dir, &image)?.ok_or_else(|| perr("missing_file", &image))?;
-    let raw_id = v["id"].as_str().map(str::to_string).or_else(|| dir.file_name().map(|s| s.to_string_lossy().into_owned())).unwrap_or_default();
-    let id: String = raw_id.to_ascii_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).take(40).collect();
-    let id = id.trim_matches('-').to_string();
-    if !valid_id(&id) {
-        return Err(perr("field", "id"));
-    }
-    let name = v["displayName"].as_str().or(v["name"].as_str()).filter(|s| !s.trim().is_empty()).unwrap_or(&raw_id).to_string();
-    let clip = |row: u32, frames: u32, fps: f64| Clip { row: Some(row), frames: Some(frames), fps: Some(fps), ..Clip::default() };
-    let mut clips = BTreeMap::new();
-    clips.insert("idle".to_string(), Clip { looped: true, ..clip(0, 6, 6.0) });
-    for (name, row, dir) in [("run-right", 1, "right"), ("run-left", 2, "left")] {
-        clips.insert(name.into(), Clip { looped: true, mirror: false, dir: Some(dir.into()), walk: Some(Walk::default()), ..clip(row, 8, 10.0) });
-    }
-    clips.insert("wave".into(), clip(3, 4, 6.0));
-    clips.insert("jump".into(), clip(4, 5, 8.0));
-    clips.insert("fail".into(), clip(5, 8, 8.0));
-    clips.insert("wait".into(), Clip { looped: true, ..clip(6, 6, 6.0) });
-    clips.insert("work".into(), Clip { looped: true, ..clip(7, 6, 8.0) });
-    clips.insert("review".into(), Clip { looped: true, ..clip(8, 6, 6.0) });
-    let mut states = BTreeMap::new();
-    for (k, c) in [("idle", "idle"), ("thinking", "review"), ("tool", "work"), ("waiting", "wait"), ("done", "jump"), ("error", "fail")] {
-        states.insert(k.to_string(), picks(&[c]));
-    }
-    let m = Manifest {
-        format: "codex-pet".into(),
-        version: 1,
-        id: id.clone(),
-        name: Some(Text::One(name)),
-        description: v["description"].as_str().map(|s| Text::One(s.into())),
-        renderer: "sprite".into(),
-        stage: Stage { width: 192, height: 208, ground: 0.95, ..Stage::default() },
-        sprite: Some(Sprite { image: image.clone(), cell: [192, 208], columns: 8 }),
-        clips,
-        states,
-        actions: Actions { click: picks(&["wave", "jump"]), walk: picks(&["run-right", "run-left"]), ..Actions::default() },
-        behavior: Behavior { idle: 70.0, turn: 0.0, walk: 15.0, sleep_after: 0 },
-        ..Manifest::default()
-    };
-    validate(&m, false)?;
-    check_sheet(&m, &p, &image)?;
-    let mut files = BTreeMap::new();
-    files.insert("sprite".to_string(), p);
-    Ok(Pack { source, id, dir: dir.to_path_buf(), manifest: m, files, error: None })
-}
-
-/// 一个文件夹里的包（本格式，或 Codex 宠物）
+/// 一个文件夹里的包：只认本格式（`format: "looklook-pet"`）
 pub fn load_dir(source: &'static str, dir: &Path) -> Result<Pack, PackError> {
     let v = read_json(&dir.join("pet.json"))?;
-    if v["format"] == "looklook-pet" {
-        load_ours(source, dir, v)
-    } else if v["format"] == "dsh-pet" {
-        load_dsh_local(source, dir, &v)
-    } else if v.get("spritesheetPath").is_some() || dir.join("spritesheet.webp").is_file() {
-        load_codex(source, dir, v)
-    } else {
-        Err(perr("field", "format"))
+    if v["format"] != "looklook-pet" {
+        return Err(perr("format", v["format"].as_str().unwrap_or_default()));
     }
-}
-
-// ---------------- dsh-pet（§5） ----------------
-
-/// dsh-pet 的动画距离以宽 462 px 的宠物为准
-const DSH_BASE: f64 = 462.0;
-
-struct DshDirs {
-    webm: Vec<PathBuf>,
-    mov: Vec<PathBuf>,
-}
-
-fn str_list(v: &Value) -> Vec<String> {
-    match v {
-        Value::String(s) => vec![s.clone()],
-        Value::Array(a) => a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect(),
-        _ => Vec::new(),
-    }
-}
-
-/// 一份 dsh-pet 配置（已合并好）换算成清单
-fn convert_dsh(source: &'static str, id: &str, dir: &Path, name: String, cfg: &Value, dirs: &DshDirs, license: Option<License>, credits: Vec<Credit>) -> Result<Pack, PackError> {
-    let anim = &cfg["animations"];
-    let mut clips: BTreeMap<String, Clip> = BTreeMap::new();
-    let mut files = BTreeMap::new();
-    // 登记一段：素材在才算
-    let mut add = |n: &str, f: &dyn Fn(&mut Clip)| -> bool {
-        if !safe_segment(n) {
-            return false;
-        }
-        if !clips.contains_key(n) {
-            let Some(webm) = dirs.webm.iter().map(|d| d.join(format!("{n}.webm"))).find(|p| p.is_file()) else { return false };
-            files.insert(format!("anim/{n}.webm"), webm);
-            if let Some(mov) = dirs.mov.iter().map(|d| d.join(format!("{n}.mov"))).find(|p| p.is_file()) {
-                files.insert(format!("anim/{n}.mov"), mov);
-            }
-            clips.insert(n.to_string(), Clip::default());
-        }
-        f(clips.get_mut(n).expect("clip"));
-        true
-    };
-    let none = |_: &mut Clip| {};
-    let pool = |v: &Value, f: &dyn Fn(&mut Clip), add: &mut dyn FnMut(&str, &dyn Fn(&mut Clip)) -> bool| -> Vec<Pick> {
-        str_list(v).into_iter().filter(|n| add(n, f)).map(|clip| Pick { clip, weight: 1.0 }).collect()
-    };
-    let idle = pool(&anim["idle"], &|c: &mut Clip| c.looped = true, &mut add);
-    if idle.is_empty() {
-        return Err(perr("field", "states.idle"));
-    }
-    let mut states = BTreeMap::new();
-    states.insert("idle".to_string(), idle);
-    let ws = anim["events"]["workStatus"].as_array().cloned().unwrap_or_default();
-    for (i, k) in ["thinking", "tool", "toolDone", "waiting", "done", "error"].iter().enumerate() {
-        let l = pool(ws.get(i).unwrap_or(&Value::Null), &none, &mut add);
-        if !l.is_empty() {
-            states.insert(k.to_string(), l);
-        }
-    }
-    let mut actions = Actions {
-        click: pool(&anim["clicks"], &none, &mut add),
-        drag: pool(&anim["drag"], &|c: &mut Clip| c.looped = true, &mut add),
-        turn: pool(&anim["turn"], &|c: &mut Clip| c.turn = true, &mut add),
-        ..Actions::default()
-    };
-    let k = 640.0 / DSH_BASE;
-    let def = &anim["moves"]["default"];
-    for a in anim["moves"]["actions"].as_array().cloned().unwrap_or_default() {
-        let Some(n) = a["name"].as_str() else { continue };
-        let num = |key: &str, d: f64| a["params"][key].as_f64().or(def[key].as_f64()).unwrap_or(d);
-        let w = Walk { min: num("minDist", 60.0) * k, max: num("maxDist", 240.0) * k, lead: num("leadSec", 2.0), tail: num("tailSec", 2.0), ..Walk::default() };
-        if add(n, &|c: &mut Clip| c.walk = Some(w.clone())) {
-            actions.walk.push(Pick { clip: n.into(), weight: 1.0 });
-        }
-    }
-    for g in anim["categories"].as_array().cloned().unwrap_or_default() {
-        let no_mirror = g["noMirror"].as_bool().unwrap_or(false);
-        let l = pool(&g["actions"], &|c: &mut Clip| if no_mirror { c.mirror = false }, &mut add);
-        let weight = g["weight"].as_f64().unwrap_or(10.0);
-        if !l.is_empty() && weight > 0.0 {
-            actions.random.push(Group { id: g["id"].as_str().unwrap_or("").to_string(), weight, clips: l });
-        }
-    }
-    for s in anim["sleep"].as_array().cloned().unwrap_or_default() {
-        let set = SleepSet {
-            start: pool(&s["start"], &none, &mut add),
-            looped: pool(&s["loop"], &|c: &mut Clip| c.looped = true, &mut add),
-            end: pool(&s["end"], &none, &mut add),
-        };
-        if !set.start.is_empty() && !set.looped.is_empty() && !set.end.is_empty() {
-            actions.sleep.push(set);
-        }
-    }
-    let w = &cfg["animationWeights"];
-    let behavior = Behavior {
-        idle: w["idle"].as_f64().unwrap_or(10.0),
-        turn: w["turn"].as_f64().unwrap_or(5.0),
-        walk: w["move"].as_f64().unwrap_or(5.0),
-        sleep_after: if actions.sleep.is_empty() { 0 } else { 600 },
-    };
-    let mut zh: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    if let Some(t) = cfg["workStatusTexts"].as_array() {
-        for (i, k) in ["thinking", "tool", "toolDone", "waiting", "done", "error"].iter().enumerate() {
-            let l = t.get(i).map(str_list).unwrap_or_default();
-            if !l.is_empty() {
-                zh.insert(k.to_string(), l);
-            }
-        }
-    }
-    for (src, k) in [("sleepStartTexts", "sleepStart"), ("sleepEndTexts", "sleepEnd"), ("sleepRefuseTexts", "wake")] {
-        let l = str_list(&cfg[src]);
-        if !l.is_empty() {
-            zh.insert(k.into(), l);
-        }
-    }
-    let mut lines = BTreeMap::new();
-    if !zh.is_empty() {
-        lines.insert("zh-CN".to_string(), zh);
-    }
-    let m = Manifest {
-        format: "dsh-pet".into(),
-        version: 1,
-        id: id.to_string(),
-        name: Some(Text::One(name)),
-        license,
-        credits,
-        agents: vec!["dsh".into()],
-        renderer: "video".into(),
-        stage: Stage { width: 640, height: 360, ..Stage::default() },
-        clips,
-        states,
-        actions,
-        behavior,
-        lines,
-        ..Manifest::default()
-    };
-    validate(&m, false)?;
-    Ok(Pack { source, id: id.to_string(), dir: dir.to_path_buf(), manifest: m, files, error: None })
-}
-
-/// 装在 DSH profile 里的 dsh-pet 包（带默认素材和 `assets/config.jsonc`）：`$DSH_HOME` 下三层以内的 `node_modules/dsh-pet`
-fn find_dsh_package(dsh: &Path) -> Option<PathBuf> {
-    let mut level = vec![dsh.to_path_buf()];
-    for _ in 0..3 {
-        let mut next = Vec::new();
-        for d in &level {
-            let cand = d.join("node_modules").join("dsh-pet");
-            if cand.join("assets").join("config.jsonc").is_file() {
-                return Some(cand);
-            }
-            let Ok(rd) = std::fs::read_dir(d) else { continue };
-            for e in rd.flatten().take(64) {
-                let n = e.file_name();
-                let n = n.to_string_lossy();
-                if n == "node_modules" || n.starts_with('.') || n == "electron" {
-                    continue;
-                }
-                if e.file_type().is_ok_and(|t| t.is_dir()) {
-                    next.push(e.path());
-                }
-            }
-        }
-        level = next;
-    }
-    None
-}
-
-pub(crate) fn dsh_credits() -> Vec<Credit> {
-    vec![
-        Credit { role: "原角色（溟月）".into(), name: "上善无形".into(), url: Some("https://space.bilibili.com/4456176".into()) },
-        Credit { role: "DeepSeek 女仆设计".into(), name: "ZipZipPipe".into(), url: Some("https://space.bilibili.com/4168597".into()) },
-        Credit { role: "动画".into(), name: "dsh-pet".into(), url: Some("https://github.com/PC2005-cloud/dsh-pet".into()) },
-    ]
-}
-
-/// dsh-pet 自带形象（大肥鱼）的许可
-pub(crate) fn dsh_license() -> License {
-    License {
-        spdx: "LicenseRef-dsh-pet".into(),
-        commercial: Some(false),
-        url: Some("https://github.com/PC2005-cloud/dsh-pet#许可".into()),
-        note: Some("dsh-pet 素材允许开源使用、禁止商用；形象 CC BY-NC-SA 4.0".into()),
-    }
-}
-
-/// 从 GitHub 装来的 dsh-pet 格式的宠物：`pet.json` 是安装时写的
-/// `{"format": "dsh-pet", "id", "name"?, "config", "webm", "mov"?, "license"?, "credits"?}`（路径相对包目录）
-fn load_dsh_local(source: &'static str, dir: &Path, v: &Value) -> Result<Pack, PackError> {
-    let rel = |k: &str| -> Result<PathBuf, PackError> {
-        let s = v[k].as_str().ok_or_else(|| perr("field", k))?;
-        entry_path(s).map(|p| dir.join(p)).ok_or_else(|| perr("bad_name", s))
-    };
-    let id = v["id"].as_str().filter(|s| valid_id(s)).ok_or_else(|| perr("field", "id"))?;
-    let cfg = read_json(&rel("config")?)?;
-    let name = v["name"].as_str().or(cfg["pets"][0]["name"].as_str()).filter(|s| !s.trim().is_empty()).unwrap_or(id).to_string();
-    let dirs = DshDirs { webm: vec![rel("webm")?], mov: rel("mov").ok().into_iter().collect() };
-    let license = serde_json::from_value(v["license"].clone()).ok().filter(|l: &License| !l.spdx.is_empty());
-    let credits = serde_json::from_value(v["credits"].clone()).unwrap_or_default();
-    convert_dsh(source, id, dir, name, &cfg, &dirs, license, credits)
-}
-
-/// `$DSH_HOME/dsh-pet/` 里的宠物：默认宠物 `main` 和 `pet/` 下的各个种类
-fn load_dsh(dsh: &Path) -> Vec<Pack> {
-    let root = dsh.join("dsh-pet");
-    let pkg = find_dsh_package(dsh);
-    let mut out = Vec::new();
-    // 默认宠物：包内默认配置，用户层 main-config.jsonc 的顶层字段整段替换
-    let base = pkg.as_ref().and_then(|p| read_json(&p.join("assets").join("config.jsonc")).ok());
-    let user = read_json(&root.join("main-config.jsonc")).ok();
-    if base.is_some() || (user.is_some() && root.join("main-animation").is_dir()) {
-        let mut cfg = base.unwrap_or_else(|| json!({}));
-        if let (Some(Value::Object(u)), Value::Object(c)) = (user, &mut cfg) {
-            for (k, v) in u {
-                c.insert(k, v);
-            }
-        }
-        let dirs = DshDirs {
-            webm: [Some(root.join("main-animation").join("webm")), pkg.as_ref().map(|p| p.join("assets").join("webm"))].into_iter().flatten().collect(),
-            mov: vec![root.join("main-animation").join("mov")],
-        };
-        let name = cfg["pets"][0]["name"].as_str().filter(|s| !s.is_empty()).unwrap_or("dsh-pet").to_string();
-        let license = dsh_license();
-        let dir = pkg.clone().unwrap_or_else(|| root.clone());
-        out.push(convert_dsh("dsh", "main", &dir, name, &cfg, &dirs, Some(license), dsh_credits()).unwrap_or_else(|e| Pack::broken("dsh", &dir, e)));
-    }
-    let Ok(rd) = std::fs::read_dir(root.join("pet")) else { return out };
-    let mut kinds: Vec<_> = rd.flatten().filter_map(|e| e.file_name().to_str().and_then(|n| n.strip_suffix("-config.json")).map(str::to_string)).collect();
-    kinds.sort();
-    for kind in kinds {
-        let anim = root.join("pet").join(format!("{kind}-animation"));
-        let cfg_path = root.join("pet").join(format!("{kind}-config.json"));
-        let pack = (|| {
-            if !safe_segment(&kind) {
-                return Err(perr("bad_name", &kind));
-            }
-            let cfg = read_json(&cfg_path)?;
-            if !anim.is_dir() {
-                return Err(perr("missing_file", format!("{kind}-animation/")));
-            }
-            let name = cfg["pets"][0]["name"].as_str().filter(|s| !s.is_empty()).unwrap_or(&kind).to_string();
-            let dirs = DshDirs { webm: vec![anim.clone()], mov: vec![anim.join("mov")] };
-            convert_dsh("dsh", &kind, &anim, name, &cfg, &dirs, None, Vec::new())
-        })();
-        out.push(pack.unwrap_or_else(|e| {
-            let mut p = Pack::broken("dsh", &anim, e);
-            p.id = kind.clone();
-            p
-        }));
-    }
-    out
+    load_ours(source, dir, v)
 }
 
 // ---------------- 扫描 ----------------
@@ -1040,11 +721,9 @@ fn scan_dir(source: &'static str, dir: &Path) -> Vec<Pack> {
     dirs.iter().filter(|d| d.join("pet.json").is_file()).map(|d| load_dir(source, d).unwrap_or_else(|e| Pack::broken(source, d, e))).collect()
 }
 
-/// 所有来源的宠物（同一来源里 id 重复的只留第一个）
+/// 装好的宠物（`{LOOKLOOK_HOME}/pets/` 下每个带 pet.json 的文件夹；id 重复的只留第一个）
 pub fn scan(home: &Path) -> Vec<Pack> {
     let mut all = scan_dir("local", &local_dir(home));
-    all.extend(scan_dir("codex", &crate::agents::codex_home().join("pets")));
-    all.extend(load_dsh(&crate::agents::dsh_home()));
     let mut seen = std::collections::HashSet::new();
     all.retain(|p| seen.insert(p.key()));
     all
@@ -1280,6 +959,56 @@ pub fn import(home: &Path, zip_path: &Path) -> Result<Pack, PackError> {
     install_root(home, &root, None)
 }
 
+/// 从这台电脑上的路径装：`.llpet` / `.zip` 文件，或者解开的宠物文件夹（选文件夹本身或里面的 `pet.json` 都行）。
+/// 文件夹是复制进来的，原来的不动。
+pub fn import_path(home: &Path, path: &Path) -> Result<Pack, PackError> {
+    let meta = std::fs::metadata(path).map_err(|_| perr("missing_file", path.display().to_string()))?;
+    let dir = if meta.is_dir() {
+        path
+    } else if path.file_name().is_some_and(|n| n == "pet.json") {
+        path.parent().ok_or_else(|| perr("missing_file", "pet.json"))?
+    } else {
+        if meta.len() > MAX_PACK {
+            return Err(perr("too_big", String::new()));
+        }
+        return import(home, path);
+    };
+    let src = pack_root(dir).ok_or_else(|| perr("missing_file", "pet.json"))?;
+    let base = local_dir(home);
+    std::fs::create_dir_all(&base).map_err(|e| perr("io", e.to_string()))?;
+    let tmp = tempfile::Builder::new().prefix(".import-").tempdir_in(&base).map_err(|e| perr("io", e.to_string()))?;
+    let root = tmp.path().join("pack");
+    let (mut n, mut size) = (0usize, 0u64);
+    copy_pack(&src, &root, &mut n, &mut size)?;
+    install_root(home, &root, None)
+}
+
+/// 复制解开的包：只收普通文件和文件夹（不跟符号链接），跳过隐藏文件；限制同 zip（文件数、总大小）
+fn copy_pack(from: &Path, to: &Path, n: &mut usize, size: &mut u64) -> Result<(), PackError> {
+    std::fs::create_dir_all(to).map_err(|e| perr("io", e.to_string()))?;
+    for e in std::fs::read_dir(from).map_err(|e| perr("io", e.to_string()))?.flatten() {
+        let name = e.file_name();
+        if name.to_string_lossy().starts_with('.') || name == "__MACOSX" {
+            continue;
+        }
+        let Ok(t) = e.file_type() else { continue };
+        if t.is_dir() {
+            copy_pack(&e.path(), &to.join(&name), n, size)?;
+        } else if t.is_file() {
+            *n += 1;
+            *size += e.metadata().map(|m| m.len()).unwrap_or(0);
+            if *n > MAX_FILES * 2 {
+                return Err(perr("too_many", n.to_string()));
+            }
+            if *size > MAX_PACK {
+                return Err(perr("too_big", String::new()));
+            }
+            std::fs::copy(e.path(), to.join(&name)).map_err(|e| perr("io", e.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
 /// 把解好、放在 `pets/` 下临时目录里的包 `root` 换进 `pets/<id>/`（同 id 覆盖）；`origin` 写进 `.origin.json`（从哪装的）
 pub(crate) fn install_root(home: &Path, root: &Path, origin: Option<&Value>) -> Result<Pack, PackError> {
     let base = local_dir(home);
@@ -1324,8 +1053,6 @@ pub fn list_json(home: &Path, fresh: bool) -> Value {
         "items": packs.iter().map(Pack::summary).collect::<Vec<_>>(),
         "dirs": {
             "local": local_dir(home).display().to_string(),
-            "codex": crate::agents::codex_home().join("pets").display().to_string(),
-            "dsh": crate::agents::dsh_home().join("dsh-pet").display().to_string(),
         },
     })
 }
@@ -1505,8 +1232,6 @@ pub(crate) mod tests {
         assert!(valid_name("idle.webm"));
         assert!(!valid_name("../x"));
         assert!(!valid_name("中文"));
-        assert!(safe_segment("待机呼吸休闲"));
-        assert!(!safe_segment("../x") && !safe_segment("a/b") && !safe_segment(".."));
         assert_eq!(enc_path("anim/待机.webm"), "anim/%E5%BE%85%E6%9C%BA.webm");
         assert_eq!(entry_path("a/./b"), Some(PathBuf::from("a/b")));
         assert_eq!(entry_path("../x"), None);
@@ -1578,19 +1303,29 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn codex() {
+    fn sprite() {
         let t = tempfile::tempdir().unwrap();
-        write(t.path(), "pet.json", br#"{"id":"Claude","displayName":"Claude","spritesheetPath":"spritesheet.webp"}"#);
+        let guide = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/PET_PACK_GUIDE.md")).unwrap();
+        // 教程第 8 节的精灵图示例原样能装
+        let i = guide.find("```jsonc\n{\n  \"format\": \"looklook-pet\", \"version\": 1, \"id\": \"my-sprite\"").expect("guide sprite example");
+        let body = &guide[i + 9..];
+        let body = &body[..body.find("```").unwrap()];
+        write(t.path(), "pet.json", body.as_bytes());
+        write(t.path(), "preview.png", &png(10, 10));
         write(t.path(), "spritesheet.webp", &png(1536, 1872));
-        let p = load_dir("codex", t.path()).unwrap();
-        assert_eq!(p.id, "claude");
+        let p = load_dir("local", t.path()).unwrap();
         assert_eq!(p.manifest.renderer, "sprite");
+        assert_eq!((p.manifest.stage.width, p.manifest.stage.height), (192, 208));
         assert_eq!(p.manifest.clips["review"].row, Some(8));
-        assert_eq!(p.manifest.states["thinking"][0].clip, "review");
         assert!(p.manifest_out().sprite.unwrap().image.starts_with("sprite?v="));
         // 太矮，放不下 9 行
         write(t.path(), "spritesheet.webp", &png(1536, 1000));
-        assert_eq!(load_dir("codex", t.path()).unwrap_err().code, "bad_clip");
+        assert_eq!(load_dir("local", t.path()).unwrap_err().code, "bad_clip");
+        // 别家格式不认
+        write(t.path(), "pet.json", br#"{"id":"x","displayName":"X","spritesheetPath":"spritesheet.webp"}"#);
+        assert_eq!(load_dir("local", t.path()).unwrap_err(), perr("format", ""));
+        write(t.path(), "pet.json", br#"{"format":"dsh-pet","id":"x"}"#);
+        assert_eq!(load_dir("local", t.path()).unwrap_err(), perr("format", "dsh-pet"));
     }
 
     #[test]
@@ -1601,61 +1336,6 @@ pub(crate) mod tests {
         b.extend([0xff, 0x05, 0x00, 0x4f, 0x07, 0x00]);
         write(t.path(), "a.webp", &b);
         assert_eq!(image_size(&t.path().join("a.webp")), Some((1536, 1872)));
-    }
-
-    #[test]
-    fn dsh() {
-        let t = tempfile::tempdir().unwrap();
-        let dsh = t.path();
-        let pkg = dsh.join("profiles/web/node_modules/dsh-pet");
-        write(&pkg, "assets/config.jsonc", r#"{
-          // 包内默认
-          "pets": [{ "name": "蓝毛小女仆", "id": "main" }],
-          "workStatusTexts": [["想想"], ["干活"]],
-          "sleepStartTexts": ["困了"],
-          "animations": {
-            "idle": ["待机"], "turn": ["东张西望"], "drag": ["悬空"], "clicks": ["点击-开心", "点击-缺文件"],
-            "moves": { "default": { "minDist": 462, "maxDist": 924, "leadSec": 2, "tailSec": 2 }, "actions": [{ "name": "螃蟹走路", "params": { "maxDist": 462 } }] },
-            "categories": [{ "id": "文字", "weight": 10, "noMirror": true, "actions": ["深度思考"] }],
-            "events": { "workStatus": ["思考", ["忙碌", "清点"], "清点"] },
-            "sleep": [{ "start": ["睡-开始"], "loop": ["睡-循环"], "end": ["睡-起来"] }]
-          },
-          "animationWeights": { "idle": 10, "turn": 5, "move": 5 },
-        }"#.as_bytes());
-        for n in ["待机", "东张西望", "悬空", "点击-开心", "螃蟹走路", "深度思考", "思考", "忙碌", "清点", "睡-开始", "睡-循环", "睡-起来"] {
-            write(&pkg, &format!("assets/webm/{n}.webm"), b"x");
-        }
-        // 用户层覆盖名字；mov 在用户目录
-        write(dsh, "dsh-pet/main-config.jsonc", r#"{ "pets": [{ "name": "小鲸", "id": "main" }] }"#.as_bytes());
-        write(dsh, "dsh-pet/main-animation/mov/待机.mov", b"x");
-        // 一个种类
-        write(dsh, "dsh-pet/pet/pig-config.json", br#"{ "animations": { "idle": ["pig-idle"] } }"#);
-        write(dsh, "dsh-pet/pet/pig-animation/pig-idle.webm", b"x");
-        // 一个坏种类：没有素材目录
-        write(dsh, "dsh-pet/pet/bad-config.json", br#"{ "animations": { "idle": ["x"] } }"#);
-        let packs = load_dsh(dsh);
-        assert_eq!(packs.len(), 3);
-        let main = &packs[0];
-        assert_eq!(main.id, "main");
-        assert!(main.error.is_none(), "{:?}", main.error);
-        let m = &main.manifest;
-        assert!(matches!(&m.name, Some(Text::One(n)) if n == "小鲸"));
-        assert_eq!(m.states["tool"].iter().map(|p| p.clip.as_str()).collect::<Vec<_>>(), ["忙碌", "清点"]);
-        assert_eq!(m.states["toolDone"][0].clip, "清点");
-        assert!(!m.states.contains_key("waiting"));
-        assert_eq!(m.actions.click.len(), 1, "缺文件的片段不登记");
-        let w = m.clips["螃蟹走路"].walk.as_ref().unwrap();
-        assert_eq!((w.min, w.max, w.lead), (640.0, 640.0, 2.0));
-        assert!(!m.clips["深度思考"].mirror && m.clips["东张西望"].turn);
-        assert_eq!(m.actions.sleep.len(), 1);
-        assert_eq!(m.lines["zh-CN"]["tool"], ["干活"]);
-        assert_eq!(m.lines["zh-CN"]["sleepStart"], ["困了"]);
-        assert_eq!(m.license.as_ref().unwrap().commercial, Some(false));
-        assert!(main.files.contains_key("anim/待机.mov"));
-        assert_eq!(packs[2].id, "pig");
-        assert!(packs[2].error.is_none());
-        assert_eq!(packs[1].id, "bad");
-        assert_eq!(packs[1].error.as_ref().unwrap().code, "missing_file");
     }
 
     pub(crate) fn zip_dir(src: &Path, out: &Path, prefix: &str) {
@@ -1713,10 +1393,10 @@ pub(crate) mod tests {
     fn settings_pick() {
         let mut s = PetSettings { default: Some("local:a".into()), ..PetSettings::default() };
         s.by_agent.insert("codex".into(), None);
-        s.by_agent.insert("dsh".into(), Some("dsh:main".into()));
+        s.by_agent.insert("dsh".into(), Some("local:b".into()));
         assert_eq!(s.pick("claude"), Some("local:a"));
         assert_eq!(s.pick("codex"), None);
-        assert_eq!(s.pick("dsh"), Some("dsh:main"));
+        assert_eq!(s.pick("dsh"), Some("local:b"));
         s.enabled = false;
         assert_eq!(s.pick("dsh"), None);
     }

@@ -285,10 +285,10 @@ pub fn limits(ctx: &Ctx) -> Value {
     let cached = (!c["accountUuid"].is_null() && c["accountUuid"] == state["oauthAccount"]["accountUuid"]).then(|| {
         let u = &c["utilization"];
         let win = |k: &str| (u[k]["utilization"].clone(), u[k]["resets_at"].clone());
-        (c["fetchedAtMs"].as_i64().unwrap_or(0), win("five_hour"), win("seven_day"))
+        (c["fetchedAtMs"].as_i64().unwrap_or(0), win("five_hour"), win("seven_day"), u["extra_usage"].clone())
     });
     let reported = REPORTED.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(&ctx.config_dir).cloned());
-    let Some((fetched, five, seven)) = cached.into_iter().chain(reported).max_by_key(|r| r.0) else { return Value::Null };
+    let Some((fetched, five, seven, extra)) = cached.into_iter().chain(reported).max_by_key(|r| r.0) else { return Value::Null };
     // 可能是几天前取的：已经过了重置时间的窗口不再显示（数字早就不对了）
     let now = time::OffsetDateTime::now_utc();
     let pick = |(used, resets_at): Window| {
@@ -299,7 +299,23 @@ pub fn limits(ctx: &Ctx) -> Value {
             Value::Null
         }
     };
-    serde_json::json!({ "five_hour": pick(five), "seven_day": pick(seven), "fetched_at": fetched })
+    serde_json::json!({ "five_hour": pick(five), "seven_day": pick(seven), "extra": extra_usage(&extra), "fetched_at": fetched })
+}
+
+/// 额外用量（Extra usage，Claude Code 里叫 usage credits）：订阅额度用完后按量付费，按月封顶。
+/// 接口里的金额是货币的最小单位（美元是美分），这里换成元：`{ enabled, used, limit, percent, currency }`，
+/// `limit` 为空是没设上限。账号没有这项（API、旧版 Claude Code）时 null
+fn extra_usage(e: &Value) -> Value {
+    let Some(enabled) = e["is_enabled"].as_bool() else { return Value::Null };
+    let scale = 10f64.powi(e["decimal_places"].as_i64().unwrap_or(2).clamp(0, 6) as i32);
+    let amount = |v: &Value| v.as_f64().map(|x| x / scale);
+    serde_json::json!({
+        "enabled": enabled,
+        "used": amount(&e["used_credits"]),
+        "limit": amount(&e["monthly_limit"]),
+        "percent": e["utilization"],
+        "currency": e["currency"].as_str().filter(|c| !c.is_empty()).map(str::to_uppercase).unwrap_or_else(|| "USD".into()),
+    })
 }
 
 /// 订阅账号（claude.ai 登录）的邮箱和组织：`.claude.json` 里的 `oauthAccount`；没登录、用 API 时没有
@@ -315,8 +331,9 @@ pub fn account(ctx: &Ctx) -> Value {
 /// 一个窗口：用了百分之几、什么时候重置
 type Window = (Value, Value);
 
-/// [`refresh_limits`] 时 Claude Code 报出来的用量，按配置目录：（取到的时间，5 小时，7 天）
-static REPORTED: Mutex<Option<HashMap<PathBuf, (i64, Window, Window)>>> = Mutex::new(None);
+/// [`refresh_limits`] 时 Claude Code 报出来的用量，按配置目录：（取到的时间，5 小时，7 天，额外用量原样）
+static REPORTED: Mutex<Option<HashMap<PathBuf, Reported>>> = Mutex::new(None);
+type Reported = (i64, Window, Window, Value);
 
 /// 用量缓存多旧就请 Claude Code 重新取
 pub const LIMITS_STALE_MS: i64 = 2 * 60 * 1000;
@@ -349,8 +366,8 @@ pub async fn fetch_limits(shell: &str, config_dir: &Path, account_dir: Option<&P
     cmd.current_dir(cwd).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).kill_on_drop(true);
     match tokio::time::timeout(Duration::from_secs(30), cmd.output()).await {
         Ok(Ok(out)) if out.status.success() => match parse_usage_report(&String::from_utf8_lossy(&out.stdout)) {
-            Some((five, seven)) => {
-                REPORTED.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(config_dir.to_path_buf(), (crate::util::system_ms(), five, seven));
+            Some((five, seven, extra)) => {
+                REPORTED.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(config_dir.to_path_buf(), (crate::util::system_ms(), five, seven, extra));
                 Ok(true)
             }
             None => {
@@ -366,12 +383,14 @@ pub async fn fetch_limits(shell: &str, config_dir: &Path, account_dir: Option<&P
 }
 
 /// `claude -p /usage --output-format stream-json` 输出里的 `usage_report.rate_limits.limits`：
-/// `session` 是 5 小时的，`weekly_all` 是 7 天的（按 `kind` 认，不看显示的文字）。一个都没有时 None。
-fn parse_usage_report(out: &str) -> Option<(Window, Window)> {
-    let limits = out.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).find_map(|v| v["usage_report"]["rate_limits"]["limits"].as_array().cloned())?;
+/// `session` 是 5 小时的，`weekly_all` 是 7 天的（按 `kind` 认，不看显示的文字），还有额外用量（`extra_usage`，原样）。
+/// 一个窗口都没有时 None。
+fn parse_usage_report(out: &str) -> Option<(Window, Window, Value)> {
+    let rl = out.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).find_map(|v| v["usage_report"]["rate_limits"]["limits"].is_array().then(|| v["usage_report"]["rate_limits"].clone()))?;
+    let limits = rl["limits"].as_array()?;
     let win = |kind: &str| limits.iter().find(|l| l["kind"] == kind).map(|l| (l["percent"].clone(), l["resets_at"].clone())).unwrap_or_default();
     let (five, seven) = (win("session"), win("weekly_all"));
-    (five.0.is_number() || seven.0.is_number()).then_some((five, seven))
+    (five.0.is_number() || seven.0.is_number()).then(|| (five, seven, rl["extra_usage"].clone()))
 }
 
 /// 权限规则（各 settings 文件里的，按来源）和 MCP 服务器（`~/.claude.json` 的用户级、这个项目的，以及项目的 `.mcp.json`）
@@ -556,14 +575,15 @@ mod tests {
                 { "kind": "session", "group": "session", "percent": 29, "resets_at": "2999-10-25T03:09:59.616161+00:00" },
                 { "kind": "weekly_scoped", "group": "weekly", "percent": 5, "resets_at": "2999-10-27T06:59:59+00:00", "scope": { "model": { "display_name": "Fable" } } },
                 { "kind": "weekly_all", "group": "weekly", "percent": 76, "resets_at": "2020-10-27T06:59:59+00:00" }
-            ] } } }).to_string(),
+            ], "extra_usage": { "is_enabled": true, "monthly_limit": 5000, "used_credits": 1234.0, "utilization": 24.68, "currency": "usd" } } } }).to_string(),
         ]
         .join("\n");
-        let (five, seven) = parse_usage_report(&out).unwrap();
+        let (five, seven, extra) = parse_usage_report(&out).unwrap();
         assert!(parse_usage_report("not json\n{}").is_none());
-        REPORTED.lock().unwrap().get_or_insert_with(HashMap::new).insert(cfg.clone(), (100, five, seven));
+        REPORTED.lock().unwrap().get_or_insert_with(HashMap::new).insert(cfg.clone(), (100, five, seven, extra));
         let v = limits(&ctx);
         assert_eq!(v["five_hour"]["used"], 29);
+        assert_eq!(v["extra"], json!({ "enabled": true, "used": 12.34, "limit": 50.0, "percent": 24.68, "currency": "USD" }));
         assert!(v["seven_day"].is_null(), "已经过了重置时间");
         assert_eq!(v["fetched_at"], 100);
 
@@ -573,6 +593,10 @@ mod tests {
         write(&state, &json!({ "oauthAccount": { "accountUuid": "a" }, "cachedUsageUtilization": { "accountUuid": "a", "fetchedAtMs": 200, "utilization": { "five_hour": win(40), "seven_day": win(80) } } }));
         let v = limits(&ctx);
         assert_eq!((v["five_hour"]["used"].clone(), v["seven_day"]["used"].clone(), v["fetched_at"].clone()), (json!(40), json!(80), json!(200)));
+        assert!(v["extra"].is_null(), "缓存里没有额外用量");
+        // 没开的：照样报出来（界面显示“未开启”）
+        let off = json!({ "is_enabled": false, "monthly_limit": null, "used_credits": null, "utilization": null, "currency": null, "decimal_places": null });
+        assert_eq!(extra_usage(&off), json!({ "enabled": false, "used": null, "limit": null, "percent": null, "currency": "USD" }));
     }
 
     #[test]

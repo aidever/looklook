@@ -198,6 +198,109 @@ fn with_tmux_marker(table: &[(u32, u32)], server: u32, session: u32) -> Vec<u32>
         .collect()
 }
 
+/// Claude Code 正在跑的 shell 命令（前台的和后台的都有）：面板进程 → claude → `bash -c 'source …/shell-snapshots/… && eval '<命令>' …'`。
+/// 返回 (命令, 已经跑了几秒)。用来列出状态栏上算着、对话记录里却没有的后台命令（/clear、/new 之前启动的）。
+/// Windows 上没有，返回空。
+pub fn claude_shells(pane_pid: u32) -> Vec<(String, Option<u64>)> {
+    let procs = table_with_args();
+    let kids = |p: u32| procs.iter().filter(move |x| x.1 == p);
+    let mut out = vec![];
+    for claude in kids(pane_pid) {
+        for sh in kids(claude.0) {
+            if let Some(cmd) = snapshot_command(&sh.2) {
+                out.push((cmd, sh.3));
+            }
+        }
+    }
+    out
+}
+
+/// Claude Code 包了一层的命令行里 `eval '…'` 的内容（单引号里的 `'\''` 还原成 `'`）。不是这种命令行时为 None。
+fn snapshot_command(args: &str) -> Option<String> {
+    if !args.contains("shell-snapshots") {
+        return None;
+    }
+    let rest = &args[args.find("eval '")? + 5..];
+    let mut out = String::new();
+    let mut chars = rest.chars().peekable();
+    loop {
+        match chars.next()? {
+            '\'' => loop {
+                match chars.next()? {
+                    '\'' => break,
+                    c => out.push(c),
+                }
+            },
+            '\\' => out.push(chars.next()?),
+            c if c.is_whitespace() => break,
+            c => out.push(c),
+        }
+        if chars.peek().is_none_or(|c| c.is_whitespace()) {
+            break;
+        }
+    }
+    let out = out.trim().to_string();
+    (!out.is_empty()).then_some(out)
+}
+
+/// 进程表：(进程号, 父进程号, 命令行, 已经跑了几秒)
+fn table_with_args() -> Vec<(u32, u32, String, Option<u64>)> {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(dir) = std::fs::read_dir("/proc") else { return vec![] };
+        let uptime = std::fs::read_to_string("/proc/uptime").ok().and_then(|s| s.split_whitespace().next()?.parse::<f64>().ok());
+        let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64;
+        dir.flatten()
+            .filter_map(|e| {
+                let pid: u32 = e.file_name().to_str()?.parse().ok()?;
+                let stat = std::fs::read_to_string(e.path().join("stat")).ok()?;
+                let ppid = stat_fields(&stat)?.1;
+                let args = std::fs::read(e.path().join("cmdline")).ok()?;
+                let args = String::from_utf8_lossy(&args).replace('\0', " ");
+                // 进程名之后第 20 个字段：启动时间（开机后的时钟滴答数）
+                let start = stat[stat.rfind(')')? + 1..].split_whitespace().nth(19).and_then(|s| s.parse::<f64>().ok());
+                let age = match (uptime, start) {
+                    (Some(u), Some(s)) if hz > 0.0 => Some((u - s / hz).max(0.0) as u64),
+                    _ => None,
+                };
+                Some((pid, ppid, args, age))
+            })
+            .collect()
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        let Ok(out) = std::process::Command::new("ps").args(["-A", "-ww", "-o", "pid=,ppid=,etime=,command="]).output() else { return vec![] };
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| {
+                let mut it = l.split_whitespace();
+                let pid = it.next()?.parse().ok()?;
+                let ppid = it.next()?.parse().ok()?;
+                let age = parse_etime(it.next()?);
+                Some((pid, ppid, it.collect::<Vec<_>>().join(" "), age))
+            })
+            .collect()
+    }
+    #[cfg(not(unix))]
+    {
+        vec![]
+    }
+}
+
+/// `ps -o etime`：`[[dd-]hh:]mm:ss`
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+fn parse_etime(s: &str) -> Option<u64> {
+    let (days, rest) = match s.split_once('-') {
+        Some((d, r)) => (d.parse::<u64>().ok()?, r),
+        None => (0, s),
+    };
+    let mut secs = 0;
+    for part in rest.split(':') {
+        secs = secs * 60 + part.parse::<u64>().ok()?;
+    }
+    Some(days * 86400 + secs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,5 +342,31 @@ mod tests {
         reap(d).await;
         std::thread::sleep(Duration::from_millis(100));
         assert!(pids.iter().all(|&p| !alive(p)), "{pids:?}");
+    }
+
+    #[test]
+    fn reads_claude_snapshot_commands() {
+        let args = r#"/bin/bash -c source /root/.claude/shell-snapshots/snapshot-bash-1-x.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && eval 'until ! pgrep -f "git clone" >/dev/null; do sleep 3; done; echo '\''hi'\''' < /dev/null && pwd -P >| /tmp/claude-e569-cwd"#;
+        assert_eq!(snapshot_command(args).as_deref(), Some(r#"until ! pgrep -f "git clone" >/dev/null; do sleep 3; done; echo 'hi'"#));
+        assert_eq!(snapshot_command("/bin/bash -c eval 'ls'"), None);
+        assert_eq!(parse_etime("01:02"), Some(62));
+        assert_eq!(parse_etime("2-01:00:05"), Some(2 * 86400 + 3605));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn finds_shells_under_claude() {
+        // 模拟：面板进程（sh）→ claude（sh）→ 包了一层的命令
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "sh -c \"bash -c \\\"true shell-snapshots && eval 'sleep 30' < /dev/null && true\\\" ; true\" ; true"])
+            .spawn()
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let found = claude_shells(child.id());
+        let _ = child.kill();
+        let d = collect(&[child.id()], None);
+        signal(&d);
+        assert_eq!(found.iter().map(|f| f.0.as_str()).collect::<Vec<_>>(), ["sleep 30"], "{found:?}");
+        assert!(found[0].1.is_some_and(|a| a < 5));
     }
 }

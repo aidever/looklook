@@ -1,7 +1,7 @@
 // 设置 → 宠物（docs/PET_PACK.md §6.3）：给每种对话配一只宠物、大小、气泡；列出找得到的宠物包，导入、试播、删除。
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Github, Play, RefreshCw, Trash2, Upload } from 'lucide-react';
+import { FolderOpen, Github, Play, RefreshCw, Trash2, Upload } from 'lucide-react';
 import { api, postFile } from '../shared/api.js';
 import { errorText } from '../shared/i18n.js';
 import { PETS_CHANGED } from '../shared/ChatPet.jsx';
@@ -9,6 +9,7 @@ import PetPlayer from '../shared/pet/PetPlayer.jsx';
 import { loadBlob, videoFormat } from '../shared/pet/media.js';
 import { textOf } from '../shared/pet/brain.js';
 import { Button, Card, CopyButton, ErrorNote, Field, Modal, Seg, useConfirm, useLoad, useToast } from '../shared/ui.jsx';
+import { FolderPicker } from './Terminals.jsx';
 
 const AGENTS = [
   ['claude', 'Claude Code'],
@@ -70,6 +71,7 @@ export default function PetSection() {
         actions={
           <>
             <ImportButton onDone={onInstalled} />
+            <PickButton onDone={onInstalled} />
             <GithubButton onDone={onInstalled} />
             <Button variant="ghost" icon={RefreshCw} onClick={reload} title={t('pet.rescan')} aria-label={t('pet.rescan')} />
           </>
@@ -101,10 +103,6 @@ export default function PetSection() {
             <dd className="mono">
               {list.dirs.local} <CopyButton text={list.dirs.local} />
             </dd>
-            <dt>{t('pet.dir_codex')}</dt>
-            <dd className="mono">{list.dirs.codex}</dd>
-            <dt>{t('pet.dir_dsh')}</dt>
-            <dd className="mono">{list.dirs.dsh}</dd>
           </dl>
         )}
       </Card>
@@ -208,10 +206,40 @@ function ImportButton({ onDone }) {
   };
   return (
     <>
-      <input ref={input} type="file" accept=".llpet,.zip,application/zip" hidden onChange={(e) => pick(e.target.files?.[0])} />
+      {/* 不加 accept：手机上系统不认识 .llpet，加了过滤反而选不中；不是宠物包的由客户端报错 */}
+      <input ref={input} type="file" hidden onChange={(e) => pick(e.target.files?.[0])} />
       <Button variant="secondary" icon={Upload} busy={busy} onClick={() => input.current?.click()}>
         {t('pet.import')}
       </Button>
+    </>
+  );
+}
+
+/** 从电脑里选：浏览运行看看的这台电脑上的文件，选 .llpet / .zip，或者解开的宠物文件夹里的 pet.json（文件不经浏览器上传，远程打开时也能装） */
+function PickButton({ onDone }) {
+  const { t, i18n } = useTranslation();
+  const toast = useToast();
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const pick = async (path) => {
+    setOpen(false);
+    setBusy(true);
+    try {
+      const p = await api.post('/pets/import-path', { path });
+      toast?.(t('pet.imported', { name: textOf(p.name, i18n.language) || p.id }));
+      onDone(p);
+    } catch (e) {
+      toast?.(errorText(t, e), 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <Button variant="secondary" icon={FolderOpen} busy={busy} onClick={() => setOpen(true)} title={t('pet.pick_hint')}>
+        {t('pet.pick')}
+      </Button>
+      <FolderPicker open={open} files onClose={() => setOpen(false)} onPick={pick} title={t('pet.pick_title')} pickLabel={t('pet.pick_ok')} />
     </>
   );
 }

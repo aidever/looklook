@@ -164,6 +164,7 @@
     "OFFLINE_TOO_LONG": "haven't reached the Looklook server for a long time",
     "pet_manifest": "Can't read pet.json: {{detail}}",
     "pet_field": "pet.json: {{detail}} is missing or invalid",
+    "pet_format": "Not a Looklook pet pack: pet.json needs \"format\": \"looklook-pet\"",
     "pet_version": "Unsupported format version {{detail}}; update Looklook",
     "pet_missing_file": "Missing file {{detail}}",
     "pet_too_big": "File too large {{detail}} (≤ 8 MB each, ≤ 200 MB per pack)",
@@ -178,7 +179,7 @@
     "pet_download": "Couldn't download the repo: {{detail}} (if GitHub is unreachable, download the zip and import it)",
     "pet_repo_not_found": "Repository {{detail}} not found (private repos aren't supported)",
     "pet_repo_too_big": "Repository too large (over 600 MB); paste the pet folder's link or download and import",
-    "pet_no_pets": "No pet packs in this repo (folders with pet.json, or dsh-pet style pets)",
+    "pet_no_pets": "No pet packs in this repo (folders with pet.json)",
     "pet_too_many_pets": "Too many pets in this repo ({{detail}}); paste one folder's link",
     "pet_dup_id": "Two picked pets share the id {{detail}}; pick only one",
     "pet_expired": "This took too long; please search again"

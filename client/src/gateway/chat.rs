@@ -445,7 +445,11 @@ pub async fn tasks(State(app): State<App>, Path(id): Path<String>) -> R<Json<Val
 
 #[derive(Deserialize)]
 pub struct TaskQuery {
+    #[serde(default)]
     tool: String,
+    /// 停止对话记录里没有的后台命令时：任务列表给的命令
+    #[serde(default)]
+    command: Option<String>,
 }
 
 pub async fn task_output(State(app): State<App>, Path(id): Path<String>, Query(q): Query<TaskQuery>) -> R<Json<Value>> {
@@ -453,6 +457,6 @@ pub async fn task_output(State(app): State<App>, Path(id): Path<String>, Query(q
 }
 
 pub async fn task_stop(State(app): State<App>, Path(id): Path<String>, Json(q): Json<TaskQuery>) -> R<StatusCode> {
-    app.chat.stop_task(&id, &q.tool).await?;
+    app.chat.stop_task(&id, &q.tool, q.command.as_deref()).await?;
     Ok(StatusCode::NO_CONTENT)
 }

@@ -3431,8 +3431,10 @@ function ShellTask({ id, shell }) {
   const confirm = useConfirm();
   const [stopping, setStopping] = useState(false);
   const running = shell.state === 'running';
+  // 对话记录里没有的（/clear、/new 之前启动的）：没有输出文件，按命令停
+  const unlisted = !shell.tool_use_id;
   useEffect(() => {
-    if (!open) return undefined;
+    if (!open || unlisted) return undefined;
     let alive = true;
     let timer = null;
     const load = async () => {
@@ -3456,14 +3458,14 @@ function ShellTask({ id, shell }) {
     if (!ok) return;
     setStopping(true);
     try {
-      await api.post(`/instances/${id}/chat/task/stop`, { tool: shell.tool_use_id });
+      await api.post(`/instances/${id}/chat/task/stop`, unlisted ? { command: shell.command } : { tool: shell.tool_use_id });
     } catch (e) {
       toast(errorText(t, e), 'error');
     } finally {
       setStopping(false);
     }
   };
-  const started = shell.started ? Date.parse(shell.started) : null;
+  const started = shell.started ? Date.parse(shell.started) : shell.age != null ? shell.seen - shell.age * 1000 : null;
   return (
     <li className="chat-task" data-state={shell.state}>
       <div className="chat-task-head">
@@ -3486,7 +3488,7 @@ function ShellTask({ id, shell }) {
           <Copyable text={shell.command}>
             <Pre text={`$ ${shell.command}`} className="cmd" />
           </Copyable>
-          {out == null ? <LoaderCircle size={14} className="spin" /> : out.missing ? <p className="chat-note">{t('chat.task_no_output')}</p> : <Pre text={out.text || t('chat.task_empty_output')} />}
+          {unlisted ? null : out == null ? <LoaderCircle size={14} className="spin" /> : out.missing ? <p className="chat-note">{t('chat.task_no_output')}</p> : <Pre text={out.text || t('chat.task_empty_output')} />}
           {out?.truncated && <p className="chat-note">{t('chat.task_output_tail')}</p>}
           {shell.summary && <p className="chat-note">{shell.summary}</p>}
         </div>
@@ -3758,6 +3760,9 @@ function TasksTab({ id, sel, onSel }) {
   useTick();
   const agents = data?.agents ?? [];
   const shells = [...(data?.shells ?? [])].reverse();
+  // 记录里没有、从进程里找到的：跑了多久按这次取到的时刻算
+  const seen = useMemo(() => Date.now(), [data]);
+  const unlisted = (data?.unlisted ?? []).map((u) => ({ ...u, state: 'running', seen }));
   // 对话里的卡片打开的、任务列表里还没有的（刚派出去）：先按卡片上的显示
   if (sel) return <AgentDetail id={id} agent={agents.find((a) => sameAgent(a, sel)) ?? sel} onBack={() => onSel(null)} />;
   const runningAgents = agents.filter((a) => a.state === 'running').length;
@@ -3786,7 +3791,16 @@ function TasksTab({ id, sel, onSel }) {
             <span className="chat-note">{runningShells ? t('chat.n_running', { count: runningShells }) : shells.length || ''}</span>
           </h4>
           {/* 状态栏上说在跑、对话记录里找不到的（子代理启动的、/clear 之前启动的） */}
-          {data?.unlisted_shells > 0 && <p className="chat-note chat-unlisted">{t('chat.shells_unlisted', { count: data.unlisted_shells })}</p>}
+          {data?.unlisted_shells > 0 && (
+            <p className="chat-note chat-unlisted">{t(unlisted.length ? 'chat.shells_unlisted_found' : 'chat.shells_unlisted', { count: data.unlisted_shells })}</p>
+          )}
+          {unlisted.length > 0 && (
+            <ul className="chat-tasks">
+              {unlisted.map((s) => (
+                <ShellTask key={`u:${s.command}`} id={id} shell={s} />
+              ))}
+            </ul>
+          )}
           {shells.length === 0 ? (
             !data?.unlisted_shells && <p className="chat-note">{t('chat.shells_empty')}</p>
           ) : (
@@ -3855,6 +3869,51 @@ function MaskedEmail({ email, show, setShow }) {
   );
 }
 
+/** 金额：按币种显示（$12.34）；币种认不出来时退回“12.34 XXX” */
+function money(n, currency) {
+  try {
+    return new Intl.NumberFormat(undefined, { style: 'currency', currency: currency || 'USD' }).format(n);
+  } catch {
+    return `${n.toFixed(2)} ${currency}`;
+  }
+}
+
+/** 额度用完后接着用的“加油包”：Claude 的额外用量（Extra usage / usage credits，按量付费、按月封顶），
+ *  Codex 的 credits 余额和重置机会。账号没有这些（API、第三方接口）时什么都不显示 */
+function ExtraUsage({ lim }) {
+  const { t } = useT();
+  const ex = lim?.extra;
+  const cr = lim?.credits;
+  const resets = lim?.reset_credits;
+  if (ex?.enabled && ex.limit > 0) {
+    const pct = typeof ex.percent === 'number' ? ex.percent : ((ex.used ?? 0) / ex.limit) * 100;
+    return <Meter label={t('chat.usage_extra')} value={pct} sub={t('chat.usage_extra_sub', { used: money(ex.used ?? 0, ex.currency), limit: money(ex.limit, ex.currency) })} />;
+  }
+  if (!ex && !cr && !(resets > 0)) return null;
+  return (
+    <dl className="chat-kv">
+      {ex && (
+        <>
+          <dt>{t('chat.usage_extra')}</dt>
+          <dd>{ex.enabled ? t('chat.usage_extra_nolimit', { used: money(ex.used ?? 0, ex.currency) }) : t('chat.usage_extra_off')}</dd>
+        </>
+      )}
+      {cr && (
+        <>
+          <dt>{t('chat.usage_credits')}</dt>
+          <dd>{cr.unlimited ? t('chat.usage_credits_unlimited') : cr.has || cr.balance > 0 ? (cr.balance ?? 0).toLocaleString(undefined, { maximumFractionDigits: 2 }) : t('chat.usage_credits_none')}</dd>
+        </>
+      )}
+      {resets > 0 && (
+        <>
+          <dt>{t('chat.usage_reset_credits')}</dt>
+          <dd>{t('chat.usage_reset_credits_n', { n: resets })}</dd>
+        </>
+      )}
+    </dl>
+  );
+}
+
 function UsageTab({ id, status, onCompact }) {
   const { t } = useT();
   const { id: agentId, name: agentName } = useContext(AgentCtx);
@@ -3912,6 +3971,7 @@ function UsageTab({ id, status, onCompact }) {
       )}
       {lim?.five_hour && <Meter label={t('chat.usage_5h')} value={lim.five_hour.used} sub={resetText(t, lim.five_hour.resets_at)} />}
       {lim?.seven_day && <Meter label={t('chat.usage_7d')} value={lim.seven_day.used} sub={resetText(t, lim.seven_day.resets_at)} />}
+      <ExtraUsage lim={lim} />
       {lim?.reached && <p className="chat-note chat-warn">{t('chat.usage_reached')}</p>}
       {lim && (lim.five_hour || lim.seven_day) && <p className="chat-note">{lim.provider ? t('chat.usage_limits_note_provider', { provider: lim.provider }) : t(lim.account ? 'chat.usage_limits_note_codex' : lim.live ? 'chat.usage_limits_note_live' : 'chat.usage_limits_note')}</p>}
       {!lim?.live && lim?.fetched_at > 0 && <p className="chat-note">{t(lim.five_hour || lim.seven_day ? 'chat.usage_fetched' : 'chat.usage_stale', { ago: spanText(t, Date.now() - lim.fetched_at) })}</p>}

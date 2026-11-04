@@ -151,10 +151,18 @@ fn resets_iso(secs: Option<i64>) -> Value {
         .unwrap_or(Value::Null)
 }
 
-/// app-server 的限额窗口 → 界面用的 `{ used, resets_at }`；按窗口长度认 5 小时 / 7 天
+/// app-server 的限额窗口 → 界面用的 `{ used, resets_at }`；按窗口长度认 5 小时 / 7 天。
+/// 另带 credits（额度用完后接着用的余额，ChatGPT 里买的：`{ has, unlimited, balance }`，`balance` 是 credits 数，不是钱）
+/// 和 `reset_credits`（能把限额立刻清零的重置机会还有几次）
 fn limits_view(r: &Value) -> Value {
     let snap = &r["rateLimits"];
-    let mut out = json!({ "five_hour": null, "seven_day": null, "plan": snap["planType"], "credits": snap["credits"], "reached": snap["rateLimitReachedType"] });
+    let c = &snap["credits"];
+    let credits = c["hasCredits"].as_bool().map(|has| {
+        let balance = c["balance"].as_str().and_then(|b| b.trim().parse::<f64>().ok()).or_else(|| c["balance"].as_f64());
+        json!({ "has": has, "unlimited": c["unlimited"].as_bool().unwrap_or(false), "balance": balance })
+    });
+    let reset_credits = r["rateLimitResetCredits"]["availableCount"].as_i64();
+    let mut out = json!({ "five_hour": null, "seven_day": null, "plan": snap["planType"], "credits": credits, "reset_credits": reset_credits, "reached": snap["rateLimitReachedType"] });
     for w in [&snap["primary"], &snap["secondary"]] {
         if w.is_null() {
             continue;
@@ -2148,6 +2156,11 @@ mod tests {
         assert_eq!(v["seven_day"]["used"], 12);
         assert!(v["five_hour"]["resets_at"].as_str().unwrap().starts_with("2026-"));
         assert_eq!(v["plan"], "plus");
+        assert!(v["credits"].is_null() && v["reset_credits"].is_null());
+        let r = json!({ "rateLimits": { "credits": { "hasCredits": true, "unlimited": false, "balance": "125.5" } }, "rateLimitResetCredits": { "availableCount": 2, "credits": null } });
+        let v = limits_view(&r);
+        assert_eq!(v["credits"], json!({ "has": true, "unlimited": false, "balance": 125.5 }));
+        assert_eq!(v["reset_credits"], 2);
     }
 
     #[test]

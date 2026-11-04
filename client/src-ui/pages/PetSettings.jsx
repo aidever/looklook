@@ -1,7 +1,7 @@
 // 设置 → 宠物（docs/PET_PACK.md §6.3）：给每种对话配一只宠物、大小、气泡；列出找得到的宠物包，导入、试播、删除。
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Play, RefreshCw, Trash2, Upload } from 'lucide-react';
+import { Github, Play, RefreshCw, Trash2, Upload } from 'lucide-react';
 import { api, postFile } from '../shared/api.js';
 import { errorText } from '../shared/i18n.js';
 import { PETS_CHANGED } from '../shared/ChatPet.jsx';
@@ -19,6 +19,7 @@ const AGENTS = [
 const GUIDE_URL = 'https://github.com/imythu/looklook/blob/main/client/docs/PET_PACK_GUIDE.md';
 const enc = encodeURIComponent;
 const fileUrlOf = (p) => (key) => `/pets/${enc(p.source)}/${enc(p.id)}/file/${key}`;
+const ghLink = (o) => `https://github.com/${o.github}${o.path || o.ref ? `/tree/${o.ref || 'HEAD'}/${o.path || ''}` : ''}`;
 const changed = () => window.dispatchEvent(new Event(PETS_CHANGED));
 
 /** 宠物包有问题时的说明 */
@@ -54,6 +55,12 @@ export default function PetSection() {
     setFresh((n) => n + 1);
     reloadSettings();
   };
+  const onInstalled = (p) => {
+    reload();
+    changed();
+    // 第一只宠物：直接设成默认
+    if (p && s && !s.default && !Object.values(s.byAgent ?? {}).some(Boolean)) save({ ...s, default: p.key });
+  };
 
   return (
     <>
@@ -62,14 +69,8 @@ export default function PetSection() {
         title={t('pet.packs')}
         actions={
           <>
-            <ImportButton
-              onDone={(p) => {
-                reload();
-                changed();
-                // 第一只宠物：直接设成默认
-                if (s && !s.default && !Object.values(s.byAgent ?? {}).some(Boolean)) save({ ...s, default: p.key });
-              }}
-            />
+            <ImportButton onDone={onInstalled} />
+            <GithubButton onDone={onInstalled} />
             <Button variant="ghost" icon={RefreshCw} onClick={reload} title={t('pet.rescan')} aria-label={t('pet.rescan')} />
           </>
         }
@@ -215,6 +216,143 @@ function ImportButton({ onDone }) {
   );
 }
 
+/** 从 GitHub 仓库装：填仓库 → 找出里面的宠物 → 挑几只装（只有一只也给看一眼名字和许可再装） */
+function GithubButton({ onDone }) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <Button variant="secondary" icon={Github} onClick={() => setOpen(true)}>
+        {t('pet.gh_button')}
+      </Button>
+      {open && <GithubDialog onClose={() => setOpen(false)} onDone={onDone} />}
+    </>
+  );
+}
+
+function GithubDialog({ onClose, onDone }) {
+  const { t, i18n } = useTranslation();
+  const toast = useToast();
+  const [url, setUrl] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const [scan, setScan] = useState(null);
+  const [picked, setPicked] = useState(() => new Set());
+  const ok = (scan?.items ?? []).filter((x) => !x.error);
+
+  const find = async (e) => {
+    e?.preventDefault();
+    if (!url.trim() || busy) return;
+    setBusy(true);
+    setErr(null);
+    setScan(null);
+    try {
+      const r = await api.post('/pets/from-github', { url: url.trim() });
+      setScan(r);
+      setPicked(new Set(r.items.filter((x) => !x.error).map((x) => x.index)));
+    } catch (e2) {
+      setErr(e2);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const install = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      const r = await api.post('/pets/from-github/install', { token: scan.token, indexes: [...picked] });
+      const names = r.items.map((p) => textOf(p.name, i18n.language) || p.id).join('、');
+      toast?.(t('pet.imported', { name: names }));
+      onDone(r.items[0]);
+      onClose();
+    } catch (e2) {
+      setErr(e2);
+      // 令牌用过或过期了：回到第一步重新找
+      setScan(null);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const toggle = (i) =>
+    setPicked((old) => {
+      const next = new Set(old);
+      if (next.has(i)) next.delete(i);
+      else next.add(i);
+      return next;
+    });
+
+  return (
+    <Modal open onClose={onClose} title={t('pet.gh_title')} wide>
+      <form onSubmit={find}>
+        <Field label={t('pet.gh_repo')} hint={t('pet.gh_repo_hint')}>
+          <div className="pet-gh-row">
+            <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="owner/repo" spellCheck={false} autoCapitalize="off" autoCorrect="off" />
+            <Button type="submit" variant={scan ? 'secondary' : 'primary'} busy={busy && !scan} disabled={!url.trim()}>
+              {t('pet.gh_find')}
+            </Button>
+          </div>
+        </Field>
+      </form>
+      {busy && !scan && <p className="muted small">{t('pet.gh_downloading')}</p>}
+      <ErrorNote error={err} />
+      {scan && (
+        <>
+          <p className="small muted">{t(ok.length > 1 ? 'pet.gh_found_many' : 'pet.gh_found', { n: scan.items.length, repo: scan.repo.owner + '/' + scan.repo.name })}</p>
+          <div className="pet-cards">
+            {scan.items.map((x) => (
+              <label key={x.index} className="pet-card pet-gh-item" data-error={x.error ? '' : undefined}>
+                <GhThumb token={scan.token} x={x} />
+                <div className="pet-card-body">
+                  <div className="pet-card-title">
+                    <b>{textOf(x.name, i18n.language) || x.id}</b>
+                    {x.renderer === 'sprite' && <span className="badge">{t('pet.sprite')}</span>}
+                    {x.license?.commercial === false && <span className="badge badge-warn">{t('pet.noncommercial')}</span>}
+                  </div>
+                  {x.error ? (
+                    <p className="field-error">{petError(t, x.error)}</p>
+                  ) : (
+                    <p className="small muted">
+                      {x.author?.name && <>{t('pet.by', { name: x.author.name })} · </>}
+                      {x.license?.spdx ?? t('pet.license_unknown')}
+                    </p>
+                  )}
+                  <p className="small muted mono ellipsis">{x.path || '/'}</p>
+                </div>
+                <div className="pet-card-actions">
+                  <input type="checkbox" disabled={Boolean(x.error)} checked={picked.has(x.index)} onChange={() => toggle(x.index)} aria-label={textOf(x.name, i18n.language) || x.id} />
+                </div>
+              </label>
+            ))}
+          </div>
+          <p className="small muted">{t('pet.gh_license_note')}</p>
+        </>
+      )}
+      <div className="modal-actions">
+        <Button variant="ghost" onClick={onClose}>
+          {t('action.cancel')}
+        </Button>
+        {scan && (
+          <Button variant="primary" busy={busy} disabled={!picked.size} onClick={install}>
+            {t('pet.gh_install', { n: picked.size })}
+          </Button>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
+function GhThumb({ token, x }) {
+  const [url, setUrl] = useState(null);
+  useEffect(() => {
+    let dead = false;
+    if (!x.error) loadBlob(`/pets/from-github/preview/${token}/${x.index}`).then((u) => !dead && setUrl(u), () => {});
+    return () => {
+      dead = true;
+    };
+  }, [token, x.index]);
+  return <div className="pet-thumb">{url ? <img src={url} alt="" /> : <span aria-hidden="true">🐾</span>}</div>;
+}
+
 function Thumb({ p }) {
   const [url, setUrl] = useState(null);
   useEffect(() => {
@@ -250,7 +388,13 @@ function PetCard({ p, onRemoved }) {
       <div className="pet-card-body">
         <div className="pet-card-title">
           <b>{name}</b>
-          <span className="badge">{t(`pet.src_${p.source}`)}</span>
+          {p.origin?.github ? (
+            <a className="badge" href={ghLink(p.origin)} target="_blank" rel="noopener noreferrer" title={p.origin.github}>
+              {t('pet.from_github')}
+            </a>
+          ) : (
+            <span className="badge">{t(`pet.src_${p.source}`)}</span>
+          )}
           {p.renderer === 'sprite' && <span className="badge">{t('pet.sprite')}</span>}
           {lic?.commercial === false && <span className="badge badge-warn">{t('pet.noncommercial')}</span>}
         </div>

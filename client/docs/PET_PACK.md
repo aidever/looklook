@@ -276,7 +276,15 @@ JSON（允许 `//` 注释和尾逗号，按 JSONC 解析）。下面每个字段
   路径只认清单里登记过的文件名，其余 404。
 - `POST /api/pets/import`（multipart，`.llpet` / `.zip`）→ 解压到临时目录 → 校验（§2 限制、§3 字段、片段都在、视频能读出尺寸）→ 原子改名进 `pets/<id>/`；同 id 覆盖。
 - `DELETE /api/pets/local/{id}`
-- 命令行：`looklook pet check <目录>`（制作时自查，见教程）、`looklook pet install <文件>`。
+- 从 GitHub 装（`src/pet_github.rs`）：
+  - `POST /api/pets/from-github {url}`：认 `owner/repo`、`owner/repo@ref`、仓库链接、`/tree/<ref>/<文件夹>` 链接 → 下载 `github.com/<owner>/<repo>/archive/<ref|HEAD>.zip`（≤ 600 MB）→
+    找出所有带 `pet.json` 的文件夹（套在别的宠物文件夹里的、`.` 开头的不算；最多 60 只）→ 每只只解它自己的文件夹到 `pets/.gh-<令牌>/p/<序号>/`，按导入一样校验 →
+    返回 `{token, repo, items: [摘要 + path + index]}`，坏的也列出来写原因。仓库里别的文件不解。
+  - `GET /api/pets/from-github/preview/{token}/{index}`：挑的时候看封面。
+  - `POST /api/pets/from-github/install {token, indexes}`：装挑中的，同 id 覆盖；挑的里面 id 重复 → `dup_id`。装完删临时目录；没装的 1 小时后下次查找时清掉。
+  - 装好的包里写 `.origin.json`（`{github, ref, path}`），列表摘要带 `origin`，卡片上显示“来自 GitHub”并链回仓库。
+- 命令行：`looklook pet check <目录>`（制作时自查，见教程）、`looklook pet install <文件 | GitHub 仓库> [--pick id,… | --all]`
+  （仓库里只有一只直接装；好几只又没写 `--pick` / `--all` 时列出来、退出码 2）。
 
 远程（中转 / WebRTC）打开时文件也从这台电脑拿；片段按需加载，一个状态只先拿池子里抽中的那段。
 

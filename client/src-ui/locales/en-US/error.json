@@ -173,7 +173,15 @@
     "pet_bad_ref": "Uses a clip that isn't listed: {{detail}}",
     "pet_bad_image": "Sprite sheet unreadable or wrong size: {{detail}}",
     "pet_bad_zip": "Not a valid zip: {{detail}}",
-    "pet_io": "File error: {{detail}}"
+    "pet_io": "File error: {{detail}}",
+    "pet_bad_repo": "Not a GitHub repo: {{detail}} (use owner/repo or a repo link)",
+    "pet_download": "Couldn't download the repo: {{detail}} (if GitHub is unreachable, download the zip and import it)",
+    "pet_repo_not_found": "Repository {{detail}} not found (private repos aren't supported)",
+    "pet_repo_too_big": "Repository too large (over 600 MB); paste the pet folder's link or download and import",
+    "pet_no_pets": "No pet packs (folders with pet.json) in this repo",
+    "pet_too_many_pets": "Too many pets in this repo ({{detail}}); paste one folder's link",
+    "pet_dup_id": "Two picked pets share the id {{detail}}; pick only one",
+    "pet_expired": "This took too long; please search again"
   },
   "AUTHORIZATION_PENDING": "Waiting for approval",
   "AUTHORIZATION_EXPIRED": "Authorization expired. Please try again",

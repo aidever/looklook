@@ -173,7 +173,15 @@
     "pet_bad_ref": "用到了没登记的片段：{{detail}}",
     "pet_bad_image": "精灵图读不出来或尺寸不对：{{detail}}",
     "pet_bad_zip": "不是有效的 zip：{{detail}}",
-    "pet_io": "读写文件失败：{{detail}}"
+    "pet_io": "读写文件失败：{{detail}}",
+    "pet_bad_repo": "不是 GitHub 仓库：{{detail}}（写 owner/repo 或仓库链接）",
+    "pet_download": "下载仓库失败：{{detail}}（连不上 GitHub 的话可以先下载 zip 再导入）",
+    "pet_repo_not_found": "找不到仓库 {{detail}}（私有仓库不能装）",
+    "pet_repo_too_big": "仓库太大（超过 600 MB），请贴宠物所在文件夹的链接，或者下载后导入",
+    "pet_no_pets": "仓库里没找到宠物包（带 pet.json 的文件夹）",
+    "pet_too_many_pets": "仓库里宠物太多（{{detail}} 只），请贴其中一个文件夹的链接",
+    "pet_dup_id": "挑的宠物里有两只 id 都是 {{detail}}，只能装一只",
+    "pet_expired": "等太久了，请重新查找"
   },
   "AUTHORIZATION_PENDING": "还在等待批准",
   "AUTHORIZATION_EXPIRED": "授权已过期，请重新登录",

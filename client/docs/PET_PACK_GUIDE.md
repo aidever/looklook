@@ -267,7 +267,26 @@ ffmpeg -i row0.png -i row1.png -i row2.png -i row3.png -i row4.png -i row5.png -
 cd my-pet && zip -r ../orange-girl.llpet . && cd ..
 ```
 
-发给别人时附上授权说明。看看不收录、不分发第三方宠物包；你可以放在自己的 GitHub、网盘或社区里，别人下载后在AI 助手 → 宠物里导入。
+发给别人时附上授权说明。看看不收录、不分发第三方宠物包；你可以放在自己的 GitHub、网盘或社区里，别人下载后在 AI 助手 → 宠物里导入。
+
+**放在 GitHub 上**，别人可以直接在 AI 助手 → 宠物 → 从 GitHub 安装里填仓库（不用打包）：
+
+```text
+# 一个仓库一只：pet.json 在根目录
+my-pet/
+  pet.json  preview.webp  anim/…  LICENSE  README.md
+
+# 一个仓库好几只：每只一个文件夹（放多深都行），安装时勾选要哪几只
+my-pets/
+  pets/orange-girl/pet.json …
+  pets/blue-cat/pet.json …
+  README.md
+```
+
+- 填 `owner/repo` 或仓库链接；只想装其中一只，贴那个文件夹的链接（`…/tree/main/pets/blue-cat`）；指定分支或标签写 `owner/repo@v1`。
+- 命令行：`looklook pet install owner/repo`，好几只时加 `--pick orange-girl,blue-cat` 或 `--all`。
+- 只能装公开仓库；整个仓库的 zip 不超过 600 MB，每只宠物的限制和导入一样。
+- 在 README 和 `pet.json` 的 `license` 里写清楚授权。
 
 ## 10. 已有的宠物直接用
 

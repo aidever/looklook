@@ -3253,6 +3253,17 @@
     "act_sleep": "睡觉",
     "label": "{{name}}（点一下、拖动它；右键睡觉）",
     "hide": "藏起宠物",
-    "show": "叫出宠物"
+    "show": "叫出宠物",
+    "gh_button": "从 GitHub 安装",
+    "gh_title": "从 GitHub 安装宠物",
+    "gh_repo": "仓库",
+    "gh_repo_hint": "填 owner/repo 或仓库链接；只装某个文件夹就贴它的链接（…/tree/main/pets/cat），指定分支写 owner/repo@分支。",
+    "gh_find": "查找",
+    "gh_downloading": "正在下载仓库…",
+    "gh_found": "在 {{repo}} 里找到 {{n}} 只。",
+    "gh_found_many": "在 {{repo}} 里找到 {{n}} 只，勾选要装的。",
+    "gh_install": "安装 {{n}} 只",
+    "gh_license_note": "宠物形象归作者所有，装之前看一眼许可；同 id 的会覆盖已装的。",
+    "from_github": "来自 GitHub"
   }
 }

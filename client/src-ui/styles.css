@@ -522,19 +522,22 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: 0; paddin
 .card-head-sub { margin-bottom: 4px; }
 .card-sub { margin: 0 0 14px; color: var(--muted); font-size: 13.5px; }
 /* 设置项：左边名字 + 一行说明，右边控件；行与行之间一条细线 */
-.srow2 { display: flex; align-items: center; gap: 16px; padding: 12px 0; border-top: 1px solid var(--line); }
+/* 换行而不是硬挤：文字至少留 14em，放不下时控件掉到下一行（任何宽度都适用，不只手机） */
+.srow2 { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 12px 0; border-top: 1px solid var(--line); }
 .card-sub + .srow2, .card-head + .srow2, .srow2:first-child { border-top: 0; padding-top: 4px; }
-.srow2-text { flex: 1; min-width: 0; }
+.srow2-text { flex: 1 1 14em; min-width: 0; }
 .srow2-label { font-weight: 600; font-size: 14px; }
 .srow2-hint { margin-top: 2px; color: var(--muted); font-size: 13px; }
-.srow2-ctl { flex: none; display: flex; align-items: center; gap: 8px; }
+.srow2-ctl { flex: none; max-width: 100%; display: flex; align-items: center; gap: 8px; }
 .srow2-input { width: min(260px, 100%); }
-.srow2-stack { flex-direction: column; align-items: stretch; gap: 8px; }
+.srow2-stack { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 8px; }
+.srow2-stack .srow2-text { flex: none; }
 .srow2-stack .srow2-ctl { flex: auto; flex-wrap: wrap; }
 @media (max-width: 560px) {
   .srow2:not(.srow2-stack) .srow2-ctl:has(.seg, input, select, .btn) { width: 100%; }
   /* 控件占满一行时，说明文字放上面，别被挤成一列一个词 */
-  .srow2:has(.seg, input, select, .btn) { flex-direction: column; align-items: stretch; gap: 8px; }
+  .srow2:has(.seg, input, select, .btn) { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 8px; }
+  .srow2:has(.seg, input, select, .btn) .srow2-text { flex: none; }
   .srow2-ctl > .btn { max-width: 100%; }
 }
 /* 收起来的次要内容 */
@@ -3374,6 +3377,11 @@ button.chat-read-no:hover { color: var(--brand); opacity: 1; }
 .pet-card-actions { display: flex; gap: 4px; }
 .pet-thumb { display: grid; place-items: center; width: 72px; height: 72px; border-radius: 10px; background: color-mix(in srgb, var(--text) 5%, transparent); overflow: hidden; font-size: 26px; }
 .pet-thumb img { width: 100%; height: 100%; object-fit: contain; }
+.pet-gh-row { display: flex; gap: 8px; }
+.pet-gh-row input { flex: 1; min-width: 0; }
+.pet-gh-item { cursor: pointer; }
+.pet-gh-item[data-error] { cursor: default; opacity: .75; }
+.pet-gh-item .pet-card-actions input { width: 18px; height: 18px; }
 .pet-dirs dd { display: flex; align-items: center; gap: 6px; overflow-wrap: anywhere; }
 .pet-trial-stage { position: relative; height: 240px; margin-bottom: 12px; border: 1px dashed var(--line); border-radius: 12px; background: repeating-conic-gradient(color-mix(in srgb, var(--text) 4%, transparent) 0 25%, transparent 0 50%) 0 0 / 20px 20px; }
 .pet-trial-stage .pet-layer { z-index: 0; }

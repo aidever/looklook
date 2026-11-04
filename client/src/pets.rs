@@ -27,6 +27,8 @@ const MAX_MANIFEST: u64 = 1 << 20;
 const STATES: &[&str] = &["idle", "thinking", "tool", "toolDone", "waiting", "terminal", "done", "error", "offline"];
 const AGENTS: &[&str] = &["claude", "codex", "dsh", "opencode"];
 const SETTINGS_KEY: &str = "pet";
+/// 装进 `pets/<id>/` 时记下从哪来的（现在只有 GitHub：`{"github": "owner/repo", "ref", "path"}`）
+pub(crate) const ORIGIN: &str = ".origin.json";
 
 // ---------------- 清单 ----------------
 
@@ -300,7 +302,7 @@ pub struct PackError {
     pub detail: String,
 }
 
-fn perr(code: &'static str, detail: impl Into<String>) -> PackError {
+pub(crate) fn perr(code: &'static str, detail: impl Into<String>) -> PackError {
     PackError { code, detail: detail.into() }
 }
 
@@ -345,6 +347,7 @@ impl Pack {
             "mov": m.renderer == "sprite" || (!m.clips.is_empty() && m.clips.keys().all(|c| self.files.contains_key(&format!("anim/{c}.mov")))),
             "preview": self.manifest_out().preview,
             "error": self.error,
+            "origin": (self.source == "local").then(|| std::fs::read(self.dir.join(ORIGIN)).ok()).flatten().and_then(|b| serde_json::from_slice::<Value>(&b).ok()),
         })
     }
 
@@ -1040,7 +1043,7 @@ pub fn all(home: &Path, fresh: bool) -> Vec<Pack> {
     packs
 }
 
-fn forget() {
+pub(crate) fn forget() {
     *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
@@ -1171,13 +1174,23 @@ fn unzip(zip_path: &Path, dest: &Path) -> Result<(), PackError> {
     if z.len() > MAX_FILES * 2 {
         return Err(perr("too_many", z.len().to_string()));
     }
+    extract(&mut z, "", dest)
+}
+
+/// 只解出 `prefix`（空 = 全部，否则以 `/` 结尾）下面的条目，去掉前缀放进 `dest`；限制同 [`unzip`]
+pub(crate) fn extract<R: Read + std::io::Seek>(z: &mut zip::ZipArchive<R>, prefix: &str, dest: &Path) -> Result<(), PackError> {
     let mut total = 0u64;
     let mut files = 0usize;
     for i in 0..z.len() {
         let mut e = z.by_index(i).map_err(|e| perr("bad_zip", e.to_string()))?;
-        let name = e.name().to_string();
+        let full = e.name().to_string();
+        let Some(name) = full.strip_prefix(prefix) else { continue };
+        let name = name.to_string();
         // macOS 压缩时带的 __MACOSX/、.DS_Store
-        if name.starts_with("__MACOSX/") || name.ends_with(".DS_Store") {
+        if name.starts_with("__MACOSX/") || name.ends_with(".DS_Store") || full.contains("/__MACOSX/") {
+            continue;
+        }
+        if name.is_empty() {
             continue;
         }
         let rel = entry_path(&name).ok_or_else(|| perr("bad_name", &name))?;
@@ -1218,7 +1231,7 @@ fn unzip(zip_path: &Path, dest: &Path) -> Result<(), PackError> {
 }
 
 /// 解出来的包的根：`pet.json` 在最外层，或者在唯一的一层子目录里
-fn pack_root(dir: &Path) -> Option<PathBuf> {
+pub(crate) fn pack_root(dir: &Path) -> Option<PathBuf> {
     if dir.join("pet.json").is_file() {
         return Some(dir.to_path_buf());
     }
@@ -1236,14 +1249,25 @@ pub fn import(home: &Path, zip_path: &Path) -> Result<Pack, PackError> {
     let tmp = tempfile::Builder::new().prefix(".import-").tempdir_in(&base).map_err(|e| perr("io", e.to_string()))?;
     unzip(zip_path, tmp.path())?;
     let root = pack_root(tmp.path()).ok_or_else(|| perr("missing_file", "pet.json"))?;
-    let pack = load_dir("local", &root)?;
+    install_root(home, &root, None)
+}
+
+/// 把解好、放在 `pets/` 下临时目录里的包 `root` 换进 `pets/<id>/`（同 id 覆盖）；`origin` 写进 `.origin.json`（从哪装的）
+pub(crate) fn install_root(home: &Path, root: &Path, origin: Option<&Value>) -> Result<Pack, PackError> {
+    let base = local_dir(home);
+    std::fs::create_dir_all(&base).map_err(|e| perr("io", e.to_string()))?;
+    let pack = load_dir("local", root)?;
+    let _ = std::fs::remove_file(root.join(ORIGIN));
+    if let Some(o) = origin {
+        std::fs::write(root.join(ORIGIN), o.to_string()).map_err(|e| perr("io", e.to_string()))?;
+    }
     let dest = base.join(&pack.id);
     let old = base.join(format!(".old-{}", pack.id));
     let _ = std::fs::remove_dir_all(&old);
     if dest.exists() {
         std::fs::rename(&dest, &old).map_err(|e| perr("io", e.to_string()))?;
     }
-    if let Err(e) = std::fs::rename(&root, &dest) {
+    if let Err(e) = std::fs::rename(root, &dest) {
         let _ = std::fs::rename(&old, &dest);
         return Err(perr("io", e.to_string()));
     }
@@ -1435,7 +1459,7 @@ fn similarity(ff: &Path, a: &Path, b: &Path) -> Option<f64> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -1462,7 +1486,7 @@ mod tests {
         assert_eq!(entry_path("a\\b"), None);
     }
 
-    fn write(dir: &Path, rel: &str, bytes: &[u8]) {
+    pub(crate) fn write(dir: &Path, rel: &str, bytes: &[u8]) {
         let p = dir.join(rel);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, bytes).unwrap();
@@ -1477,7 +1501,7 @@ mod tests {
         b
     }
 
-    const MIN: &str = r#"{
+    pub(crate) const MIN: &str = r#"{
       "format": "looklook-pet", "version": 1, "id": "t", "name": "测试",
       "author": { "name": "me" }, "license": { "spdx": "CC0-1.0", "commercial": true },
       "renderer": "video", "stage": { "width": 640, "height": 360 },
@@ -1486,7 +1510,7 @@ mod tests {
       "actions": { "move": ["walk"], "turn": ["look"], "click": ["idle"] },
     }"#;
 
-    fn min_pack(dir: &Path) {
+    pub(crate) fn min_pack(dir: &Path) {
         write(dir, "pet.json", MIN.as_bytes());
         write(dir, "preview.png", &png(10, 10));
         for c in ["idle", "walk", "look"] {
@@ -1606,7 +1630,7 @@ mod tests {
         assert_eq!(packs[1].error.as_ref().unwrap().code, "missing_file");
     }
 
-    fn zip_dir(src: &Path, out: &Path, prefix: &str) {
+    pub(crate) fn zip_dir(src: &Path, out: &Path, prefix: &str) {
         let f = std::fs::File::create(out).unwrap();
         let mut z = zip::ZipWriter::new(f);
         for e in walk(src) {

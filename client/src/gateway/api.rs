@@ -155,6 +155,9 @@ pub fn routes(app: App) -> Router<App> {
         .route("/pets", get(pets_list))
         .route("/pets/settings", get(pets_settings).put(put_pets_settings))
         .route("/pets/import", post(pets_import).layer(DefaultBodyLimit::max(crate::pets::MAX_PACK as usize + (1 << 20))))
+        .route("/pets/from-github", post(pets_github_scan))
+        .route("/pets/from-github/install", post(pets_github_install))
+        .route("/pets/from-github/preview/{token}/{index}", get(pets_github_preview))
         .route("/pets/{source}/{id}", get(pets_manifest).delete(pets_delete))
         .route("/pets/{source}/{id}/file/{*name}", get(pets_file))
         .route("/instances/{id}/pet", get(instance_pet))
@@ -3008,6 +3011,43 @@ async fn pets_import(State(app): State<App>, body: axum::body::Body) -> R<Json<V
     .map_err(anyhow::Error::from)?
     .map_err(crate::pets::pack_error)?;
     Ok(Json(pack.summary()))
+}
+
+#[derive(Deserialize)]
+struct GithubScanQ {
+    url: String,
+}
+
+/// 下载仓库、找出里面的宠物、校验，先不装：返回 `{token, repo, items}` 给用户挑
+async fn pets_github_scan(State(app): State<App>, Json(q): Json<GithubScanQ>) -> R<Json<Value>> {
+    let repo = crate::pet_github::parse(&q.url).ok_or_else(|| crate::pets::pack_error(crate::pets::perr("bad_repo", q.url.trim())))?;
+    Ok(Json(crate::pet_github::scan(&app.paths.home, &repo).await.map_err(crate::pets::pack_error)?))
+}
+
+#[derive(Deserialize)]
+struct GithubInstallQ {
+    token: String,
+    indexes: Vec<usize>,
+}
+
+async fn pets_github_install(State(app): State<App>, Json(q): Json<GithubInstallQ>) -> R<Json<Value>> {
+    let home = app.paths.home.clone();
+    let packs = tokio::task::spawn_blocking(move || crate::pet_github::install_staged(&home, &q.token, &q.indexes))
+        .await
+        .map_err(anyhow::Error::from)?
+        .map_err(crate::pets::pack_error)?;
+    Ok(Json(json!({ "items": packs.iter().map(crate::pets::Pack::summary).collect::<Vec<_>>() })))
+}
+
+async fn pets_github_preview(State(app): State<App>, Path((token, index)): Path<(String, usize)>) -> R<Response> {
+    let home = app.paths.home.clone();
+    let p = tokio::task::spawn_blocking(move || crate::pet_github::staged_preview(&home, &token, index)).await.ok().flatten().ok_or_else(LocalError::not_found)?;
+    let ct = match p.extension().and_then(|e| e.to_str()) {
+        Some("png") => "image/png",
+        _ => "image/webp",
+    };
+    let bytes = tokio::fs::read(&p).await?;
+    Ok(([(axum::http::header::CONTENT_TYPE, ct), (axum::http::header::CACHE_CONTROL, "no-store")], bytes).into_response())
 }
 
 async fn pets_delete(State(app): State<App>, Path((source, id)): Path<(String, String)>) -> R<StatusCode> {

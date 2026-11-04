@@ -3253,6 +3253,17 @@
     "act_sleep": "Sleep",
     "label": "{{name}} (click or drag it; right-click to sleep)",
     "hide": "Hide pet",
-    "show": "Show pet"
+    "show": "Show pet",
+    "gh_button": "Install from GitHub",
+    "gh_title": "Install pets from GitHub",
+    "gh_repo": "Repository",
+    "gh_repo_hint": "owner/repo or a repo link. To install one folder, paste its link (…/tree/main/pets/cat); for a branch use owner/repo@branch.",
+    "gh_find": "Find",
+    "gh_downloading": "Downloading the repository…",
+    "gh_found": "Found {{n}} in {{repo}}.",
+    "gh_found_many": "Found {{n}} in {{repo}}. Tick the ones to install.",
+    "gh_install": "Install {{n}}",
+    "gh_license_note": "Characters belong to their authors — check the license first. A pet with the same id replaces the installed one.",
+    "from_github": "From GitHub"
   }
 }

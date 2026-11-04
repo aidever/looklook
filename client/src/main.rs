@@ -48,6 +48,7 @@ mod notify;
 mod feishu_agent;
 mod feishu_route;
 mod paths;
+mod pet_github;
 mod pets;
 mod platform;
 mod ports;
@@ -78,7 +79,7 @@ mod util;
 mod versions;
 
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -206,8 +207,17 @@ enum Cmd {
 enum PetCmd {
     /// 检查一个宠物包文件夹（装了 ffmpeg 时还会看尺寸、透明通道、首尾帧）/ Check a pet pack folder
     Check { dir: PathBuf },
-    /// 安装一个 .llpet / .zip（同 id 覆盖）/ Install a .llpet / .zip (replaces the same id)
-    Install { file: PathBuf },
+    /// 安装 .llpet / .zip，或 GitHub 仓库（owner/repo、仓库链接；同 id 覆盖）/ Install a .llpet / .zip or a GitHub repo (replaces the same id)
+    Install {
+        /// 文件，或 GitHub 仓库：owner/repo、owner/repo@分支、https://github.com/owner/repo/tree/main/pets/cat
+        source: String,
+        /// 仓库里有好几只时装哪几只（id 或仓库里的文件夹，逗号分隔）/ Which pets to install from a multi-pet repo (ids or folders, comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        pick: Vec<String>,
+        /// 仓库里的全装 / Install every pet in the repo
+        #[arg(long)]
+        all: bool,
+    },
     /// 列出这台电脑上找得到的宠物 / List the pets found on this computer
     List,
 }
@@ -366,16 +376,25 @@ fn main() -> Result<()> {
             let paths = Paths::discover(cli.home)?;
             match action {
                 PetCmd::Check { dir } => std::process::exit(pets::check(&dir)),
-                PetCmd::Install { file } => match pets::import(&paths.home, &file) {
-                    Ok(p) => {
-                        println!("✓ {} → {}", p.id, p.dir.display());
-                        Ok(())
+                PetCmd::Install { source, pick, all } => {
+                    let r = if pet_github::looks_like(&source) {
+                        pet_github_cli(&rt, &paths.home, &source, &pick, all)
+                    } else {
+                        pets::import(&paths.home, Path::new(&source)).map(|p| vec![p])
+                    };
+                    match r {
+                        Ok(ps) => {
+                            for p in ps {
+                                println!("✓ {} → {}", p.id, p.dir.display());
+                            }
+                            Ok(())
+                        }
+                        Err(e) => {
+                            eprintln!("✗ {}: {}", e.code, e.detail);
+                            std::process::exit(1)
+                        }
                     }
-                    Err(e) => {
-                        eprintln!("✗ {}: {}", e.code, e.detail);
-                        std::process::exit(1)
-                    }
-                },
+                }
                 PetCmd::List => {
                     for p in pets::scan(&paths.home) {
                         let err = p.error.as_ref().map(|e| format!("  ✗ {}: {}", e.code, e.detail)).unwrap_or_default();
@@ -464,6 +483,31 @@ fn parse_local_from(s: &str) -> std::result::Result<(IpAddr, u8), String> {
 
 /// `None`（直接双击/开机启动）与 `looklook run` 走同一条路：Windows/macOS 是桌面应用（窗口 + 托盘，
 /// 见 `src/desktop.rs`），Linux 没有托盘，跟以前一样直接跑在当前线程的 tokio 运行时上。
+/// `looklook pet install <GitHub 仓库>`：只有一只直接装；好几只时要 `--pick` 或 `--all`，否则列出来
+fn pet_github_cli(rt: &tokio::runtime::Runtime, home: &Path, input: &str, pick: &[String], all: bool) -> Result<Vec<pets::Pack>, pets::PackError> {
+    let repo = pet_github::parse(input).ok_or_else(|| pets::perr("bad_repo", input))?;
+    let tmp = tempfile::tempdir().map_err(|e| pets::perr("io", e.to_string()))?;
+    let zip = tmp.path().join("repo.zip");
+    eprintln!("↓ github.com/{}{}", repo.slug(), repo.reference.as_deref().map(|r| format!("@{r}")).unwrap_or_default());
+    rt.block_on(pet_github::download(&repo, &zip))?;
+    // 解到 pets/ 下面，装的时候同盘 rename
+    let base = pets::local_dir(home);
+    std::fs::create_dir_all(&base).map_err(|e| pets::perr("io", e.to_string()))?;
+    let stage = tempfile::Builder::new().prefix(".gh-cli-").tempdir_in(&base).map_err(|e| pets::perr("io", e.to_string()))?;
+    let found = pet_github::stage(&zip, &repo.path, stage.path())?;
+    if found.len() > 1 && pick.is_empty() && !all {
+        eprintln!("这个仓库里有 {} 只宠物，用 --pick <id,…> 挑几只，或 --all 全装 / {} pets in this repo; use --pick <id,…> or --all:", found.len(), found.len());
+        for f in &found {
+            match &f.pack {
+                Ok(p) => eprintln!("  {:<24} {}", p.id, if f.path.is_empty() { "/" } else { &f.path }),
+                Err(e) => eprintln!("  {:<24} {}  ✗ {}: {}", "?", f.path, e.code, e.detail),
+            }
+        }
+        std::process::exit(2);
+    }
+    pet_github::install(home, &repo, found, pick)
+}
+
 fn dispatch_run(rt: tokio::runtime::Runtime, home: Option<PathBuf>, listen: Option<SocketAddr>, server: Option<String>, no_browser: bool) -> Result<()> {
     #[cfg(any(windows, target_os = "macos"))]
     {

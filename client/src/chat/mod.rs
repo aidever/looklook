@@ -68,6 +68,8 @@ const ATTACH_GRACE: Duration = Duration::from_secs(10);
 /// Claude Code 启动后头几秒屏幕是空的（2.1.310 实测 3 秒多，登录 shell 慢时更久），之后才画出输入框：
 /// 这段时间里认不出来的屏幕算“还在启动”，不弹“在等你选择”。读得出来的选择框（信任目录等）照常马上弹
 const STARTUP_WAIT: Duration = Duration::from_secs(20);
+/// 认不出来的界面一直开着这么久，界面上才提示“终端里开着别的界面”
+const OTHER_HINT: Duration = Duration::from_secs(10);
 /// 额度用完的菜单多久没人选，就替用户选“等重置后自动继续”
 /// Claude Code 从这个版本起有“立即发送”（`chat:sendNow`，Ctrl+X Ctrl+S）
 const SEND_NOW_SINCE: (u32, u32, u32) = (2, 1, 275);
@@ -175,8 +177,13 @@ struct State {
     codex: codex_chat::CodexSt,
     /// DSH（dsh web）的跟读、排队的消息、用量
     dsh: dsh_chat::DshSt,
-    /// 连续几次抓屏都认不出输入框、也读不出选择框（重绘、缩放到一半时会抓到这种半截屏幕）
-    odd_screens: u8,
+    /// 上一次抓屏认不出输入框、也读不出选择框时的屏幕（去掉转义）。重绘、缩放到一半时会抓到这种半截屏幕，
+    /// 前后两次一模一样才算真的开着别的界面
+    odd_screen: Option<String>,
+    /// 从什么时候起屏幕上一直开着认不出来的界面
+    other_since: Option<Instant>,
+    /// 认不出来的界面开了一阵子（[`OTHER_HINT`]）：界面上只提示一下，不当成“在等你选择”（不锁输入框、不推送）
+    other: bool,
     /// 这次启动后屏幕上出现过输入框（之前认不出来的屏幕多半是还在启动，见 [`STARTUP_WAIT`]）
     drawn: bool,
     /// 正在压缩上下文（PreCompact 到 PostCompact）：这期间屏幕上的转圈认不出来，不能按屏幕改成空闲
@@ -361,7 +368,9 @@ impl Chat {
                         suggestion: None,
                         codex: Default::default(),
                         dsh: Default::default(),
-                        odd_screens: 0,
+                        odd_screen: None,
+                        other_since: None,
+                        other: false,
                         drawn: false,
                         compacting: None,
                         since: crate::util::system_ms(),
@@ -444,8 +453,9 @@ impl Chat {
             // Codex：Tab 排到这一轮之后的（这一轮结束后作为下一轮发出）
             "later": st.codex.later.iter().map(|(t, i)| json!({ "text": t, "images": i.len() })).collect::<Vec<_>>(),
             "limit": (st.limit_wait.is_some() || st.limit_auto_at.is_some()).then(|| json!({ "waiting": st.limit_wait, "auto_at": st.limit_auto_at })),
-            "dialog": st.dialog,
             "effort": st.effort,
+            // 终端里开着这里读不出来的界面（只提示，phase 不变）
+            "other": st.other,
             "suggestion": st.suggestion,
             "background": st.background.iter().map(|(n, kind)| json!({ "n": n, "kind": kind })).collect::<Vec<_>>(),
             "agents": st.agents.len(),
@@ -1012,12 +1022,14 @@ impl Chat {
             (None, _) => {
                 st.claude_since = None;
                 st.drawn = false;
+                (st.other_since, st.other) = (None, false);
                 Self::set_phase(inst, &mut st, Phase::Detached, Some("no_session"));
             }
             (Some(_), None) => {
                 // 面板里是 shell：claude 没在运行
                 st.claude_since = None;
                 st.drawn = false;
+                (st.other_since, st.other) = (None, false);
                 st.agents.clear();
                 st.background.clear();
                 Self::drop_pending(&mut st);
@@ -1031,11 +1043,30 @@ impl Chat {
                 if scr == Screen::Modal {
                     st.dialog = capture.as_deref().and_then(|c| inst.agent.dialog(c));
                 }
-                // 读不出来的界面要连着看到两次才算：只看到一次多半是正在重绘，弹出“在等你选择”过一会儿又自己消失
-                let odd = scr == Screen::Modal && st.dialog.is_none() && st.phase != Phase::Tui;
-                st.odd_screens = if odd { st.odd_screens.saturating_add(1) } else { 0 };
                 st.drawn |= matches!(scr, Screen::Input { .. });
                 let starting = !st.drawn && since.elapsed() < STARTUP_WAIT;
+                // 读不出来的界面：前后两次抓到的一模一样才算（画到一半的帧前后不一样），一直开着才在界面上提示。
+                // 认不出来不等于要用户处理（Claude Code 改版、新加的面板都会这样），所以不切到“在等你选择”
+                let odd = scr == Screen::Modal && st.dialog.is_none() && st.phase != Phase::Tui && !starting;
+                let shown = odd.then(|| capture.as_deref().unwrap_or("").lines().map(|l| screen::strip(l).0).collect::<Vec<_>>().join("\n"));
+                let stable = shown.is_some() && st.odd_screen == shown;
+                st.odd_screen = shown;
+                if !odd {
+                    st.other_since = None;
+                } else if stable {
+                    st.other_since.get_or_insert_with(Instant::now);
+                }
+                let other = st.other_since.is_some_and(|t| t.elapsed() >= OTHER_HINT);
+                if other != st.other {
+                    st.other = other;
+                    if other {
+                        // 记下屏幕（最后 20 行），以后据此认出它或排查误判
+                        let lines: Vec<&str> = st.odd_screen.as_deref().unwrap_or("").lines().filter(|l| !l.trim().is_empty()).collect();
+                        let tail = lines[lines.len().saturating_sub(20)..].join("\n");
+                        tracing::info!(id = %inst.id, since_ms = since.elapsed().as_millis() as u64, "认不出来的 Claude Code 界面，提示“终端里开着别的界面”\n{tail}");
+                    }
+                    Self::emit_status(inst, &st);
+                }
                 match (st.phase, scr) {
                     // 确认框已经不在了（在终端里按了 Esc 或选了“否”：这两种都没有 hook）。
                     // Codex 要等 hook 答复之后才在 TUI 上弹确认框，挂起时屏幕上本来就是输入框，不能据此放掉
@@ -1046,16 +1077,10 @@ impl Chat {
                     (Phase::Approval, _) => {}
                     (_, Screen::Modal) if st.phase == Phase::Tui => {}
                     (Phase::Running, Screen::Modal) if !quiet => {}
-                    (_, Screen::Modal) if st.odd_screens == 1 || (odd && starting) => {}
-                    (_, Screen::Modal) => {
-                        // 读不出来的界面：记下屏幕（最后 20 行、去掉转义），以后据此认出它或排查误判
-                        if st.dialog.is_none() {
-                            let shown: Vec<String> = capture.as_deref().unwrap_or("").lines().map(|l| screen::strip(l).0).filter(|l| !l.trim().is_empty()).collect();
-                            let tail = shown[shown.len().saturating_sub(20)..].join("\n");
-                            tracing::info!(id = %inst.id, drawn = st.drawn, since_ms = since.elapsed().as_millis() as u64, "认不出来的 Claude Code 界面，转到“在等你选择”\n{tail}");
-                        }
-                        Self::set_phase(inst, &mut st, Phase::Tui, None)
-                    }
+                    // 读得出选项的选择框：界面上弹出来让用户选
+                    (_, Screen::Modal) if st.dialog.is_some() => Self::set_phase(inst, &mut st, Phase::Tui, None),
+                    // 读不出来的：状态不动，上面只提示
+                    (_, Screen::Modal) => {}
                     (_, Screen::Input { busy, ref text }) if !attached => {
                         Self::set_phase(inst, &mut st, Phase::Detached, Some("not_attached"));
                         // 以前的 Claude（不是带着看看的 hooks 启动的）空闲着：接着同一段对话转到对话模式
@@ -1087,6 +1112,15 @@ impl Chat {
                         st.effort = effort;
                         st.background = f.background;
                         Self::emit_status(inst, &st);
+                    }
+                    // 空闲时还在跑的子代理都在后台，状态栏上会有个数；hook 记着在跑、状态栏上却没有：
+                    // SubagentStop 丢了（额度用完、claude 出错时不会发），按状态栏的个数来
+                    if st.phase == Phase::Idle && !st.agents.is_empty() {
+                        let shown = st.background.iter().filter(|(_, k)| matches!(k.as_str(), "subagent" | "agent")).map(|(n, _)| *n as usize).sum::<usize>();
+                        if shown == 0 {
+                            st.agents.clear();
+                            Self::emit_status(inst, &st);
+                        }
                     }
                 }
                 // 额度用完、正在等重置后自动继续（只有 Claude Code 有）
@@ -1168,6 +1202,9 @@ impl Chat {
             "activity": st.live.activity,
             "turn": turn,
             "limit": (st.limit_wait.is_some() || st.limit_auto_at.is_some()).then(|| json!({ "waiting": st.limit_wait, "auto_at": st.limit_auto_at })),
+            // 这一轮做完了、后台还有任务（shell、子代理……，Claude Code 状态栏上的个数）：做完会接着回来，会话列表上算在干活。
+            // 不并进 board：看板上的“正在干活”是这一轮还没完（卡住提醒、停止都按它），后台开着的开发服务器不该算
+            "background": st.background.iter().map(|(n, kind)| json!({ "n": n, "kind": kind })).collect::<Vec<_>>(),
             "seen_at": st.board.seen_at,
             // 复制会话时复制这段对话（`resume.fork`）
             "session_id": st.binding.as_ref().map(|b| &b.session_id),
@@ -1445,9 +1482,20 @@ impl Chat {
             tokio::time::sleep(Duration::from_millis(300)).await;
         }
         if !ready {
+            // 读得出来的选择框：弹出来让用户选；读不出来的：提示终端里开着别的界面，发不进去
+            let d = self.instances.screen(id).await.as_deref().and_then(|c| inst.agent.dialog(c));
             let mut st = lock(&inst.st);
-            Self::set_phase(&inst, &mut st, Phase::Tui, None);
-            return Err(LocalError::new("CHAT_BUSY"));
+            if d.is_some() {
+                st.dialog = d;
+                Self::set_phase(&inst, &mut st, Phase::Tui, None);
+                return Err(LocalError::new("CHAT_BUSY"));
+            }
+            if !st.other {
+                st.other = true;
+                st.other_since.get_or_insert_with(|| Instant::now().checked_sub(OTHER_HINT).unwrap_or_else(Instant::now));
+                Self::emit_status(&inst, &st);
+            }
+            return Err(LocalError::new("CHAT_SCREEN_OTHER"));
         }
         let mut prompts = inst.prompts.subscribe();
         prompts.borrow_and_update();
@@ -2269,6 +2317,10 @@ impl Chat {
         let modal = matches!(self.instances.screen(id).await.map(|s| inst.agent.classify(&s)), Some(Screen::Modal));
         if !modal {
             let mut st = lock(&inst.st);
+            if st.other {
+                (st.other_since, st.other) = (None, false);
+                Self::emit_status(&inst, &st);
+            }
             if st.phase == Phase::Tui {
                 Self::set_phase(&inst, &mut st, Phase::Idle, None);
             }
@@ -2370,6 +2422,12 @@ impl Chat {
                 }
                 _ => (sub_calls.last().map(|c| json!({ "name": c.name, "input": slim_input(c.input) })), None, false),
             };
+            // 新版 Claude Code 的子代理用 SubagentHandback 工具交回最终报告：调了就是做完了
+            let handback = sub_calls.last().filter(|c| c.name == HANDBACK);
+            let finished_reply = finished_reply || handback.is_some();
+            let last_text = last_text.or_else(|| handback.and_then(|c| handback_text(c.input)));
+            // 界面上显示报告，不显示“SubagentHandback”这一步
+            let last_tool = if handback.is_some() { None } else { last_tool };
             let tool_id = meta["toolUseId"].as_str().unwrap_or("");
             let call = by_tool.get(tool_id);
             let note = t.notes.get(tool_id);
@@ -2378,10 +2436,11 @@ impl Chat {
                 "stopped"
             } else if note.is_some_and(|n| n.status == "failed") {
                 "failed"
+            } else if meta["finished"] == true || note.is_some() || finished_reply || (!background && call.is_some_and(|c| c.result.is_some())) {
+                // 看得出已经结束的，不管 hook 怎么说（额度用完等情况下 SubagentStop 不会来）
+                "done"
             } else if hooked_agents.contains(&aid) {
                 "running"
-            } else if meta["finished"] == true || note.is_some() || finished_reply || (!background && call.is_some_and(|c| c.result.is_some())) {
-                "done"
             } else if !alive {
                 "ended"
             } else {
@@ -2470,9 +2529,12 @@ impl Chat {
         self.ready_for_keys(id).await?;
         self.hold(id, true);
         let r = self.stop_task_keys(id, &label).await;
-        // 不管成没成，都回到普通输入框
+        // 不管成没成，都回到普通输入框：只在后台任务的列表、详情还开着时按 Esc。
+        // 别的界面不乱按：输入框上连按两下 Esc 会打开 Claude Code 的“回退到之前的消息”
         for _ in 0..3 {
-            if matches!(self.instances.screen(id).await.map(|s| inst.agent.classify(&s)), Some(Screen::Input { .. })) {
+            let Some(scr) = self.instances.screen(id).await else { break };
+            let open = screen::task_list(&scr).is_some() || screen::task_details(&scr).is_some();
+            if !open || matches!(inst.agent.classify(&scr), Screen::Input { .. }) {
                 break;
             }
             let _ = self.instances.send_keys(id, &["Escape"]).await;
@@ -2537,6 +2599,15 @@ fn pre_tool_use(decision: &str, reason: &str) -> String {
 }
 
 /// 按收到的 prompt 找子代理的 transcript（新的优先）。prompt 在参数里可能被截断过，只比开头。
+/// 子代理交回最终报告用的工具
+const HANDBACK: &str = "SubagentHandback";
+
+/// SubagentHandback 的报告正文：输入里最长的字符串字段
+fn handback_text(input: &Value) -> Option<String> {
+    let s = input.as_object()?.values().filter_map(Value::as_str).max_by_key(|s| s.len())?;
+    Some(s.chars().take(300).collect())
+}
+
 fn find_subagent(dir: &Path, prompt: &str) -> Option<PathBuf> {
     use std::io::BufRead;
     let head: String = prompt.chars().take(300).collect();

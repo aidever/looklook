@@ -9,15 +9,15 @@ import { useTranslation } from 'react-i18next';
 
 import { useStatus } from '../App.jsx';
 import { deviceApi } from '../shared/api.js';
-import { deviceColor, DeviceTag, LaunchIcon } from '../shared/brands.jsx';
+import { deviceColor, DeviceTag, SessionIcon } from '../shared/brands.jsx';
 import { deviceName, useDevices } from '../shared/devices.jsx';
 import { errorText } from '../shared/i18n.js';
 import PopMenu from '../shared/PopMenu.jsx';
 import { Link, query, useRouter } from '../shared/router.jsx';
-import { AGENTS, projectEntries, projectPath, sessionLaunch, sessionState, sessionTitle, useSessions } from '../shared/sessions.jsx';
+import { AGENTS, projectEntries, projectPath, sessionState, sessionTitle, useSessions } from '../shared/sessions.jsx';
 import { Spinner, useConfirm, useToast } from '../shared/ui.jsx';
 import { ConvRow, timeBucket } from './History.jsx';
-import { QUICK_LAUNCHES, shortAgo, useActions, useSessionUi } from './Sessions.jsx';
+import { quickLaunchItems, shortAgo, useActions, useSessionUi } from './Sessions.jsx';
 import { imeComposing } from '../shared/ime.js';
 
 const PAGE = 50;
@@ -194,7 +194,7 @@ function ProjectView({ p, group, focus }) {
     ...AGENTS.filter((a) => p.counts[a]).map((a) => ({ id: a, label: `${t(`launch.${a}.title`)} ${p.counts[a]}` })),
     termCount > 0 && { id: 'term', label: t('proj.terms', { count: termCount }) },
   ].filter(Boolean);
-  const newMenu = QUICK_LAUNCHES.map((l) => ({ icon: (x) => <LaunchIcon launch={l} {...x} />, label: t('sess.new_type', { type: t(`launch.${l}.title`) }), onClick: () => ui.quickCreate(p, l), disabled: !allowed }));
+  const newMenu = quickLaunchItems(t, p, status, allowed, ui);
   const menu = [
     { icon: p.pinned ? PinOff : Pin, label: t(p.pinned ? 'sess.unpin' : 'sess.pin'), onClick: () => s.pinProject(p.device, p.workdir, !p.pinned) },
     p.items.length === 0 && {
@@ -348,11 +348,11 @@ function InstRow({ inst }) {
   const a = useActions(inst);
   const state = inst.error && !inst.running ? 'error' : sessionState(inst);
   const when = Math.max(ts(inst.last_activity_at), ts(inst.started_at), ts(inst.created_at));
-  const badge = { attn: 'badge-warn', working: 'badge-brand', idle: 'badge-ok', error: 'badge-danger' }[state];
+  const badge = { attn: 'badge-warn', working: 'badge-brand', background: 'badge-brand', idle: 'badge-ok', error: 'badge-danger' }[state];
   return (
     <div className="conv proj-inst">
       <button type="button" className="conv-row" onClick={a.primary} disabled={a.busy || !a.allowed} title={inst.workdir}>
-        <LaunchIcon launch={sessionLaunch(inst)} size={18} className="conv-icon" />
+        <SessionIcon inst={inst} size={18} className="conv-icon" />
         <span className="conv-title ellipsis">{sessionTitle(inst)}</span>
         <span className="conv-when">{a.busy ? <Spinner size={13} /> : badge ? <span className={`badge ${badge}`}>{t(`sess.state.${state}`)}</span> : when > 0 && shortAgo(t, when)}</span>
         <span className="conv-sub">

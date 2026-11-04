@@ -2,7 +2,7 @@
 // 不会被滚动列表、终端标题栏裁掉。菜单画在 body 下面（portal）：祖先元素有 contain / content-visibility（侧栏项目列表）
 // 或 transform 时，fixed 定位会改成相对那个元素、还会被它裁掉，菜单就看不见了。
 import { Check, ChevronDown, MoreHorizontal, X } from 'lucide-react';
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 
@@ -12,24 +12,58 @@ import { useTranslation } from 'react-i18next';
  * text：按钮上除了图标还显示的文字（下拉选择，例如对话里切换模型）；disabled：按钮不可用。
  * children：按钮里的内容换成这个（例如侧栏的用户卡片）。sheet：窄屏上从底部弹出（选项多、要好点的菜单）。
  * 底部弹出时：顶上有标题和关闭按钮，往下划关掉；按钮在手机底部标签栏里时弹在标签栏上面，再点一下那个标签就关。
+ * hover：有鼠标时停在按钮上就弹出，移开（按钮和菜单都离开）就收起；悬停弹出后再点按钮，菜单留着，跟点开的一样。
  */
-export default function PopMenu({ items, className = 'btn btn-ghost btn-icon', icon: Icon = MoreHorizontal, label, onPointerDown, text, disabled, children, sheet = false }) {
+export default function PopMenu({ items, className = 'btn btn-ghost btn-icon', icon: Icon = MoreHorizontal, label, onPointerDown, text, disabled, children, sheet = false, hover = false }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState(null);
   const btn = useRef(null);
   const list = useRef(null);
+  // 悬停弹出的（还没点过）：鼠标离开就收起
+  const byHover = useRef(false);
+  const hoverTimer = useRef(0);
+  const canHover = hover && !disabled && typeof window !== 'undefined' && window.matchMedia?.('(hover: hover) and (pointer: fine)').matches;
+  const hoverIn = () => {
+    if (!canHover) return;
+    clearTimeout(hoverTimer.current);
+    if (open) return;
+    hoverTimer.current = setTimeout(() => {
+      byHover.current = true;
+      setPos(null);
+      setOpen(true);
+    }, 150);
+  };
+  const hoverOut = () => {
+    if (!canHover) return;
+    clearTimeout(hoverTimer.current);
+    if (open && byHover.current) hoverTimer.current = setTimeout(() => setOpen(false), 250);
+  };
+  useEffect(() => () => clearTimeout(hoverTimer.current), []);
   useEffect(() => {
-    if (!open) return undefined;
+    if (!open) {
+      byHover.current = false;
+      return undefined;
+    }
     const close = (e) => !btn.current?.contains(e.target) && !list.current?.contains(e.target) && setOpen(false);
     const esc = (e) => {
       if (e.key !== 'Escape') return;
       setOpen(false);
       btn.current?.focus();
     };
-    const away = () => setOpen(false);
+    // 点进终端（iframe）：焦点落在 iframe 上才关（切到别的窗口不关）。终端重连、刷新后自动聚焦在菜单开着时不做
+    // （见 termFrame.js 的 termFocus），不然连接不稳、终端反复重连时菜单刚弹出就被关掉
+    const away = () =>
+      setTimeout(() => {
+        if (document.activeElement?.tagName === 'IFRAME') setOpen(false);
+      }, 0);
+    // 只有按钮所在的那块滚动了（菜单跟着按钮走，位置就不对了）才关；别处自己滚（对话往下滚、终端输出）不管。
     // 菜单自己滚动（底部弹出的长菜单）不算；手机上地址栏、系统栏收起展开会改窗口高度，底部弹出时不跟着关
-    const scrolled = (e) => !list.current?.contains(e.target) && setOpen(false);
+    const scrolled = (e) => {
+      if (list.current?.contains(e.target)) return;
+      const el = e.target;
+      if (el === document || el === document.documentElement || el === document.body || el?.contains?.(btn.current)) setOpen(false);
+    };
     const resized = () => !sheetRef.current && setOpen(false);
     document.addEventListener('pointerdown', close);
     document.addEventListener('keydown', esc);
@@ -72,6 +106,7 @@ export default function PopMenu({ items, className = 'btn btn-ghost btn-icon', i
     });
   }, [open]);
   const shown = items.filter(Boolean);
+  const uid = useId().replace(/[^a-zA-Z0-9_-]/g, '');
   return (
     <>
       <button
@@ -84,8 +119,16 @@ export default function PopMenu({ items, className = 'btn btn-ghost btn-icon', i
         aria-expanded={open}
         disabled={disabled}
         onPointerDown={onPointerDown}
+        onMouseEnter={hoverIn}
+        onMouseLeave={hoverOut}
         onClick={(e) => {
           e.stopPropagation();
+          clearTimeout(hoverTimer.current);
+          // 悬停弹出的：点一下就是要它留着
+          if (open && byHover.current) {
+            byHover.current = false;
+            return;
+          }
           setPos(null);
           setOpen(!open);
         }}
@@ -106,6 +149,8 @@ export default function PopMenu({ items, className = 'btn btn-ghost btn-icon', i
           role="menu"
           aria-label={label}
           style={asSheet ? undefined : pos ?? { visibility: 'hidden', top: 0, left: 0 }}
+          onMouseEnter={hoverIn}
+          onMouseLeave={hoverOut}
           {...(asSheet ? drag : {})}
         >
           {asSheet && (
@@ -125,14 +170,14 @@ export default function PopMenu({ items, className = 'btn btn-ghost btn-icon', i
                 {x.head}
               </li>
             ) : (
-            <li key={x.label}>
+            <li key={`${i}:${x.label}`}>
               <button
                 type="button"
                 role={x.checked !== undefined ? 'menuitemradio' : 'menuitem'}
                 aria-checked={x.checked}
                 className={x.danger ? 'danger' : ''}
                 disabled={x.disabled}
-                aria-describedby={x.hint ? `${x.label}-hint` : undefined}
+                aria-describedby={x.hint ? `${uid}-${i}-hint` : undefined}
                 onPointerDown={onPointerDown}
                 onClick={(e) => {
                   e.stopPropagation();
@@ -145,7 +190,7 @@ export default function PopMenu({ items, className = 'btn btn-ghost btn-icon', i
                 <span className="grow">
                   {x.label}
                   {x.hint && (
-                    <span className="menu-pop-hint" id={`${x.label}-hint`}>
+                    <span className="menu-pop-hint" id={`${uid}-${i}-hint`}>
                       {x.hint}
                     </span>
                   )}

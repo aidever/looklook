@@ -3,11 +3,13 @@
 //!
 //! - **Claude Code**：`<配置目录>/projects/**/*.jsonl`（另外登录的官方账号的 `projects/` 链到同一处），
 //!   `assistant` 记录的 `message.usage`。同一条回复会写好几行（每个内容块一行），按 `message.id` + `requestId` 只算一次。
-//! - **Codex**：`$CODEX_HOME/sessions/**/rollout-*.jsonl` 和 `archived_sessions/`。`token_count` 事件的 `last_token_usage`
+//! - **Codex**：`$CODEX_HOME/sessions/**/rollout-*.jsonl` 和 `archived_sessions/`（旧的会被 Codex 压成 `.jsonl.zst`，也读）。`token_count` 事件的 `last_token_usage`
 //!   是一次请求的用量；`total_token_usage` 没变的是重复发的，不算。模型取前面最近的 `turn_context`，
 //!   走的哪家取开头 `session_meta` 的 `model_provider`（看看的第三方接口是 `looklook-<配置 ID>`，见 codex_profiles.rs）。
 //! - 接着以前的对话、分叉出来的对话会把以前的记录抄进新文件：每条用量记一个指纹，别的文件算过的不再算。
 //! - 只重新读变过（长度或修改时间变了）的文件。删掉的会话记录（Claude Code 默认 30 天清理）统计照样留着。
+//! - 每个文件另外记下工作目录（`cwd`）和标题（Claude Code 的 `custom-title` > `ai-title`；Codex 的在 `session_index.jsonl`），
+//!   用来按项目、按会话统计。
 //! - 结果存在 `<数据目录>/usage/stats.json`，只在本机，不上传。
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -21,6 +23,10 @@ use serde_json::{json, Value};
 
 const SCAN_EVERY: Duration = Duration::from_secs(10 * 60);
 const VERSION: u32 = 1;
+/// 每个文件解析的版本：旧版本解析的（没记工作目录、标题）文件还在时重读一遍；删掉的就留着旧的
+const PARSE_V: u32 = 2;
+/// 会话表最多列多少个
+const TOP_SESSIONS: usize = 50;
 
 /// 一个小时里一个模型的用量
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -58,6 +64,18 @@ struct FileState {
     rows: Vec<Row>,
     /// 这个文件算过的用量的指纹
     ids: Vec<u64>,
+    /// 解析的版本（[`PARSE_V`]）
+    #[serde(default)]
+    v: u32,
+    /// 工作目录
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cwd: Option<String>,
+    /// 会话标题（Claude Code 写在记录里的）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    /// Codex 的会话号（`session_meta` 的 `id`）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sid: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -89,6 +107,9 @@ fn hour_of(ts: &str) -> Option<i64> {
 #[derive(Default)]
 struct Parsed {
     provider: Option<String>,
+    cwd: Option<String>,
+    title: Option<String>,
+    sid: Option<String>,
     rows: HashMap<(i64, String), Row>,
     ids: Vec<u64>,
 }
@@ -113,8 +134,26 @@ fn n(v: &Value, k: &str) -> u64 {
 fn parse_claude(text: &str, seen: &HashSet<u64>) -> Parsed {
     // 同一条回复的几行：留输出最多的那行（流式写入时前面的行可能还不全）
     let mut best: HashMap<u64, (i64, String, Value)> = HashMap::new();
-    for line in text.lines().filter(|l| l.contains("\"usage\"") && l.contains("\"assistant\"")) {
+    let (mut cwd, mut custom, mut ai) = (None, None, None);
+    for line in text.lines() {
+        // 标题：`/rename` 起的优先，同一种以最后一行为准
+        if line.contains("\"custom-title\"") || line.contains("\"ai-title\"") {
+            if let Ok(v) = serde_json::from_str::<Value>(line) {
+                match v["type"].as_str() {
+                    Some("custom-title") => custom = v["customTitle"].as_str().map(String::from).or(custom),
+                    Some("ai-title") => ai = v["aiTitle"].as_str().map(String::from).or(ai),
+                    _ => {}
+                }
+            }
+            continue;
+        }
+        if !(line.contains("\"usage\"") && line.contains("\"assistant\"")) {
+            continue;
+        }
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        if cwd.is_none() {
+            cwd = v["cwd"].as_str().filter(|s| !s.is_empty()).map(String::from);
+        }
         if v["type"] != "assistant" {
             continue;
         }
@@ -135,7 +174,7 @@ fn parse_claude(text: &str, seen: &HashSet<u64>) -> Parsed {
             best.insert(id, (h, model.to_string(), u.clone()));
         }
     }
-    let mut out = Parsed::default();
+    let mut out = Parsed { cwd, title: custom.or(ai).map(|t| t.trim().to_string()).filter(|t| !t.is_empty()), ..Default::default() };
     for (id, (h, model, u)) in best {
         let c1 = n(&u["cache_creation"], "ephemeral_1h_input_tokens");
         let cw = n(&u, "cache_creation_input_tokens").saturating_sub(c1);
@@ -166,6 +205,8 @@ fn parse_codex(text: &str, seen: &HashSet<u64>) -> Parsed {
             "session_meta" if v["type"] == "session_meta" => {
                 if out.provider.is_none() {
                     out.provider = p["model_provider"].as_str().map(String::from);
+                    out.cwd = p["cwd"].as_str().filter(|s| !s.is_empty()).map(String::from);
+                    out.sid = p["id"].as_str().map(String::from);
                 }
             }
             "turn_context" if v["type"] == "turn_context" => {
@@ -218,7 +259,12 @@ fn sources() -> Vec<(PathBuf, &'static str)> {
     out.extend(files.drain(..).map(|p| (p, "claude")));
     let codex = crate::agents::codex_home();
     for d in ["sessions", "archived_sessions"] {
-        walk(&codex.join(d), &|p| jsonl(p) && p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("rollout-")), &mut files, 0);
+        // 新版 Codex 会把旧的会话记录压成 `rollout-*.jsonl.zst`（原来的 `.jsonl` 删掉）
+        let rollout = |p: &Path| p.file_name().is_some_and(|n| {
+            let n = n.to_string_lossy();
+            n.starts_with("rollout-") && (n.ends_with(".jsonl") || n.ends_with(".jsonl.zst"))
+        });
+        walk(&codex.join(d), &rollout, &mut files, 0);
     }
     out.extend(files.into_iter().map(|p| (p, "codex")));
     out
@@ -240,16 +286,18 @@ fn scan_blocking(home: &Path) {
         let key = path.to_string_lossy().into_owned();
         let Ok(meta) = std::fs::metadata(&path) else { continue };
         let (len, mtime) = (meta.len(), mtime_of(&meta));
-        if st.files.get(&key).is_some_and(|f| f.len == len && f.mtime == mtime) {
+        if st.files.get(&key).is_some_and(|f| f.len == len && f.mtime == mtime && f.v >= PARSE_V) {
             continue;
         }
-        let Ok(bytes) = std::fs::read(&path) else { continue };
+        // 读不了、解压失败（可能正压到一半）的这次跳过，下次再试
+        let Some(bytes) = crate::history::read_log(&path) else { continue };
         let text = String::from_utf8_lossy(&bytes);
         let seen: HashSet<u64> = st.files.iter().filter(|(k, _)| **k != key).flat_map(|(_, f)| f.ids.iter().copied()).collect();
         let parsed = if agent == "claude" { parse_claude(&text, &seen) } else { parse_codex(&text, &seen) };
         let mut rows: Vec<Row> = parsed.rows.into_values().collect();
         rows.sort_by(|a, b| (a.h, &a.m).cmp(&(b.h, &b.m)));
-        st.files.insert(key, FileState { len, mtime, agent: agent.into(), provider: parsed.provider, rows, ids: parsed.ids });
+        let fs = FileState { len, mtime, agent: agent.into(), provider: parsed.provider, rows, ids: parsed.ids, v: PARSE_V, cwd: parsed.cwd, title: parsed.title, sid: parsed.sid };
+        st.files.insert(key, fs);
         changed += 1;
     }
     st.scanned_at = crate::util::now_rfc3339();
@@ -396,7 +444,64 @@ fn cost_of(r: &Row, p: &crate::pricing::Cost) -> f64 {
     (r.i as f64 * p.input + r.o as f64 * p.output + r.cr as f64 * read + r.cw as f64 * write + r.c1 as f64 * p.input * 2.0) / 1_000_000.0
 }
 
+#[derive(Default, Clone)]
+struct Sum {
+    tokens: [u64; 5],
+    requests: u64,
+    cost: f64,
+}
+
+impl Sum {
+    fn add(&mut self, r: &Row, cost: f64) {
+        for (s, v) in self.tokens.iter_mut().zip([r.i, r.o, r.cr, r.cw + r.c1, 0]) {
+            *s += v;
+        }
+        self.tokens[4] += r.i + r.o + r.cr + r.cw + r.c1;
+        self.requests += r.n;
+        self.cost += cost;
+    }
+    fn merge(&mut self, o: &Sum) {
+        self.tokens.iter_mut().zip(o.tokens).for_each(|(x, y)| *x += y);
+        self.requests += o.requests;
+        self.cost += o.cost;
+    }
+    fn view(&self) -> Value {
+        let [input, output, cache_read, cache_write, total] = self.tokens;
+        json!({ "input": input, "output": output, "cache_read": cache_read, "cache_write": cache_write, "tokens": total, "requests": self.requests, "cost": (self.cost * 10000.0).round() / 10000.0 })
+    }
+}
+
+/// 一组（一天、一小时）里每个助手的用量 → `{合计…, agents: {助手: 用量}}`
+fn bucket_view(per: Option<&BTreeMap<String, Sum>>) -> Value {
+    let mut sum = Sum::default();
+    let mut agents = serde_json::Map::new();
+    for (a, s) in per.into_iter().flatten() {
+        agents.insert(a.clone(), s.view());
+        sum.merge(s);
+    }
+    let mut v = sum.view();
+    v["agents"] = Value::Object(agents);
+    v
+}
+
+fn by_cost(a: &Value, b: &Value) -> std::cmp::Ordering {
+    b["cost"].as_f64().partial_cmp(&a["cost"].as_f64()).unwrap_or(std::cmp::Ordering::Equal).then(b["tokens"].as_u64().cmp(&a["tokens"].as_u64()))
+}
+
+/// 一段会话
+#[derive(Default)]
+struct Sess {
+    sum: Sum,
+    title: Option<String>,
+    cwd: Option<String>,
+    /// 最后一次用量在第几个小时
+    last: i64,
+    /// 模型 → token（列出用得最多的）
+    models: HashMap<String, u64>,
+}
+
 /// 最近 `days` 天的统计。`tz` 是界面所在时区比 UTC 早多少分钟（东八区是 480），按当地的日期分天。
+/// 另带上一个同样长的时间段的合计（`prev`，看涨了还是降了）和今天每小时的用量（`hours`）。
 pub fn report(store: &crate::store::Store, days: u32, tz: i32) -> Value {
     let guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
     let Some(st) = guard.as_ref() else { return json!({ "ready": false }) };
@@ -404,63 +509,78 @@ pub fn report(store: &crate::store::Store, days: u32, tz: i32) -> Value {
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
     let tz_secs = i64::from(tz.clamp(-14 * 60, 14 * 60)) * 60;
     let today = (now + tz_secs).div_euclid(86400);
-    let first = today - i64::from(days.clamp(1, 366)) + 1;
+    let span = i64::from(days.clamp(1, 366));
+    let first = today - span + 1;
     let date = |d: i64| time::OffsetDateTime::from_unix_timestamp(d * 86400).map(|t| t.date().to_string()).unwrap_or_default();
+    let hour_ts = |h: i64| time::OffsetDateTime::from_unix_timestamp(h * 3600).ok().and_then(|t| t.format(&time::format_description::well_known::Rfc3339).ok());
 
-    #[derive(Default)]
-    struct Sum {
-        tokens: [u64; 5],
-        requests: u64,
-        cost: f64,
-    }
-    impl Sum {
-        fn add(&mut self, r: &Row, cost: f64) {
-            for (s, v) in self.tokens.iter_mut().zip([r.i, r.o, r.cr, r.cw + r.c1, 0]) {
-                *s += v;
-            }
-            self.tokens[4] += r.i + r.o + r.cr + r.cw + r.c1;
-            self.requests += r.n;
-            self.cost += cost;
-        }
-        fn view(&self) -> Value {
-            let [input, output, cache_read, cache_write, total] = self.tokens;
-            json!({ "input": input, "output": output, "cache_read": cache_read, "cache_write": cache_write, "tokens": total, "requests": self.requests, "cost": (self.cost * 10000.0).round() / 10000.0 })
-        }
-    }
     let mut by_day: BTreeMap<i64, BTreeMap<String, Sum>> = BTreeMap::new();
+    // 今天当地的第几个小时 → 助手 → 用量
+    let mut by_hour: BTreeMap<i64, BTreeMap<String, Sum>> = BTreeMap::new();
     // (助手, 模型) → (用量, 价格来自哪家)
     let mut by_model: BTreeMap<(String, String), (Sum, Option<String>)> = BTreeMap::new();
+    // 助手（Claude Code、Codex）→ 用量
+    let mut by_agent: BTreeMap<String, Sum> = BTreeMap::new();
     // (助手, 账号) → 用量
     let mut by_account: BTreeMap<(String, String), Sum> = BTreeMap::new();
-    let mut total = Sum::default();
-    let mut today_sum = Sum::default();
+    // 工作目录 → (用量, 给人看的目录, 会话)
+    type Project = (Sum, String, HashSet<(String, String)>);
+    let mut by_project: HashMap<String, Project> = HashMap::new();
+    // (助手, 会话号) → 会话
+    let mut by_session: HashMap<(String, String), Sess> = HashMap::new();
+    let (mut total, mut prev, mut today_sum) = (Sum::default(), Sum::default(), Sum::default());
     // 账号 → (名字, 种类, 价格按哪家)
     let mut info_of: HashMap<(String, String), (String, &'static str, Option<String>)> = HashMap::new();
     let convs = conv_accounts(store);
     for (path, f) in &st.files {
         // Claude Code 的账号、第三方接口都写在同一个 projects/ 里：按记下的“对话 → 账号”分；Codex 的记录里写着服务商
+        let claude_conv = (f.agent != "codex").then(|| claude_conv_of(path)).flatten();
         let account = match f.agent.as_str() {
             "codex" => f.provider.clone().unwrap_or_else(|| "openai".into()),
-            _ => claude_conv_of(path).and_then(|c| convs.get(&c).cloned()).unwrap_or_else(|| format!("claude:{}", crate::claude_profiles::OFFICIAL)),
+            _ => claude_conv.as_ref().and_then(|c| convs.get(c).cloned()).unwrap_or_else(|| format!("claude:{}", crate::claude_profiles::OFFICIAL)),
         };
+        // 一段会话：Claude Code 的子代理算在它的对话里
+        let conv = if f.agent == "codex" { f.sid.clone() } else { claude_conv }.unwrap_or_else(|| path.clone());
+        let sess_key = (f.agent.clone(), conv);
+        let project = f.cwd.as_deref().map(crate::history::dir_key).unwrap_or_default();
         let hint = info_of.entry((f.agent.clone(), account.clone())).or_insert_with(|| account_info(cat.as_deref(), store, &f.agent, &account)).2.clone();
         for r in &f.rows {
             let day = (r.h * 3600 + tz_secs).div_euclid(86400);
-            if day < first {
+            if day < first - span {
                 continue;
             }
             let priced = cat.as_ref().and_then(|c| crate::pricing::price(c, hint.as_deref(), &r.m));
             let cost = priced.as_ref().map(|(p, _)| cost_of(r, p)).unwrap_or(0.0);
+            if day < first {
+                prev.add(r, cost);
+                continue;
+            }
             by_day.entry(day).or_default().entry(f.agent.clone()).or_default().add(r, cost);
+            by_agent.entry(f.agent.clone()).or_default().add(r, cost);
             by_account.entry((f.agent.clone(), account.clone())).or_default().add(r, cost);
             let e = by_model.entry((f.agent.clone(), r.m.clone())).or_default();
             e.0.add(r, cost);
             if let Some((_, pid)) = priced {
                 e.1 = Some(pid);
             }
+            let p = by_project.entry(project.clone()).or_insert_with(|| (Sum::default(), f.cwd.clone().unwrap_or_default(), HashSet::new()));
+            p.0.add(r, cost);
+            p.2.insert(sess_key.clone());
+            let s = by_session.entry(sess_key.clone()).or_default();
+            s.sum.add(r, cost);
+            s.last = s.last.max(r.h);
+            *s.models.entry(r.m.clone()).or_default() += r.i + r.o + r.cr + r.cw + r.c1;
+            if s.title.is_none() {
+                s.title = f.title.clone();
+            }
+            if s.cwd.is_none() {
+                s.cwd = f.cwd.clone();
+            }
             total.add(r, cost);
             if day == today {
                 today_sum.add(r, cost);
+                let hour = (r.h * 3600 + tz_secs).div_euclid(3600) - today * 24;
+                by_hour.entry(hour).or_default().entry(f.agent.clone()).or_default().add(r, cost);
             }
         }
     }
@@ -476,7 +596,7 @@ pub fn report(store: &crate::store::Store, days: u32, tz: i32) -> Value {
             v
         })
         .collect();
-    models.sort_by(|a, b| b["cost"].as_f64().partial_cmp(&a["cost"].as_f64()).unwrap_or(std::cmp::Ordering::Equal).then(b["tokens"].as_u64().cmp(&a["tokens"].as_u64())));
+    models.sort_by(by_cost);
     let mut accounts: Vec<Value> = by_account
         .iter()
         .map(|((agent, key), s)| {
@@ -489,21 +609,59 @@ pub fn report(store: &crate::store::Store, days: u32, tz: i32) -> Value {
             v
         })
         .collect();
-    accounts.sort_by(|a, b| b["cost"].as_f64().partial_cmp(&a["cost"].as_f64()).unwrap_or(std::cmp::Ordering::Equal).then(b["tokens"].as_u64().cmp(&a["tokens"].as_u64())));
+    accounts.sort_by(by_cost);
+    let mut projects: Vec<Value> = by_project
+        .into_values()
+        .map(|(s, dir, sessions)| {
+            let mut v = s.view();
+            v["dir"] = json!(dir);
+            v["sessions"] = json!(sessions.len());
+            v
+        })
+        .collect();
+    projects.sort_by(by_cost);
+    let codex_titles = if by_session.keys().any(|(a, _)| a == "codex") { crate::history::codex_titles() } else { HashMap::new() };
+    let session_count = by_session.len();
+    let mut agents: Vec<Value> = by_agent
+        .iter()
+        .map(|(agent, s)| {
+            let mut v = s.view();
+            v["agent"] = json!(agent);
+            v["sessions"] = json!(by_session.keys().filter(|(a, _)| a == agent).count());
+            v
+        })
+        .collect();
+    agents.sort_by(by_cost);
+    let mut sessions: Vec<Value> = by_session
+        .into_iter()
+        .map(|((agent, id), s)| {
+            let title = s.title.or_else(|| (agent == "codex").then(|| codex_titles.get(&id).cloned()).flatten());
+            let model = s.models.into_iter().max_by_key(|(_, n)| *n).map(|(m, _)| m);
+            let mut v = s.sum.view();
+            v["agent"] = json!(agent);
+            // 认不出会话号的（文件名不是会话号）不给号，界面上就不能点开
+            v["id"] = json!((crate::history::valid_id(&id)).then_some(&id));
+            v["title"] = json!(title);
+            v["dir"] = json!(s.cwd);
+            v["model"] = json!(model);
+            v["last"] = json!(hour_ts(s.last));
+            v
+        })
+        .collect();
+    sessions.sort_by(by_cost);
+    sessions.truncate(TOP_SESSIONS);
     let days: Vec<Value> = (first..=today)
         .map(|d| {
-            let agents = by_day.get(&d);
-            let mut sum = Sum::default();
-            let mut per = serde_json::Map::new();
-            for (a, s) in agents.into_iter().flatten() {
-                per.insert(a.clone(), s.view());
-                sum.tokens.iter_mut().zip(s.tokens).for_each(|(x, y)| *x += y);
-                sum.requests += s.requests;
-                sum.cost += s.cost;
-            }
-            let mut v = sum.view();
+            let mut v = bucket_view(by_day.get(&d));
             v["date"] = json!(date(d));
-            v["agents"] = Value::Object(per);
+            v
+        })
+        .collect();
+    let now_hour = (now + tz_secs).div_euclid(3600) - today * 24;
+    let hours: Vec<Value> = (0..=now_hour)
+        .map(|h| {
+            let mut v = bucket_view(by_hour.get(&h));
+            v["hour"] = json!(h);
             v
         })
         .collect();
@@ -512,10 +670,16 @@ pub fn report(store: &crate::store::Store, days: u32, tz: i32) -> Value {
         "scanned_at": st.scanned_at,
         "pricing": cat.as_ref().map(|c| json!({ "source": "models.dev", "fetched_at": c.fetched_at })),
         "total": total.view(),
+        "prev": prev.view(),
         "today": today_sum.view(),
         "days": days,
+        "hours": hours,
         "models": models,
+        "agents": agents,
         "accounts": accounts,
+        "projects": projects,
+        "sessions": sessions,
+        "session_count": session_count,
     })
 }
 
@@ -592,7 +756,80 @@ mod tests {
         for m in r["models"].as_array().unwrap().iter().take(12) {
             println!("{} {} tokens={} cost={} 价格={}", m["agent"], m["model"], m["tokens"], m["cost"], m["price_from"]);
         }
+        println!("上一段 {}\n工具 {}", r["prev"], r["agents"]);
+        for p in r["projects"].as_array().unwrap().iter().take(8) {
+            println!("项目 {} 会话={} cost={}", p["dir"], p["sessions"], p["cost"]);
+        }
+        for s in r["sessions"].as_array().unwrap().iter().take(8) {
+            println!("会话 {} {} {} {} cost={}", s["agent"], s["title"], s["dir"], s["last"], s["cost"]);
+        }
+        if let Ok(out) = std::env::var("USAGE_E2E_OUT") {
+            std::fs::write(out, r.to_string()).unwrap();
+        }
+        println!("今天每小时 {}", r["hours"].as_array().unwrap().iter().map(|h| h["tokens"].to_string()).collect::<Vec<_>>().join(","));
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn reads_zstd_rollouts() {
+        let dir = std::env::temp_dir().join(format!("ll-usage-zst-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let text = b"{\"type\":\"session_meta\"}\n".repeat(50);
+        let plain = dir.join("rollout-a.jsonl");
+        std::fs::write(&plain, &text).unwrap();
+        let zst = dir.join("rollout-b.jsonl.zst");
+        std::fs::write(&zst, ruzstd::encoding::compress_to_vec(text.as_slice(), ruzstd::encoding::CompressionLevel::Fastest)).unwrap();
+        assert_eq!(crate::history::read_log(&plain).unwrap(), text);
+        assert_eq!(crate::history::read_log(&zst).unwrap(), text);
+        // 压到一半（不完整）的读不出来，这次跳过
+        std::fs::write(&zst, &std::fs::read(&zst).unwrap()[..8]).unwrap();
+        assert!(crate::history::read_log(&zst).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn claude_cwd_and_title() {
+        let u = json!({ "input_tokens": 1, "output_tokens": 2 });
+        let mut s = line(json!({ "type": "ai-title", "aiTitle": "旧标题" }));
+        s += &line(json!({ "type": "assistant", "cwd": "/w/app", "timestamp": "2026-10-27T10:00:00Z", "requestId": "r", "message": { "id": "m", "model": "claude-opus-5-5", "usage": u } }));
+        s += &line(json!({ "type": "ai-title", "aiTitle": "新标题" }));
+        let p = parse_claude(&s, &HashSet::new());
+        assert_eq!((p.cwd.as_deref(), p.title.as_deref()), (Some("/w/app"), Some("新标题")));
+        s += &line(json!({ "type": "custom-title", "customTitle": "改过的名字" }));
+        assert_eq!(parse_claude(&s, &HashSet::new()).title.as_deref(), Some("改过的名字"), "/rename 起的优先");
+        let c = line(json!({ "timestamp": "2026-10-23T07:38:16Z", "type": "session_meta", "payload": { "id": "abc-1", "cwd": "/w/x", "model_provider": "openai" } }));
+        let p = parse_codex(&c, &HashSet::new());
+        assert_eq!((p.cwd.as_deref(), p.sid.as_deref()), (Some("/w/x"), Some("abc-1")));
+    }
+
+    /// 报表：上一段时间、今天每小时、按项目、按会话（子代理算在它的对话里）
+    #[test]
+    fn report_groups() {
+        let now_h = time::OffsetDateTime::now_utc().unix_timestamp().div_euclid(3600);
+        let row = |h: i64, o: u64| Row { h, m: "m1".into(), o, n: 1, ..Default::default() };
+        let id = "e7256753-67bc-473c-89c9-63df2a292e33";
+        let file = |rows: Vec<Row>, cwd: &str, title: Option<&str>| FileState { agent: "claude".into(), rows, v: PARSE_V, cwd: Some(cwd.into()), title: title.map(String::from), ..Default::default() };
+        let mut st = State { version: VERSION, ..Default::default() };
+        st.files.insert(format!("/p/-w-a/{id}.jsonl"), file(vec![row(now_h, 10), row(now_h - 24 * 10, 5)], "/w/a", Some("修登录")));
+        st.files.insert(format!("/p/-w-a/{id}/subagents/agent-1.jsonl"), file(vec![row(now_h, 3)], "/w/a", None));
+        st.files.insert("/p/-w-b/x.jsonl".into(), file(vec![row(now_h, 1)], "/w/b/", None));
+        *STATE.lock().unwrap() = Some(st);
+        let home = std::env::temp_dir().join(format!("ll-usage-rep-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let store = crate::store::Store::open(&home.join("t.db")).unwrap();
+        let r = report(&store, 7, 0);
+        *STATE.lock().unwrap() = None;
+        let _ = std::fs::remove_dir_all(&home);
+        assert_eq!((r["total"]["output"].as_u64(), r["prev"]["output"].as_u64(), r["today"]["output"].as_u64()), (Some(14), Some(5), Some(14)));
+        let hours = r["hours"].as_array().unwrap();
+        assert_eq!(hours.last().unwrap()["output"], 14, "这个小时的用量");
+        let projects = r["projects"].as_array().unwrap();
+        assert_eq!(projects.len(), 2);
+        assert_eq!((projects[0]["dir"].as_str(), projects[0]["output"].as_u64(), projects[0]["sessions"].as_u64()), (Some("/w/a"), Some(13), Some(1)));
+        let sessions = r["sessions"].as_array().unwrap();
+        assert_eq!((sessions[0]["id"].as_str(), sessions[0]["title"].as_str(), sessions[0]["output"].as_u64()), (Some(id), Some("修登录"), Some(13)));
+        assert!(sessions[1]["id"].is_null(), "认不出会话号的不给号");
+        assert_eq!((r["agents"][0]["agent"].as_str(), r["agents"][0]["sessions"].as_u64()), (Some("claude"), Some(2)));
     }
 
     #[test]

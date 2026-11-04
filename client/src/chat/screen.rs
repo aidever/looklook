@@ -110,23 +110,21 @@ pub(super) fn strip(line: &str) -> (String, String) {
     (plain, bright)
 }
 
+/// 输入框的上下两条横线（行号）。`lines` 是去掉转义后的各行。
+/// 只认输入框本身：最下面一条横线往上 2–21 行有上沿（可能写着会话标题，见 [`is_top_rule`]）。
+/// 下沿下面是什么不管：状态栏、后台代理列表、额度提示、`/` 命令的候选……行数随版本、窗口宽度变，
+/// 以前按“下面最多几行”判断，Claude Code 每加一种面板就会误判成“在等你选择”。
+/// 对话框、选择器都是换掉输入框的（屏幕上就没有这个形状），认不出来的另外按“开着别的界面”提示
+fn input_box<S: AsRef<str>>(lines: &[S]) -> Option<(usize, usize)> {
+    let bottom = lines.iter().rposition(|l| is_rule(l.as_ref()))?;
+    let top = lines[..bottom].iter().rposition(|l| is_top_rule(l.as_ref()))?;
+    (2..=21).contains(&(bottom - top)).then_some((top, bottom))
+}
+
 pub fn classify(capture: &str) -> Screen {
     let lines: Vec<(String, String)> = capture.lines().map(strip).collect();
-    let mut end = lines.len();
-    while end > 0 && lines[end - 1].0.trim().is_empty() {
-        end -= 1;
-    }
-    let lines = &lines[..end];
-    // 最下面的横线：下面最多 4 行（状态、提示）
-    let Some(bottom) = lines.iter().rposition(|(p, _)| is_rule(p)) else { return Screen::Modal };
-    if lines.len() - bottom - 1 > 4 {
-        return Screen::Modal;
-    }
-    // 往上找输入框上沿的横线（输入框最多 20 行）
-    let Some(top) = lines[..bottom].iter().rposition(|(p, _)| is_top_rule(p)) else { return Screen::Modal };
-    if bottom - top < 2 || bottom - top > 21 {
-        return Screen::Modal;
-    }
+    let plain: Vec<&str> = lines.iter().map(|(p, _)| p.as_str()).collect();
+    let Some((top, bottom)) = input_box(&plain) else { return Screen::Modal };
     let first = &lines[top + 1];
     let Some(rest) = first.0.trim_start().strip_prefix('❯').or_else(|| first.0.trim_start().strip_prefix('>')) else { return Screen::Modal };
     // 续行必须是缩进的（选项列表 `  2. xxx` 也是缩进的，但它们上面不会紧跟 ❯ 行再接横线）
@@ -165,8 +163,7 @@ pub fn suggestion(capture: &str) -> Option<String> {
         return None;
     }
     let lines: Vec<(String, String)> = capture.lines().map(strip).collect();
-    let bottom = lines.iter().rposition(|(p, _)| is_rule(p))?;
-    let top = lines[..bottom].iter().rposition(|(p, _)| is_rule(p))?;
+    let (top, bottom) = input_box(&lines.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>())?;
     let mut text = String::new();
     for (n, (plain, bright)) in lines[top + 1..bottom].iter().enumerate() {
         let plain = if n == 0 { plain.trim_start().strip_prefix('❯').or_else(|| plain.trim_start().strip_prefix('>')).unwrap_or(plain) } else { plain };
@@ -208,8 +205,7 @@ pub fn footer(capture: &str) -> Option<Footer> {
         return None;
     }
     let lines: Vec<String> = capture.lines().map(|l| strip(l).0.trim_end().to_string()).collect();
-    let bottom = lines.iter().rposition(|l| is_rule(l))?;
-    let top = lines[..bottom].iter().rposition(|l| is_rule(l))?;
+    let (top, bottom) = input_box(&lines)?;
     let mut out = Footer::default();
     for seg in lines[bottom + 1..].iter().flat_map(|l| l.split(" · ")) {
         let s = seg.trim().trim_start_matches(|c: char| !c.is_ascii_alphanumeric()).trim();
@@ -307,9 +303,9 @@ fn width(s: &str) -> usize {
 
 pub fn live(capture: &str) -> Live {
     let lines: Vec<String> = capture.lines().map(|l| strip(l).0.trim_end().to_string()).collect();
-    let Some(bottom) = lines.iter().rposition(|l| is_rule(l)) else { return Live::default() };
-    let Some(top) = lines[..bottom].iter().rposition(|l| is_rule(l)) else { return Live::default() };
-    let full = width(&lines[top]);
+    let Some((top, bottom)) = input_box(&lines) else { return Live::default() };
+    // 上沿写着标题时宽度不准，用下沿
+    let full = width(&lines[bottom]);
     let mut out = Live::default();
     let mut i = top;
     // 状态行下面可能挂着 `  ⎿  Tip: …` 提示（窄屏时折成好几行缩进的续行）：跳过它们找到状态行
@@ -482,7 +478,7 @@ pub fn dialog_with(capture: &str, cursor: char) -> Option<Dialog> {
     let is_num = numbered(sel_text).is_some();
     // 输入框（光标行上面紧挨着横线、下面几行内又是横线）不是选择框：重绘到一半被认成“别的界面”时，
     // 输入框里的推荐回复会被读成只有一项的选择框，弹出来又马上消失
-    let in_box = sel > 0 && is_rule(&lines[sel - 1]) && lines[sel + 1..].iter().take(21).find(|l| !l.trim().is_empty() && !l.starts_with(' ')).is_some_and(|l| is_rule(l));
+    let in_box = sel > 0 && is_top_rule(&lines[sel - 1]) && lines[sel + 1..].iter().take(21).find(|l| !l.trim().is_empty() && !l.starts_with(' ')).is_some_and(|l| is_rule(l));
     if in_box && !is_num {
         return None;
     }
@@ -634,6 +630,54 @@ mod tests {
         assert_eq!(suggestion(include_str!("testdata/bg-shell.txt")), None);
         assert_eq!(suggestion(include_str!("testdata/stream12.txt")), None);
         assert_eq!(suggestion(include_str!("testdata/model.txt")), None);
+    }
+
+    /// 后台有代理时状态栏下面列着每个代理（2.1.318，46 列，3 个后台代理）：还是输入框，不是“在等你选择”
+    #[test]
+    fn agents_panel_below_footer() {
+        let s = include_str!("testdata/agents-panel.txt");
+        assert_eq!(classify(s), Screen::Input { text: String::new(), busy: false });
+        let f = footer(s).unwrap();
+        assert_eq!((f.mode.as_deref(), f.background), (Some("bypassPermissions"), vec![(3, "shell".to_string())]));
+        // 代理再多也不算状态栏的行数
+        let many: String = (0..12).map(|i| format!("  ◯ general-purpose  Verify {i} · 3s\n")).collect();
+        let s = format!("{RULE}\n❯ \n{RULE}\n  ⏵⏵ bypass permissions on · 12 agents · ↓ to manage\n  ● main\n{many}");
+        assert!(matches!(classify(&s), Screen::Input { .. }));
+        assert_eq!(footer(&s).unwrap().background, vec![(12, "agent".to_string())]);
+    }
+
+    /// 输入框下面是什么都不影响认输入框（候选列表、以后版本新加的面板）
+    #[test]
+    fn lines_below_input_box() {
+        let menu: String = (0..30).map(|i| format!("  /cmd{i}    说明 {i}\n")).collect();
+        let s = format!("{RULE}\n❯ /\n{RULE}\n{menu}");
+        assert_eq!(classify(&s), Screen::Input { text: "/".into(), busy: false });
+        let s = format!("{RULE}\n❯ \n{RULE}\n新面板\n");
+        assert!(matches!(classify(&s), Screen::Input { .. }));
+    }
+
+    /// 额度用完、等自动继续：窄屏上状态栏有 5 行（2026-10-30 日志里记下的屏幕）
+    #[test]
+    fn limit_wait_footer() {
+        let s = format!("✻ Cooked for 4m 24s · done 1:19 AM\n{RULE}\n❯ \n{RULE}\n  ⚠ Usage limit reached · limit resets 2:20am · \n  clau.de/wrap-up\n    Continuing automatically at 2:20am · Esc to \n    cancel · /usage-credits to continue now\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n");
+        assert_eq!(classify(&s), Screen::Input { text: String::new(), busy: false });
+        assert_eq!(footer(&s).unwrap().mode.as_deref(), Some("bypassPermissions"));
+    }
+
+    /// 上沿写着会话标题（手机上只剩 ` 标题 ─`）：状态行、状态栏、推荐回复照样读得出来
+    #[test]
+    fn titled_top_rule() {
+        let s = include_str!("testdata/busy-tip.txt");
+        let top = s.lines().position(|l| l.contains("──────────")).unwrap();
+        let titled: Vec<String> = s.lines().enumerate().map(|(i, l)| if i == top { " 项目交接文档 ─".into() } else { l.to_string() }).collect();
+        let titled = titled.join("\n");
+        assert!(matches!(classify(&titled), Screen::Input { busy: true, .. }));
+        assert_eq!(live(&titled).activity.as_deref(), Some("Manifesting… (thought for 1s)"));
+        assert_eq!(footer(&titled).unwrap().background, vec![(1, "shell".to_string())]);
+        let s = format!("● 好了\n\n ttyd 项目交接 ─\n❯ \x1b[2mcommit this\x1b[0m\n{RULE}\n  ⏵⏵ auto mode on\n");
+        assert_eq!(suggestion(&s).as_deref(), Some("commit this"));
+        let s = format!("  ◐ high · /effort\n ttyd 项目交接 ─\n❯ \n{RULE}\n  ⏵⏵ auto mode on\n");
+        assert_eq!(footer(&s).unwrap().effort.as_deref(), Some("high"));
     }
 
     /// 实际抓到的屏幕（`capture-pane -p -e`，Claude Code 2.1.302）

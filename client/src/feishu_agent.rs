@@ -766,7 +766,7 @@ fn enqueue(app: &App, chat: &str, input: In) {
     });
 }
 
-/// 一批消息交给谁：话题 / 回复的卡片对应的会话 → 项目群的新话题开新会话 → 转过来的、写明了 `#项目` 的按 §11 定 →
+/// 一批消息交给谁：话题 / 回复的卡片对应的会话 → 项目群的新话题开新会话 → 转过来的按 §11 定 →
 /// 当前会话 → 在上次的地方开新会话 → 问。`origin`：转过来的来源；`group`：群里 @ 的（没有当前会话时按群定项目）。
 /// 返回是否交给了会话（`Ok(false)`：回了选择卡片或提示）
 #[allow(clippy::too_many_arguments)]
@@ -795,11 +795,10 @@ async fn route(app: &App, api: &Api, chat: &str, id: &str, thread: &[String], te
     }
     let cur = if proj.is_some() { None } else { current(app, chat) };
     if cmd.is_none() && found.is_none() {
-        let named = fr::marks(&text).project.is_some();
         let origin = origin.or_else(|| (group && cur.is_none()).then(|| Origin { chat: chat.into(), ..Default::default() }));
-        if origin.is_some() || named {
+        if let Some(origin) = origin {
             let t = Turn { chat, id, text, files, typing, operator, en };
-            return route_forward(app, api, t, origin, cur).await;
+            return route_forward(app, api, t, origin).await;
         }
     }
     match (cmd, found) {
@@ -867,33 +866,12 @@ struct Turn<'a> {
     en: bool,
 }
 
-/// 转过来的问题、写明了 `#项目` 的：按 [`fr::decide`] 定交给哪里（docs/FEISHU_AGENT.md §11）
-async fn route_forward(app: &App, api: &Api, mut t: Turn<'_>, origin: Option<Origin>, cur: Option<Current>) -> Result<bool, LocalError> {
+/// 转过来的问题：按 [`fr::decide`] 定交给哪里（docs/FEISHU_AGENT.md §11）
+async fn route_forward(app: &App, api: &Api, t: Turn<'_>, origin: Origin) -> Result<bool, LocalError> {
     let marks = fr::marks(&t.text);
-    let mut places: Option<Vec<(String, String)>> = None;
-    let mut explicit = None;
-    if let Some(name) = &marks.project {
-        let list = all_places(app, t.operator).await;
-        explicit = fr::find_place(name, &list).map(String::from);
-        places = Some(list);
-        match &explicit {
-            Some(_) => t.text = fr::strip_project(&t.text, name),
-            None => reply(api, t.id, &tr(t.en, &format!("没找到叫「{name}」的项目，选一个："), &format!("No project named “{name}”; pick one:"))).await,
-        }
-    }
-    // 不是转发的、写明的项目就是当前会话的：接着说
-    if let (None, Some(p), Some(c)) = (&origin, &explicit, &cur) {
-        if let Ok(v) = call(app, &c.dev, Rpc::Where { inst: c.inst.clone() }, t.operator).await {
-            if v["dir"].as_str().map(|d| format!("{}|{d}", c.dev)).as_deref() == Some(p.as_str()) {
-                call(app, &c.dev, Rpc::Say { inst: c.inst.clone(), text: t.text, msg: t.id.into(), files: t.files, typing: t.typing }, t.operator).await?;
-                return Ok(true);
-            }
-        }
-    }
-    let origin = origin.unwrap_or_default();
     let now = crate::util::system_ms();
     let mut habits: HashMap<String, fr::Habit> = synced(app, "agent_origins");
-    let mut pick = fr::decide(&origin, &habits, explicit.as_deref(), None, marks.agent.as_deref(), now);
+    let mut pick = fr::decide(&origin, &habits, None, marks.agent.as_deref(), now);
     if let Pick::Continue { dev, inst } = &pick {
         let ago = habits.values().filter(|h| h.open.as_ref().is_some_and(|(_, i)| i == inst)).map(|h| now - h.at).min().unwrap_or(0);
         match call(app, dev, Rpc::Say { inst: inst.clone(), text: t.text.clone(), msg: t.id.into(), files: t.files.clone(), typing: t.typing.clone() }, t.operator).await {
@@ -911,7 +889,7 @@ async fn route_forward(app: &App, api: &Api, mut t: Turn<'_>, origin: Option<Ori
                 tracing::info!(error = ?e, "飞书：同一来源的会话接不上了，改成开新的");
                 fr::close(&mut habits, inst);
                 save_habits(app, &habits);
-                pick = fr::decide(&origin, &habits, explicit.as_deref(), None, marks.agent.as_deref(), now);
+                pick = fr::decide(&origin, &habits, None, marks.agent.as_deref(), now);
             }
         }
     }
@@ -924,13 +902,10 @@ async fn route_forward(app: &App, api: &Api, mut t: Turn<'_>, origin: Option<Ori
             }
         },
         Pick::Ask { .. } => {
-            let list = match places {
-                Some(l) => l,
-                None => all_places(app, t.operator).await,
-            };
+            let list = all_places(app, t.operator).await;
             let guessed = fr::guess(&t.text, &list).map(String::from);
             // 认不出来源、也猜不出来：跟以前一样在上次的地方开（新会话，不进当前会话），卡片上可以换项目
-            if guessed.is_none() && origin.keys().is_empty() && explicit.is_none() && marks.project.is_none() {
+            if guessed.is_none() && origin.keys().is_empty() {
                 if let Some((dev, dir, agent)) = last_place(app) {
                     if start_at(app, &t, &format!("{dev}|{dir}"), marks.agent.as_deref().unwrap_or(&agent), &origin, false).await.is_ok() {
                         return Ok(true);
@@ -1116,6 +1091,27 @@ pub(crate) async fn make_project_group(app: &App, api: &Api, dev: &str, dir: &st
         Err(e) => tracing::warn!(error = %e, "飞书：项目群的第一条没发出去"),
     }
     Ok(group)
+}
+
+/// 在飞书里开了会话：开着“自动建项目群”、这个项目还没有群时建一个（后台），私聊里说一声以后可以转到群里
+fn auto_group(app: &App, dir: String, agent: String) {
+    let rules = load_rules(&app.store);
+    if !rules.groups_on() || dir == inbox(app) {
+        return;
+    }
+    let Some(f) = load_feishu(&app.store) else { return };
+    let Some(operator) = f.open_id.clone().filter(|o| !o.is_empty()) else { return };
+    let app = app.clone();
+    tokio::spawn(async move {
+        let api = app.notify.api(&f);
+        let Some((_, true)) = app.notify.project_group(&app, &api, &operator, &dir, &agent, &rules).await else { return };
+        let en = rules.lang.starts_with("en");
+        let folder = folder_name(&dir);
+        let text = tr(en, &format!("给「{folder}」建了一个项目群。这个项目的问题以后直接转到群里就行：一条一个话题、一个会话，在话题里回复就是接着说。"), &format!("Created a project group for “{folder}”. Forward this project's issues there: each message becomes a topic with its own session; reply in the topic to continue."));
+        if let Err(e) = api.send_to_user(&operator, "text", &json!({ "text": text })).await {
+            tracing::debug!(error = %e, "飞书：建了项目群的提示没发出去");
+        }
+    });
 }
 
 /// 这个地方（`电脑|文件夹`）的项目群
@@ -1853,6 +1849,7 @@ async fn start_session(app: &App, agent: String, dir: String, text: String, anch
     }
     let since = crate::util::system_ms();
     let prompt = Some(text.clone()).filter(|t| files.is_empty() && !t.is_empty());
+    let place = (dir.clone(), agent.clone());
     let input = crate::instances::Input { launch: Some(agent), workdir: Some(dir), chat_ui: Some(true), full_access: Some(false), prompt: prompt.clone(), ..Default::default() };
     let r = crate::gateway::create_session(app, input, true).await;
     if let Some(k) = &key {
@@ -1860,6 +1857,7 @@ async fn start_session(app: &App, agent: String, dir: String, text: String, anch
     }
     let inst = r?.row.id;
     tracing::info!(inst = %inst, "飞书：开了一个会话");
+    auto_group(app, place.0, place.1);
     let (root, thread) = match anchor {
         Anchor::Reply { m, th } => (m, th),
         Anchor::Chat { c } => (send_root(app, &inst, &c, &text).await?, false),
@@ -2649,6 +2647,12 @@ mod tests {
         assert!(done.content().get("header").is_none(), "回答卡片没有卡片头");
         assert!(done.text().contains("Claude · "), "页脚写着在跟哪个会话说");
         println!("2. 第一轮 ok（{model}），模拟用户点过：{:?}", clicked.lock().unwrap());
+        // 自动建项目群（默认开）：在飞书里开了会话，这个项目就有了群，私聊里说一声
+        let auto = fake.wait("自动建项目群", 30, |r| r.method == "POST" && r.path.starts_with("/open-apis/im/v1/chats")).await;
+        assert_eq!(auto.json()["group_message_type"], "thread");
+        fake.wait("私聊说建了项目群", 30, |r| r.json()["receive_id"] == "ou_me" && r.text().contains("建了一个项目群")).await;
+        assert_eq!(project_group_of(&app, &place).as_deref(), Some("oc_proj"));
+        println!("2b. 自动建项目群 ok");
 
         // 3. 话题里回一条带图片的富文本：下载图片交给 AI，新开一张流式卡片
         let before = fake.reqs().len();

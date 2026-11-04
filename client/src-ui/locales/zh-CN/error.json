@@ -230,6 +230,7 @@
   "CHAT_UNAVAILABLE": "这个终端没有开启对话界面",
   "CHAT_NOT_RUNNING": "Claude Code 没在运行",
   "CHAT_BUSY": "Claude Code 正在等你做选择，请先完成",
+  "CHAT_SCREEN_OTHER": "终端里开着一个这里读不出来的界面，先去终端处理，或者关掉它再发",
   "CHAT_STALE": "这一项已经处理过了",
   "CHAT_SCREEN_CHANGED": "Claude Code 的界面已经变了，请再试一次",
   "CHAT_CLAUDE_RUNNING": "Claude Code 还在运行",

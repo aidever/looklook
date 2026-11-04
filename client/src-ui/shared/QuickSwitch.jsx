@@ -8,12 +8,12 @@ import { useTranslation } from 'react-i18next';
 
 import { useSessionUi } from '../pages/Sessions.jsx';
 import { terminalDevice } from './api.js';
-import { LaunchIcon } from './brands.jsx';
+import { LaunchIcon, SessionIcon } from './brands.jsx';
 import { deviceName, useDevices } from './devices.jsx';
 import { errorText } from './i18n.js';
 import { isMod, keyLabel } from './hotkeys.js';
 import { useRouter } from './router.jsx';
-import { projectPath, sessionDir, sessionLaunch, sessionState, sessionTitle, useSessions } from './sessions.jsx';
+import { projectPath, sessionDir, sessionState, sessionTitle, useSessions } from './sessions.jsx';
 import { useToast } from './ui.jsx';
 import { imeComposing } from './ime.js';
 
@@ -89,13 +89,13 @@ export default function QuickSwitch() {
     const out = [];
     const dev = (id) => (devices.multi ? deviceName(t, devices.byId(id)) : '');
     // 会话：开着的标签在前，等你处理的、正在干活的其次
-    const order = (i) => (s.tabs.includes(i.id) ? 0 : sessionState(i) === 'attn' ? 1 : sessionState(i) === 'working' ? 2 : 3);
+    const order = (i) => (s.tabs.includes(i.id) ? 0 : sessionState(i) === 'attn' ? 1 : ['working', 'background'].includes(sessionState(i)) ? 2 : 3);
     for (const i of [...s.items].sort((a, b) => order(a) - order(b))) {
       const title = sessionTitle(i);
       const d = devices.multi ? dev(terminalDevice(i.id)) : '';
       const sub = [d, sessionDir(i)].filter(Boolean).join(' · ');
       const sc = score(words, title, `${sub} ${i.launch} ${i.name ?? ''}`);
-      if (sc) out.push({ key: `s:${i.id}`, group: 'sessions', sc: sc + (order(i) === 0 ? 0.5 : 0), icon: <LaunchIcon launch={sessionLaunch(i)} size={16} />, title, sub, state: sessionState(i), run: () => ui.openSession(i.id) });
+      if (sc) out.push({ key: `s:${i.id}`, group: 'sessions', sc: sc + (order(i) === 0 ? 0.5 : 0), icon: <SessionIcon inst={i} size={16} />, title, sub, state: sessionState(i), run: () => ui.openSession(i.id) });
     }
     for (const p of s.projects) {
       const sub = [dev(p.device), p.container ? `${p.container.name}:${p.container.dir}` : p.workdir].filter(Boolean).join(' · ');

@@ -1780,6 +1780,41 @@ function AutoIn({ at }) {
 }
 
 /** 额度用完、正在等重置后自动继续：输入框上面一张卡片，可以取消 */
+/** 终端里开着这里读不出来的界面：只提示，不锁输入框（认不出来不等于要用户处理，Claude Code 改版、新加的面板都会这样） */
+function OtherScreen({ id, onTab }) {
+  const { t } = useT();
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  const close = async () => {
+    setBusy(true);
+    try {
+      await api.post(`/instances/${id}/chat/dialog`, {});
+    } catch (e) {
+      if (e.code !== 'CHAT_STALE') toast(errorText(t, e), 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="chat-limit is-stopped" role="status">
+      <span className="chat-limit-head">
+        <SquareTerminal size={15} aria-hidden="true" />
+        {t('chat.other_screen')}
+      </span>
+      <div className="chat-acts">
+        {onTab && (
+          <Button variant="ghost" onClick={() => onTab('term')}>
+            {t('chat.other_screen_open')}
+          </Button>
+        )}
+        <Button variant="secondary" onClick={close} busy={busy}>
+          {t('chat.dialog_close')}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function LimitWait({ id, waiting }) {
   const { t } = useT();
   const toast = useToast();
@@ -2602,15 +2637,27 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
     setText('');
     hist.current = -1;
     if (body && agentId !== 'claude') rememberInput(body);
+    // 空闲时发的一句：马上在对话里显示出来（见 useSentEcho）。运行中发的是排队 / 插话，下面“排队中”里已经有了；
+    // 斜杠命令不一定成为对话里的一句话
+    const echo = !now && !later && phase !== 'running' && phase !== 'approval' && !body.startsWith('/');
+    const shown = files.filter((f) => f.path);
+    if (echo) window.dispatchEvent(new CustomEvent(`ll-chat-sent:${id}`, { detail: { text: body, images: shown.map((f) => f.url) } }));
     try {
       const r = await api.post(`/instances/${id}/chat/input`, now && canNow ? { text: body, images, now: true } : later && canLater ? { text: body, images, later: true } : { text: body, images });
       inflight.current = '';
       writeDraft(id, latest.current);
-      files.forEach((f) => URL.revokeObjectURL(f.url));
+      // 先显示出来的那句还在用小图：晚点再释放
+      const urls = files.map((f) => f.url);
+      if (echo && urls.length) setTimeout(() => urls.forEach((u) => URL.revokeObjectURL(u)), ECHO_MAX_MS + 1000);
+      else urls.forEach((u) => URL.revokeObjectURL(u));
       setFiles([]);
-      if (r?.delivered === false) toast(t('chat.not_delivered'), 'error');
+      if (r?.delivered === false) {
+        if (echo) window.dispatchEvent(new CustomEvent(`ll-chat-sent:${id}`, { detail: null }));
+        toast(t('chat.not_delivered'), 'error');
+      }
     } catch (e) {
       inflight.current = '';
+      if (echo) window.dispatchEvent(new CustomEvent(`ll-chat-sent:${id}`, { detail: null }));
       setText((cur) => cur || body);
       toast(errorText(t, e), 'error');
     } finally {
@@ -3152,6 +3199,59 @@ function SideToggle({ side, onSide }) {
     <button type="button" className="btn btn-plain btn-icon chat-side-toggle" onClick={() => onSide(side ? null : 'changes')} aria-pressed={Boolean(side)} aria-label={label} title={label}>
       <PanelRight size={17} />
     </button>
+  );
+}
+
+/** 先显示出来的那句最多留多久（一直没进记录：多半是没发成，错误另有提示） */
+const ECHO_MAX_MS = 120000;
+
+/**
+ * 刚发出去、记录里还没有的那句话。Codex 要等它把这一轮准备好（连 MCP 服务等）才把这句写进记录，
+ * 常常要十来秒，这段时间对话里什么都没有，像是没发出去。所以先显示出来，记录里有了新的一句就换成真的那条；
+ * 这一轮没写进记录就结束了（出错、被停）或者等太久也拿掉。输入框发送时发 `ll-chat-sent:{id}`（detail 为空是撤回）。
+ */
+function useSentEcho(id, items, phase) {
+  const [echo, setEcho] = useState(null);
+  const lastUser = useMemo(() => {
+    for (let i = items.length - 1; i >= 0; i -= 1) if (items[i].k === 'user') return items[i].key;
+    return null;
+  }, [items]);
+  const lastRef = useRef(lastUser);
+  lastRef.current = lastUser;
+  useEffect(() => {
+    const on = (e) => setEcho(e.detail ? { ...e.detail, after: lastRef.current, ran: false } : null);
+    window.addEventListener(`ll-chat-sent:${id}`, on);
+    return () => window.removeEventListener(`ll-chat-sent:${id}`, on);
+  }, [id]);
+  useEffect(() => {
+    if (!echo) return;
+    if (lastUser !== echo.after) setEcho(null);
+    else if (phase === 'running' && !echo.ran) setEcho({ ...echo, ran: true });
+    else if (echo.ran && phase !== 'running' && phase !== 'approval') setEcho(null);
+  }, [echo, lastUser, phase]);
+  useEffect(() => {
+    if (!echo) return undefined;
+    const timer = setTimeout(() => setEcho(null), ECHO_MAX_MS);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [echo?.after, echo?.text]);
+  return echo;
+}
+
+function SentEcho({ echo }) {
+  return (
+    <div className="chat-user chat-user-echo">
+      {echo.images.length > 0 && (
+        <div className="chat-user-imgs">
+          {echo.images.map((u) => (
+            <span key={u} className="chat-user-img">
+              <img src={u} alt="" />
+            </span>
+          ))}
+        </div>
+      )}
+      {echo.text && <div className="chat-bubble">{echo.text}</div>}
+    </div>
   );
 }
 
@@ -4250,6 +4350,7 @@ export default function ChatView({ id, launch, active, touch, offline = false, o
   // 草稿页发出的第一句：起来前先显示；发出去、记录里有了之后换成真的那条
   const firstRaw = useFirstSend(id);
   const first = firstRaw && !(firstRaw.state === 'sent' && items.some((x) => x.k === 'user')) ? firstRaw : null;
+  const echo = useSentEcho(id, items, chat.status?.phase ?? 'detached');
   // 状态还没取到（刚切过来、连不上）时按终端的启动类型，不能先显示成 Claude Code
   const agentId = status?.agent ?? (AGENT_NAMES[launch] ? launch : 'claude');
   const agentName = AGENT_NAMES[agentId] ?? AGENT_NAMES.claude;
@@ -4373,7 +4474,7 @@ export default function ChatView({ id, launch, active, touch, offline = false, o
           <div className="chat-list" ref={list} onScroll={onScroll} tabIndex={-1}>
             <div className="chat-items" ref={inner}>
               {chat.start > 0 && <p className="chat-event">{t('chat.older')}</p>}
-              {!items.length && status && phase !== 'detached' && !first && (
+              {!items.length && status && phase !== 'detached' && !first && !echo && (
                 <div className="chat-empty">
                   <span className="chat-empty-mark" aria-hidden="true">
                     {agentId === 'claude' ? <Asterisk size={40} /> : <LaunchIcon launch={agentId} size={40} mono />}
@@ -4393,6 +4494,7 @@ export default function ChatView({ id, launch, active, touch, offline = false, o
               )}
               <Rows id={id} items={items} live={live} trace attention={phase === 'approval'} />
               {first && <FirstSend id={id} first={first} onBack={onDraftBack} />}
+              {echo && !first && <SentEcho echo={echo} />}
               {phase === 'running' && <Live status={status} items={items} since={since} />}
               {/* 推荐的下一句放在对话最后：点一下填进输入框（电脑上也可以按 Tab） */}
               {phase === 'idle' && status?.suggestion && items.length > 0 && (
@@ -4443,6 +4545,7 @@ export default function ChatView({ id, launch, active, touch, offline = false, o
           {/* 第一句在等它起来：上面已经写着“正在启动”，这里不再说一遍 */}
           {phase === 'detached' && !first && <Detached id={id} status={status} />}
           {status?.limit?.waiting && phase !== 'tui' && <LimitWait id={id} waiting={status.limit.waiting} />}
+          {status?.other && phase !== 'tui' && phase !== 'detached' && <OtherScreen id={id} onTab={onTab} />}
           {agentId === 'claude' && phase === 'idle' && !status?.limit?.waiting && ACCOUNT_ERRORS.includes(status?.error) && <AccountFail id={id} error={status.error} />}
           {agentId === 'codex' && status != null && <CodexSetup id={id} phase={phase} onTab={onTab} />}
           {phase !== 'detached' && <AgentStrip id={id} items={items} live={live} bg={bg} onOpen={openAgent} />}

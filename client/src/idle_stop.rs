@@ -37,10 +37,12 @@ pub struct Idle {
     pub fg: Option<String>,
 }
 
-/// 在忙：对话界面在跑、等你确认；看进程认出来在忙（AI 在回复、普通终端有命令在跑）
+/// 在忙：对话界面在跑、等你确认、后台还有任务；看进程认出来在忙（AI 在回复、普通终端有命令在跑）
 fn busy(chat: &Chat, v: &View) -> bool {
-    let phase = chat.brief(&v.row.id).and_then(|b| b["phase"].as_str().map(String::from));
-    matches!(phase.as_deref(), Some("running" | "approval" | "tui")) || v.busy == Some(true)
+    let brief = chat.brief(&v.row.id);
+    let phase = brief.as_ref().and_then(|b| b["phase"].as_str());
+    let background = brief.as_ref().and_then(|b| b["background"].as_array()).is_some_and(|a| !a.is_empty());
+    matches!(phase, Some("running" | "approval" | "tui")) || background || v.busy == Some(true)
 }
 
 /// 在后台跑着的会话（tmux 会话还在），很久没动静的在前

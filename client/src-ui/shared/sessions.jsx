@@ -82,6 +82,16 @@ export const bySessionOrder = (a, b) => isActive(b) - isActive(a) || startedAt(b
 export const sessionTitle = (i) => i?.agent_title || i?.name || '';
 /** 图标用的类型：现在在跑的 AI 工具（普通终端里手动起的 claude、codex 也算，电脑端 session_probe.rs 认的），否则会话的类型 */
 export const sessionLaunch = (i) => i?.tool || i?.launch;
+/**
+ * 会话是怎么用这个 AI 工具的：'chat' 对话界面、'term' 在终端里跑（手动起的、没开对话界面的）、'web' DSH 网页版；
+ * 不是 AI 工具（普通终端、自定义命令）为 null。同一个工具两种用法图标一样，靠这个加角标区分。
+ */
+export function sessionMode(i) {
+  const l = sessionLaunch(i);
+  if (!i || !['claude', 'codex', 'opencode', 'dsh'].includes(l)) return null;
+  if (l === 'dsh' && i.launch === 'dsh' && !i.chat_ui) return 'web';
+  return ['claude', 'codex', 'dsh'].includes(i.launch) && i.chat_ui && l === i.launch ? 'chat' : 'term';
+}
 /** 用户自己起的名字（和 agent 的会话名不一样时作为次要信息显示）。 */
 export const customName = (i) => (i?.agent_title && i.name_custom && i.name !== i.agent_title ? i.name : null);
 /** 会话的目录：容器里的会话是容器里的目录。 */
@@ -117,12 +127,15 @@ export function isDraftProject(p, at) {
   return at.container ? p.container?.name === at.container.name && p.container?.dir === at.container.dir : !p.container && p.workdir === at.workdir;
 }
 
-/** 会话现在的状态：等你处理 / 正在干活 / 做完了（没看过）/ 出错停下（没看过）/ 运行中 / 后台运行中 / 已停止。 */
+/** 会话现在的状态：等你处理 / 正在干活 / 后台任务在跑 / 做完了（没看过）/ 出错停下（没看过）/ 运行中 / 后台运行中 / 已停止。 */
 export function sessionState(i) {
   if (i.running && i.chat?.board === 'attn') return 'attn';
   if (i.running && i.chat?.pending) return 'attn';
   if (i.running && i.chat?.phase === 'tui') return 'attn';
   if (i.running && i.chat?.phase === 'running') return 'working';
+  // 这一轮做完了，Claude Code 后台还有 shell、子代理在跑（做完会接着回来）：状态栏上的个数；
+  // 没开对话界面的看它自己报的状态（sessions/<pid>.json 的 shell，电脑端算成 busy）
+  if (i.running && (i.chat?.background?.length || (i.chat?.phase === 'idle' && i.busy))) return 'background';
   // 这一轮做完了、还没看过：完成蓝点，出错红点（打开看过就回到普通的运行中）
   if (i.running && i.chat?.board === 'ended') return i.chat.turn?.outcome === 'failed' ? 'failed' : 'done';
   // 没有对话界面的：AI 工具在回复、普通终端有命令在跑（电脑端看进程认出来的）

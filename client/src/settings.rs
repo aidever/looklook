@@ -14,7 +14,7 @@ pub const THEMES: &[&str] = &["tangerine", "lagoon", "sunset", "mint", "agent", 
 const DEFAULT_THEME: &str = "tangerine";
 /// 在电脑之间同步的设置项（docs/SETTINGS_SYNC.md §4.1）：值只以同步记录为准（settings_sync.rs），
 /// `kv.settings` 里也留一份，只是给降级到旧版本时读。其余字段和这台电脑的路径、环境有关，不同步。
-pub const SYNCED: &[&str] = &["theme", "font", "font_size", "default_full_access", "attach_days"];
+pub const SYNCED: &[&str] = &["theme", "font", "font_size", "default_full_access", "attach_days", "idle_stop_days"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]

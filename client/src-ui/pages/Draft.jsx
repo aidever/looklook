@@ -240,9 +240,12 @@ function DraftForm() {
   // 用户自己选过类型、全部权限：换项目、那台电脑的设置到了都不再改它
   const chosen = useRef(Boolean(want.launch));
   const fullChosen = useRef(false);
-  const setLaunch = (l) => {
+  // Claude Code、Codex 在终端里跑（不开对话界面）：类型菜单“在终端里运行”那组选的
+  const [termMode, setTermMode] = useState(Boolean(want.term));
+  const setLaunch = (l, term = false) => {
     chosen.current = true;
     setLaunchState(l);
+    setTermMode(term);
   };
   const [text, setText] = useState(() => want.text || readDrafts()[draftKey] || '');
   const [files, setFiles] = useState(() => (want.files ?? []).map((file, k) => ({ key: k, file, url: URL.createObjectURL(file) })));
@@ -311,7 +314,10 @@ function DraftForm() {
     setWorkdir(c ? '' : dir);
     const p = s.projects.find((x) => isDraftProject(x, { device: dev, workdir: c ? '' : dir, container: c }));
     if (p) {
-      if (!chosen.current) setLaunchState(initLaunch(p));
+      if (!chosen.current) {
+        setLaunchState(initLaunch(p));
+        setTermMode(false);
+      }
       setShell(p.shell ?? '');
       if (!fullChosen.current) setFullAccessState(fullAccessFor(p, status?.settings));
       setAutoStart(Boolean(p.auto_start));
@@ -329,7 +335,10 @@ function DraftForm() {
   const devObj = devices.multi ? devices.byId(device) : null;
   const offline = devices.multi && !devObj?.online;
   // 有对话界面的（Claude Code、Codex）：第一句连同图片等对话起来了再发；其他的交给电脑在启动时带上，没法带图片
-  const willChat = CHAT_LAUNCHES.includes(launch) && !container && Boolean(status.capabilities?.persistent);
+  const canChat = CHAT_LAUNCHES.includes(launch) && !container && Boolean(status.capabilities?.persistent);
+  const willChat = canChat && !termMode;
+  // 类型按钮上写清楚开出来的是对话界面还是终端
+  const modeName = t(willChat ? 'sess.mode.chat' : 'sess.mode.term_short');
   // 没装的工具：点开始就先在后台装（npm），装好后自动接着开始
   const [job, setJob] = useState(null);
   const [mirror, setMirror] = useState('npmmirror');
@@ -401,6 +410,7 @@ function DraftForm() {
         workdir: container ? '' : workdir,
         container: container ? { name: container.name, dir: container.dir.trim() || '/' } : undefined,
         launch,
+        chat_ui: canChat ? willChat : undefined,
         command: launch === 'custom' ? body : '',
         prompt: prompt || undefined,
         shell: shell.trim(),
@@ -445,17 +455,24 @@ function DraftForm() {
   const newcomer = s.items.length < 3;
   // 以前开的网页版 DSH（每台电脑一个）：还能从这里打开它的网页；新开的 DSH 都是对话模式
   const dshWeb = s.items.find((i) => isDshWeb(i) && (!devices.multi || terminalDevice(i.id) === device));
+  const persistent = Boolean(status.capabilities?.persistent);
+  // 有对话界面的（容器里、不能常驻的电脑上没有）；其余都在终端里跑
+  const chatLaunches = container || !persistent ? [] : CHAT_LAUNCHES;
+  // 项目只记了类型、没记是对话界面还是终端：“上次用的”标在默认的那种上（有对话界面就是对话界面）
+  const typeHint = (l, term) =>
+    missing(l) ? t(container ? 'sess.container_missing' : 'draft.not_installed_hint', { tool: t(`launch.${l}.title`) }) : project?.launch === l && term !== chatLaunches.includes(l) ? t('draft.last_used') : undefined;
+  const typeItem = (l, term) => ({
+    icon: (p) => <LaunchIcon launch={l} {...p} />,
+    label: t(`launch.${l}.title`),
+    hint: typeHint(l, term),
+    checked: launch === l && (term ? !willChat : willChat),
+    onClick: () => setLaunch(l, term),
+  });
   const typeItems = [
-    { head: t('draft.group_chat') },
-    // DSH 的对话走这台电脑上的 dsh web，容器里用不了
-    ...DRAFT_LAUNCHES.filter((l) => !(container && l === 'dsh')).map((l) => ({
-      icon: (p) => <LaunchIcon launch={l} {...p} />,
-      label: t(`launch.${l}.title`),
-      hint: missing(l) ? t(container ? 'sess.container_missing' : 'draft.not_installed_hint', { tool: t(`launch.${l}.title`) }) : project?.launch === l ? t('draft.last_used') : undefined,
-      checked: launch === l,
-      onClick: () => setLaunch(l),
-    })),
-    { head: t('draft.group_now') },
+    chatLaunches.length > 0 && { head: t('draft.group_chat') },
+    ...chatLaunches.map((l) => typeItem(l, false)),
+    { head: t('draft.group_term') },
+    ...DRAFT_LAUNCHES.filter((l) => l !== 'dsh').map((l) => typeItem(l, true)),
     { icon: (p) => <LaunchIcon launch="shell" {...p} />, label: t('launch.shell.title'), hint: t('draft.shell_hint'), checked: false, onClick: () => openNow('shell') },
     { icon: (p) => <LaunchIcon launch="custom" {...p} />, label: t('draft.custom'), hint: t('draft.custom_hint'), checked: launch === 'custom', onClick: () => setLaunch('custom') },
     !container && dshWeb && { icon: (p) => <LaunchIcon launch="dsh" {...p} />, label: t('draft.dsh_web'), hint: t('draft.dsh_open'), checked: false, onClick: () => openNow('dsh-web') },
@@ -627,7 +644,7 @@ function DraftForm() {
               sheet
               className={`draft-chip draft-type draft-type-${launch} ${missing(launch) ? 'warn' : ''}`}
               icon={(p) => <LaunchIcon launch={launch} {...p} />}
-              text={missing(launch) ? `${toolName} · ${t('sess.not_installed')}` : toolName}
+              text={missing(launch) ? `${toolName} · ${t('sess.not_installed')}` : launch === 'custom' ? toolName : `${toolName} · ${modeName}`}
               label={t('draft.pick_type')}
               items={typeItems}
             />

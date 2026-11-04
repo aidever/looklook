@@ -10,8 +10,8 @@ import { useTranslation } from 'react-i18next';
 
 import { useStatus } from '../App.jsx';
 import { deviceApi, rememberTerminals, terminalDevice } from '../shared/api.js';
-import { isDshWeb } from '../shared/chat.js';
-import { DeviceAvatar, deviceColor, DeviceTag, LaunchIcon } from '../shared/brands.jsx';
+import { CHAT_LAUNCHES, isDshWeb } from '../shared/chat.js';
+import { DeviceAvatar, deviceColor, DeviceTag, LaunchIcon, SessionIcon } from '../shared/brands.jsx';
 import { deviceName, osLabel, RenameDeviceDialog, useDevices } from '../shared/devices.jsx';
 import { errorText } from '../shared/i18n.js';
 import { linkFailure, linkLabel, linkState, useLinks } from '../shared/paths.jsx';
@@ -19,7 +19,7 @@ import { isTouch } from '../shared/KeyBar.jsx';
 import PopMenu from '../shared/PopMenu.jsx';
 import { Link, useRouter } from '../shared/router.jsx';
 import { IdleCleanupDialog } from '../shared/IdleCleanup.jsx';
-import { baseName, customName, groupProjects, isActive as isLive, isDraftProject, lastUsed, projectEntries, projectPath, sessionDir, sessionLaunch, sessionState, sessionTitle, startedAt, useSessions } from '../shared/sessions.jsx';
+import { baseName, customName, groupProjects, isActive as isLive, isDraftProject, lastUsed, projectEntries, projectPath, sessionDir, sessionState, sessionTitle, startedAt, useSessions } from '../shared/sessions.jsx';
 import { isMod, keyLabel } from '../shared/hotkeys.js';
 import { ErrorNote, Spinner, useToast } from '../shared/ui.jsx';
 import { AddProjectDialog } from './AddProject.jsx';
@@ -298,7 +298,7 @@ function SessionRow({ inst, current, attn, devTag = false }) {
   return (
     <div className={`srow ${attn ? 'srow-attn' : ''} ${current ? 'current' : ''}`}>
       <button type="button" className="srow-main" {...press} disabled={a.busy || !a.allowed} aria-current={current ? 'page' : undefined} title={tip}>
-        <LaunchIcon launch={sessionLaunch(inst)} size={16} className="srow-icon" />
+        <SessionIcon inst={inst} size={16} className="srow-icon" />
         <span className="srow-text">
           <span className="ellipsis">{title}</span>
           {attn && (
@@ -436,6 +436,21 @@ function DeviceDots({ members }) {
  * 侧栏里的项目。`x` 是合成后的（见 SessionList）：多台电脑上的同一个仓库时 `x.merged`，
  * 标出是哪几台；+ 和菜单用 `p`（在线的里面最近用过的那台），新会话的草稿里能再换。
  */
+/**
+ * 项目菜单里“直接新建”的几项。写明开出来的是对话界面还是终端：Claude Code、Codex 在能常驻的电脑上默认开对话界面，
+ * 容器里、OpenCode 都是终端。
+ */
+export function quickLaunchItems(t, p, status, allowed, ui) {
+  const chat = !p.container && Boolean(status.capabilities?.persistent);
+  return QUICK_LAUNCHES.map((l) => ({
+    icon: (x) => <LaunchIcon launch={l} {...x} />,
+    label: t(`launch.${l}.title`),
+    hint: l === 'shell' ? undefined : t(chat && CHAT_LAUNCHES.includes(l) ? 'sess.mode.chat' : 'sess.mode.term_short'),
+    onClick: () => ui.quickCreate(p, l),
+    disabled: !allowed,
+  }));
+}
+
 function ProjectRow({ p, x, open, onToggle, showDevice }) {
   const { t } = useTranslation();
   const { status } = useStatus();
@@ -451,7 +466,8 @@ function ProjectRow({ p, x, open, onToggle, showDevice }) {
   const pinned = members.some((m) => m.pinned);
   const allowed = status.account.allowed && !p.offline;
   const menu = [
-    ...QUICK_LAUNCHES.map((l) => ({ icon: () => <LaunchIcon launch={l} size={16} />, label: t('sess.new_type', { type: t(`launch.${l}.title`) }), onClick: () => ui.quickCreate(p, l), disabled: !allowed })),
+    { head: t('sess.new') },
+    ...quickLaunchItems(t, p, status, allowed, ui),
     'sep',
     !p.container && { icon: ListTree, label: t('sess.open_project'), onClick: () => ui.openProject(p) },
     !p.container && { icon: pinned ? PinOff : Pin, label: t(pinned ? 'sess.unpin' : 'sess.pin'), onClick: () => members.filter((m) => !m.offline).forEach((m) => s.pinProject(m.device, m.workdir, !pinned)) },
@@ -477,10 +493,10 @@ function ProjectRow({ p, x, open, onToggle, showDevice }) {
       </button>
       {!p.offline && (
         <span className="prow-acts">
-          <button type="button" className="btn btn-plain btn-icon" onClick={() => ui.draftIn(p)} disabled={!allowed} aria-label={t('draft.new_in', { name: p.name })} title={t('sess.new')}>
+          <button type="button" className="btn btn-plain btn-icon" onClick={() => ui.draftIn(p)} disabled={!allowed} aria-label={t('draft.new_in', { name: p.name })} title={t('sess.new_plus')}>
             <Plus size={15} />
           </button>
-          <PopMenu items={menu} className="btn btn-plain btn-icon" label={t('sess.project_menu')} />
+          <PopMenu items={menu} hover className="btn btn-plain btn-icon" label={t('sess.project_menu')} />
         </span>
       )}
     </div>
@@ -1136,7 +1152,7 @@ export function SessionStage({ activeId }) {
             missing={missing(id)}
             offline={s.offline(id)}
             active={id === activeId}
-            lead={inst && <LaunchIcon launch={sessionLaunch(inst)} size={16} />}
+            lead={inst && <SessionIcon inst={inst} size={16} />}
             sub={<SessionLead inst={inst} />}
             named={!opensInPage()}
             menu={inst && <SessionMenu inst={inst} />}
@@ -1304,7 +1320,7 @@ export function SessionTabs({ activeId }) {
                       }}
                       title={tip(inst)}
                     >
-                      <LaunchIcon launch={sessionLaunch(inst)} size={15} />
+                      <SessionIcon inst={inst} size={15} />
                       <span className="stabs-row-text">
                         <span className="ellipsis">{inst ? sessionTitle(inst) : id}</span>
                         {inst && <SessionLead inst={inst} />}
@@ -1374,7 +1390,7 @@ function SessionTab({ id, index, active, title, dragging, onDragStart, onDragEnd
       }}
     >
       <button type="button" role="tab" aria-selected={active} className="stab-main" {...press} title={title}>
-        <LaunchIcon launch={sessionLaunch(inst)} size={14} />
+        <SessionIcon inst={inst} size={14} />
         <span className="ellipsis">{inst ? sessionTitle(inst) : '…'}</span>
         <TabState inst={inst} />
       </button>

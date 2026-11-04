@@ -127,17 +127,17 @@ function IdleCard({ value, onChange }) {
   const [open, setOpen] = useState(false);
   return (
     <Card title={t('idle.card')}>
-      <Row label={t('idle.auto_label')} hint={t('idle.auto_hint')} stack>
+      <Row label={<SyncLabel text={t('idle.auto_label')} />} hint={t('idle.auto_hint')} stack>
         <Seg
           value={Number(value)}
           label={t('idle.auto_label')}
           onChange={onChange}
-          options={[0, 1, 3, 7, 14, 30].map((d) => [d, d ? t('idle.n_days', { n: d }) : t('idle.never')])}
+          options={[0, 1, 3, 7, 14, 30].map((d) => [d, d ? t('idle.n_days', { count: d }) : t('idle.never')])}
         />
       </Row>
       <Row label={t('idle.now_label')} hint={t('idle.now_hint')}>
         <Button variant="ghost" icon={Eraser} onClick={() => setOpen(true)}>
-          {t('idle.menu')}
+          {t('idle.pick')}
         </Button>
       </Row>
       {open && <IdleCleanupDialog onClose={() => setOpen(false)} />}

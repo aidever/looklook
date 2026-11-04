@@ -88,15 +88,23 @@ pub struct Rules {
     pub agent_groups: bool,
     /// 群里 @ 的回答直接发在群里（群里的人都看得到）。默认关：回答、选项目、审批都发到私聊，群里只加一个表情
     pub agent_group_public: bool,
-    /// 每个项目一个群：这个项目的会话的通知发到它的群里，一个会话一个话题（没有就建，要“创建群”权限）
-    pub project_groups: bool,
+    /// 飞书机器人自动建项目群：在飞书里开会话的项目、有通知的项目，没有群就建一个（要“创建群”权限）；
+    /// 这个项目的会话的通知发到它的群里，一个会话一个话题。默认开（2026-11-03 从“每个项目一个群”改来，旧的 `project_groups` 不认了）
+    pub auto_groups: bool,
     /// 看看开着（在前台）时不发外部通知，改成看看里的提醒。在飞书里对话的会话照常发
     pub fg_quiet: bool,
 }
 
 impl Default for Rules {
     fn default() -> Self {
-        Self { done: true, failed: true, actions: true, content: true, muted: vec![], lang: "zh-CN".into(), quiet: None, done_batch: 0, stall_min: 20, agent: false, agent_direct: false, agent_groups: false, agent_group_public: false, project_groups: false, fg_quiet: true }
+        Self { done: true, failed: true, actions: true, content: true, muted: vec![], lang: "zh-CN".into(), quiet: None, done_batch: 0, stall_min: 20, agent: false, agent_direct: false, agent_groups: false, agent_group_public: false, auto_groups: true, fg_quiet: true }
+    }
+}
+
+impl Rules {
+    /// 自动建项目群、通知发到项目群：要开着飞书机器人（在飞书里处理、和 AI 对话）
+    pub fn groups_on(&self) -> bool {
+        self.auto_groups && self.agent && self.actions
     }
 }
 
@@ -372,6 +380,8 @@ pub struct Notifier {
     topics: Mutex<HashMap<String, String>>,
     /// 项目群没建成的项目（`电脑|文件夹`）→ 什么时候：半小时内不再试
     group_failed: Mutex<HashMap<String, Instant>>,
+    /// 正在建项目群的地方
+    group_making: Mutex<std::collections::HashSet<String>>,
 }
 
 /// 通知发到哪
@@ -707,36 +717,50 @@ impl Notifier {
         self.remember(Sent { msg, inst: id.into(), key: Some(key.into()), nonce: n, busy: false, info });
     }
 
-    /// 一个会话的通知发到哪：在飞书里对话过的回复到那里；开了“每个项目一个群”时发到项目群里这个会话的话题（没有群就建）；其它发私聊
+    /// 一个会话的通知发到哪：在飞书里对话过的回复到那里；开了飞书机器人和“自动建项目群”时发到项目群里这个会话的话题（没有群就建）；其它发私聊
     async fn target(&self, app: &App, out: &Out, inst: &str, anchor: Option<String>, rules: &Rules) -> Target {
         if let Some(a) = anchor {
             return Target::Reply(a, false);
         }
-        let Some((api, open_id)) = out.feishu.as_ref().filter(|_| rules.project_groups && rules.actions) else { return Target::Dm };
+        let Some((api, open_id)) = out.feishu.as_ref().filter(|_| rules.groups_on()) else { return Target::Dm };
         if let Some(m) = lock(&self.topics).get(inst).cloned() {
             return Target::Reply(m, true);
         }
         let Ok(Some(row)) = app.store.instance(inst) else { return Target::Dm };
+        match self.project_group(app, api, open_id, &row.workdir, &row.launch, rules).await {
+            Some((chat, _)) => Target::Topic { chat, inst: inst.into() },
+            None => Target::Dm,
+        }
+    }
+
+    /// 这台电脑上 `workdir` 的项目群，没有就建（建不成时半小时内不再试）。返回 (群, 是不是刚建的)
+    pub(crate) async fn project_group(&self, app: &App, api: &Api, open_id: &str, workdir: &str, launch: &str, rules: &Rules) -> Option<(String, bool)> {
         let own = app.account.session().map(|s| s.device_id).unwrap_or_default();
-        let place = format!("{own}|{}", row.workdir);
+        let place = format!("{own}|{workdir}");
         if let Some(chat) = crate::feishu_agent::project_group_of(app, &place) {
-            return Target::Topic { chat, inst: inst.into() };
+            return Some((chat, false));
         }
         if lock(&self.group_failed).get(&place).is_some_and(|t| t.elapsed() < Duration::from_secs(1800)) {
-            return Target::Dm;
+            return None;
+        }
+        // 同时来了两件事（开会话、发通知）：只建一个
+        if !lock(&self.group_making).insert(place.clone()) {
+            return None;
         }
         let en = rules.lang.starts_with("en");
-        let agent = if matches!(row.launch.as_str(), "claude" | "codex") { row.launch.as_str() } else { "claude" };
-        let title = format!("{} · {}", tr(en, "看看", "LookLook"), std::path::Path::new(&row.workdir).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| row.workdir.clone()));
-        match crate::feishu_agent::make_project_group(app, api, &own, &row.workdir, agent, &title, open_id, en).await {
-            Ok(chat) => Target::Topic { chat, inst: inst.into() },
+        let agent = if matches!(launch, "claude" | "codex") { launch } else { "claude" };
+        let title = format!("{} · {}", tr(en, "看看", "LookLook"), std::path::Path::new(workdir).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| workdir.into()));
+        let r = crate::feishu_agent::make_project_group(app, api, &own, workdir, agent, &title, open_id, en).await;
+        lock(&self.group_making).remove(&place);
+        match r {
+            Ok(chat) => Some((chat, true)),
             Err(e) => {
-                tracing::warn!(error = %e, place, "飞书：项目群没建成，通知先发私聊");
+                tracing::warn!(error = %e, place, "飞书：项目群没建成，先发私聊");
                 if feishu::code_of(&e).is_some_and(feishu::is_scope_error) {
                     crate::feishu_agent::grant(app, api, "group", &[]).await;
                 }
                 lock(&self.group_failed).insert(place, Instant::now());
-                Target::Dm
+                None
             }
         }
     }
@@ -1448,7 +1472,7 @@ mod tests {
         assert_eq!(r.lang, "zh-CN");
         // 旧版电脑存的规则没有这几项：用默认（不勿扰、逐条发、20 分钟卡住提醒）
         assert_eq!((r.quiet, r.done_batch, r.stall_min), (None, 0, 20));
-        assert!(r.fg_quiet && !r.project_groups && !r.agent_group_public);
+        assert!(r.fg_quiet && r.auto_groups && !r.agent_group_public);
     }
 
     #[test]

@@ -45,6 +45,8 @@ export const termPaste = (frame, data, opts) => call(frame, 'looklookPaste', 'lo
 export function termFocus(frame) {
   const w = frame.current?.contentWindow;
   if (!w) return;
+  // 弹出菜单开着（用户正在选）：不抢焦点。终端连不上反复重连时每次连上都会来聚焦，会把菜单关掉
+  if (document.querySelector('.menu-pop-list')) return;
   // 先把焦点放到 iframe 元素上：跨源（本机直连）时只调 contentWindow.focus() 有的浏览器不移动焦点
   frame.current.focus({ preventScroll: true });
   w.focus();

@@ -360,6 +360,44 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: 0; paddin
 @media (prefers-reduced-motion: reduce) { .toast { animation: none; } }
 @keyframes rise { from { opacity: 0; transform: translateY(8px); } }
 
+/* ---------- 看看里的会话提醒（别的会话做完了 / 在等你 / 出错了） ----------
+   电脑上在右上角、会话标签和会话顶栏下面（不挡底部输入框和顶栏按钮）；手机上在顶栏下面。多条合成一张卡片，一个会话一行。 */
+.notices { position: fixed; top: 100px; right: 16px; z-index: 60; width: min(340px, calc(100vw - 32px)); pointer-events: none; }
+.notice-card {
+  pointer-events: auto; display: flex; flex-direction: column; overflow: hidden;
+  background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow-lg);
+  animation: notice-in .18s ease-out;
+}
+.notice-rows { display: flex; flex-direction: column; }
+.notice-rows-all { max-height: min(60vh, 420px); overflow-y: auto; }
+.notice-row { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 6px 6px 6px 14px; cursor: pointer; user-select: none; }
+.notice-row + .notice-row { border-top: 1px solid var(--line); }
+.notice-row:hover, .notice-row:focus-visible { background: var(--panel-2); outline: none; }
+.notice-icon { flex: none; }
+.notice-done .notice-icon { color: var(--ok); }
+.notice-failed .notice-icon { color: var(--danger); }
+.notice-attn .notice-icon { color: var(--warn); }
+.notice-text { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 6px; font-size: 14px; }
+.notice-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.notice-state { flex: none; color: var(--muted); }
+.notice-failed .notice-state { color: var(--danger); }
+.notice-attn .notice-state { color: var(--warn); }
+.notice-x { flex: none; display: grid; place-items: center; width: 30px; height: 30px; border: 0; border-radius: 8px; background: none; color: var(--muted); cursor: pointer; }
+.notice-x:hover { color: var(--text); background: var(--panel-2); }
+.notice-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 6px; border-top: 1px solid var(--line); }
+.notice-link { border: 0; background: none; color: var(--muted); font: inherit; font-size: 13px; padding: 8px; border-radius: 8px; cursor: pointer; }
+.notice-link:hover { color: var(--text); background: var(--panel-2); }
+@keyframes notice-in { from { opacity: 0; transform: translateX(12px); } }
+@media (max-width: 899px) {
+  /* 顶栏（约 52–60px）下面，左右留 12px */
+  .notices { top: calc(64px + env(safe-area-inset-top, 0px)); right: 12px; width: calc(100vw - 24px); }
+  .notice-card { animation-name: notice-drop; touch-action: none; }
+  .notice-rows-all { touch-action: pan-y; }
+  .notice-row { min-height: 44px; }
+}
+@keyframes notice-drop { from { opacity: 0; transform: translateY(-8px); } }
+@media (prefers-reduced-motion: reduce) { .notice-card { animation: none; } }
+
 .modal-backdrop { position: fixed; inset: 0; z-index: 50; background: rgba(10, 12, 20, .45); display: flex; align-items: flex-end; justify-content: center; animation: fade .15s; }
 @media (min-width: 640px) { .modal-backdrop { align-items: center; } }
 .modal {
@@ -495,7 +533,9 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: 0; paddin
 .srow2-stack .srow2-ctl { flex: auto; flex-wrap: wrap; }
 @media (max-width: 560px) {
   .srow2:not(.srow2-stack) .srow2-ctl:has(.seg, input, select, .btn) { width: 100%; }
-  .srow2:has(.seg, input, select) { flex-direction: column; align-items: stretch; gap: 8px; }
+  /* 控件占满一行时，说明文字放上面，别被挤成一列一个词 */
+  .srow2:has(.seg, input, select, .btn) { flex-direction: column; align-items: stretch; gap: 8px; }
+  .srow2-ctl > .btn { max-width: 100%; }
 }
 /* 收起来的次要内容 */
 .more { margin-top: 12px; border-top: 1px solid var(--line); }
@@ -1389,9 +1429,26 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: 0; paddin
 .usage-max { position: absolute; top: -2px; left: 0; }
 .usage-bars { display: flex; align-items: flex-end; gap: 2px; height: 120px; padding-top: 18px; border-bottom: 1px solid var(--line); }
 .usage-bar-hit { flex: 1 1 0; min-width: 0; height: 100%; display: flex; align-items: flex-end; cursor: default; }
-.usage-bar { display: block; width: 100%; background: var(--brand); border-radius: 4px 4px 0 0; }
+.usage-bar { display: flex; flex-direction: column-reverse; width: 100%; border-radius: 4px 4px 0 0; overflow: hidden; }
+.usage-bar i { display: block; flex: 0 0 auto; flex-basis: 0; min-height: 1px; }
 .usage-bar-hit:hover .usage-bar { opacity: .75; }
 .usage-axis { display: flex; justify-content: space-between; margin-top: 4px; font-variant-numeric: tabular-nums; }
+.usage-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; margin: 4px 0 0; }
+.usage-delta.up { color: var(--warn); }
+.usage-delta.down { color: var(--ok); }
+.usage-legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 6px; }
+.usage-legend span, .usage-name { display: inline-flex; align-items: center; gap: 6px; }
+.usage-legend i, .usage-dot { display: inline-block; width: 10px; height: 10px; border-radius: 3px; }
+.usage-share { display: inline-flex; align-items: center; justify-content: flex-end; gap: 6px; }
+.usage-share-bar { display: inline-block; width: 56px; height: 6px; border-radius: 3px; background: var(--panel-2); overflow: hidden; }
+.usage-share-bar i { display: block; height: 100%; background: var(--brand); }
+.usage-proj { display: flex; align-items: baseline; gap: 8px; min-width: 0; max-width: 460px; }
+.usage-path { font-size: 12px; min-width: 0; }
+.usage-sess { display: flex; flex-direction: column; min-width: 0; max-width: 420px; }
+@media (max-width: 640px) {
+  .usage-col-share, .usage-col-extra, .usage-path { display: none; }
+  .usage-sess { max-width: 50vw; }
+}
 .start-adv .ellipsis { max-width: 12em; }
 
 /* ---------- SSH 主机 ---------- */
@@ -1983,8 +2040,9 @@ button.chat-task-head.chat-task-main { flex-direction: row; align-items: center;
 .sdot-paused { background: var(--warn); opacity: .6; }
 .sdot-stopped { box-shadow: inset 0 0 0 1.5px var(--muted); opacity: .55; }
 .sdot-attn { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); }
-.sdot-working { width: 10px; height: 10px; border: 2px solid var(--brand); border-right-color: transparent; animation: spin .9s linear infinite; }
-@media (prefers-reduced-motion: reduce) { .sdot-working { animation: none; } }
+.sdot-working, .sdot-background { width: 10px; height: 10px; border: 2px solid var(--brand); border-right-color: transparent; animation: spin .9s linear infinite; }
+.sdot-background { border-style: dotted; animation-duration: 2.4s; }
+@media (prefers-reduced-motion: reduce) { .sdot-working, .sdot-background { animation: none; } }
 .sdevice { display: flex; flex-direction: column; gap: 1px; margin-top: 6px; min-width: 0; }
 .dhead { display: flex; align-items: center; border-radius: 10px; }
 .dhead:hover { background: var(--panel-2); }
@@ -2039,10 +2097,10 @@ button.chat-task-head.chat-task-main { flex-direction: row; align-items: center;
 .draft-mark-claude { background: color-mix(in srgb, var(--claude) 14%, var(--panel)); color: var(--claude); }
 .draft-mark-codex { background: color-mix(in srgb, #0f766e 14%, var(--panel)); color: #0f766e; }
 .draft-mark-opencode { background: color-mix(in srgb, #7c3aed 14%, var(--panel)); color: #7c3aed; }
-.draft-recent { width: 100%; max-width: 560px; display: grid; gap: 6px; }
+.draft-recent { width: 100%; max-width: 720px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
 .draft-recent-label { padding: 0 4px; font-size: 12px; font-weight: 600; color: var(--muted); }
 .draft-conv {
-  display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 0 12px; border-radius: 12px;
+  display: flex; align-items: center; gap: 10px; min-width: 0; min-height: 40px; padding: 0 12px; border-radius: 12px;
   border: 1px solid var(--line); background: var(--panel); color: var(--text); font: 14px/1.2 var(--font); text-align: left; cursor: pointer;
 }
 .draft-conv:hover:not(:disabled) { border-color: var(--brand); }
@@ -2077,6 +2135,7 @@ button.chat-task-head.chat-task-main { flex-direction: row; align-items: center;
 .draft-chip:hover { border-color: color-mix(in srgb, var(--brand) 40%, var(--line)); }
 .draft-chip .ellipsis { max-width: 12em; }
 .draft-type { font-weight: 600; }
+.draft-type .ellipsis { max-width: 18em; }
 .draft-type-claude { border-color: color-mix(in srgb, var(--claude) 40%, var(--line)); background: color-mix(in srgb, var(--claude) 10%, var(--panel)); color: color-mix(in srgb, var(--claude) 70%, var(--text)); }
 .draft-type.warn { border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); background: color-mix(in srgb, var(--warn) 12%, var(--panel)); color: var(--text); }
 .draft-full[aria-pressed="true"] { border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); background: color-mix(in srgb, var(--ok) 12%, var(--panel)); color: color-mix(in srgb, var(--ok) 75%, var(--text)); }
@@ -3354,3 +3413,10 @@ button.link-badge { border: 0; font-family: inherit; cursor: pointer; }
 button.link-badge:hover { filter: brightness(1.15); }
 .link-pop { width: min(320px, calc(100vw - 24px)); }
 @media (max-width: 520px) { .link-pop { position: fixed; top: calc(52px + env(safe-area-inset-top, 0px)); left: 12px; right: 12px; width: auto; } }
+
+/* 会话图标：AI 工具在终端里跑（不是对话界面）时右下角一个终端小角标（shared/brands.jsx 的 SessionIcon） */
+.sess-icon { position: relative; flex: none; display: inline-flex; align-items: center; justify-content: center; line-height: 0; }
+.sess-icon-badge { position: absolute; right: -4px; bottom: -4px; display: flex; padding: 1px; border-radius: 4px; background: var(--panel); box-shadow: 0 0 0 1px var(--line); color: var(--text); line-height: 0; }
+.sess-icon-badge .lucide { display: block; }
+/* 刚发出去、还没进记录的那句（ChatView.jsx 的 SentEcho）：稍淡一点 */
+.chat-user-echo { opacity: .75; }

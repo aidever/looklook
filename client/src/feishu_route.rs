@@ -1,7 +1,7 @@
 //! 在飞书里把别人的问题交给 AI 时，交给哪个项目（docs/FEISHU_AGENT.md §11）：只有不联网的判断，收发在 feishu_agent.rs。
 //!
 //! - **来源**（[`Origin`]）：合并转发里说话的人、原来的群，或者机器人在的群；
-//! - **你写明的**（[`marks`]）：`#项目`、`@codex`；
+//! - **你写明的**（[`marks`]）：`@codex`、`用 claude`；
 //! - **来源的习惯**（[`Habit`]，同步项 `notify/agent_origins`）：绑定的项目、最近几次进了哪个项目、还没结束的会话；
 //! - **猜**（[`guess`]）：文字里提到了哪个项目文件夹的名字。
 
@@ -89,14 +89,11 @@ pub enum Pick {
     Ask { prefer: Option<String> },
 }
 
-/// 按顺序定：写明的项目 → 同一来源没结束的会话 → 绑定的项目 → 习惯 → 猜（只当建议，要你点）。
-/// `explicit`：`#项目` 认出来的地方；`guessed`：猜的地方；`agent`：写明的助手
-pub fn decide(origin: &Origin, habits: &HashMap<String, Habit>, explicit: Option<&str>, guessed: Option<&str>, agent: Option<&str>, now: i64) -> Pick {
+/// 按顺序定：同一来源没结束的会话 → 绑定的项目 → 习惯 → 猜（只当建议，要你点）。
+/// `guessed`：猜的地方；`agent`：写明的助手
+pub fn decide(origin: &Origin, habits: &HashMap<String, Habit>, guessed: Option<&str>, agent: Option<&str>, now: i64) -> Pick {
     let agent_of = |h: Option<&Habit>| agent.map(String::from).or_else(|| h.map(|h| h.agent.clone()).filter(|a| !a.is_empty())).unwrap_or_default();
     let mine: Vec<&Habit> = origin.keys().iter().filter_map(|k| habits.get(k)).collect();
-    if let Some(p) = explicit {
-        return Pick::Start { place: p.into(), agent: agent_of(mine.first().copied()) };
-    }
     // 写明了助手就不接旧会话（旧会话的助手可能不一样）
     if agent.is_none() {
         if let Some((dev, inst)) = mine.iter().filter(|h| now - h.at < OPEN_MS).find_map(|h| h.open.clone()) {
@@ -175,25 +172,16 @@ pub fn close(habits: &mut HashMap<String, Habit>, inst: &str) -> bool {
     changed
 }
 
-/// 你写明的：`#项目`（不含纯数字，`#123` 多半是问题编号）、`@codex` / `用 codex` 这类
+/// 你写明的：`@codex` / `用 codex` 这类
 #[derive(Debug, Default, PartialEq)]
 pub struct Marks {
-    pub project: Option<String>,
     pub agent: Option<String>,
 }
 
-/// 只看你自己写的行（转发的聊天记录是 `> ` 开头的引用，里面的 `#` 不算）
+/// 只看你自己写的行（转发的聊天记录是 `> ` 开头的引用，不算）
 pub fn marks(text: &str) -> Marks {
     let mut m = Marks::default();
     for line in text.lines().filter(|l| !l.trim_start().starts_with('>')) {
-        for w in line.split(|c: char| c.is_whitespace() || "，。,;；".contains(c)) {
-            if let Some(p) = w.strip_prefix('#').or_else(|| w.strip_prefix('＃')) {
-                let p = p.trim_end_matches(|c: char| !c.is_alphanumeric() && !"-_.".contains(c));
-                if m.project.is_none() && !p.is_empty() && !p.chars().all(|c| c.is_ascii_digit()) {
-                    m.project = Some(p.to_string());
-                }
-            }
-        }
         let l = line.to_lowercase();
         for (agent, words) in [("codex", ["@codex", "用codex", "用 codex"]), ("claude", ["@claude", "用claude", "用 claude"])] {
             if m.agent.is_none() && words.iter().any(|w| l.contains(w)) {
@@ -202,19 +190,6 @@ pub fn marks(text: &str) -> Marks {
         }
     }
     m
-}
-
-/// 去掉写明的 `#项目`（认出来了才去掉，没认出来留着给 AI 看）
-pub fn strip_project(text: &str, name: &str) -> String {
-    let out = text.replace(&format!("#{name}"), "").replace(&format!("＃{name}"), "");
-    out.trim().to_string()
-}
-
-/// 文件夹名：认 `#项目` 时不分大小写，完全一样的优先，其次是开头一样的
-pub fn find_place<'a>(name: &str, places: &'a [(String, String)]) -> Option<&'a str> {
-    let n = name.to_lowercase();
-    let folder = |v: &str| v.rsplit(['/', '\\']).next().unwrap_or(v).to_lowercase();
-    places.iter().find(|(_, v)| folder(v) == n).or_else(|| places.iter().find(|(_, v)| folder(v).starts_with(&n))).map(|(_, v)| v.as_str())
 }
 
 /// 猜：文字里提到了哪个项目文件夹的名字（整个名字算 2 分，名字里 4 个字以上的一段算 1 分）。只有一个最高分时才算
@@ -282,22 +257,15 @@ mod tests {
 
     #[test]
     fn marks_only_from_own_lines() {
-        assert_eq!(marks("修一下 #looklook").project.as_deref(), Some("looklook"));
-        assert_eq!(marks("> 张三：看下 #shop\n修一下").project, None);
-        assert_eq!(marks("修 #123 这个问题").project, None);
-        assert_eq!(marks("#shop-admin，看下").project.as_deref(), Some("shop-admin"));
+        assert_eq!(marks("> 张三：用 codex 吗\n修一下"), Marks::default());
         assert_eq!(marks("用 Codex 看下").agent.as_deref(), Some("codex"));
         assert_eq!(marks("@claude 修一下").agent.as_deref(), Some("claude"));
         assert_eq!(marks("修一下"), Marks::default());
-        assert_eq!(strip_project("#looklook 修一下", "looklook"), "修一下");
     }
 
     #[test]
-    fn find_and_guess() {
+    fn guess_place() {
         let p = places();
-        assert_eq!(find_place("LookLook", &p), Some("d1|/w/looklook"));
-        assert_eq!(find_place("shop", &p), Some("d1|/w/shop-admin"));
-        assert_eq!(find_place("nope", &p), None);
         assert_eq!(guess("shop-admin 的登录页打不开", &p), Some("d1|/w/shop-admin"));
         assert_eq!(guess("admin 后台登录不了", &p), Some("d1|/w/shop-admin"));
         // 两台电脑上都有 looklook：算一个
@@ -325,31 +293,30 @@ mod tests {
         let o = Origin { user: "ou_a".into(), ..Default::default() };
         let mut h = HashMap::new();
         let now = 10 * OPEN_MS;
-        assert_eq!(decide(&o, &h, None, Some("d1|/w/shop-admin"), None, now), Pick::Ask { prefer: Some("d1|/w/shop-admin".into()) });
+        assert_eq!(decide(&o, &h, Some("d1|/w/shop-admin"), None, now), Pick::Ask { prefer: Some("d1|/w/shop-admin".into()) });
         // 三次都进了 looklook：直接用
         for _ in 0..3 {
             record(&mut h, &o, "d1|/w/looklook", "claude", None, false, now - OPEN_MS * 2);
         }
-        assert_eq!(decide(&o, &h, None, None, None, now), Pick::Start { place: "d1|/w/looklook".into(), agent: "claude".into() });
+        assert_eq!(decide(&o, &h, None, None, now), Pick::Start { place: "d1|/w/looklook".into(), agent: "claude".into() });
         // 混着项目的不算习惯
         record(&mut h, &o, "d1|/w/shop-admin", "codex", None, false, now - OPEN_MS * 2);
-        assert_eq!(decide(&o, &h, None, None, None, now), Pick::Ask { prefer: None });
+        assert_eq!(decide(&o, &h, None, None, now), Pick::Ask { prefer: None });
         // 绑定的
         record(&mut h, &o, "d1|/w/shop-admin", "codex", None, true, now - OPEN_MS * 2);
-        assert_eq!(decide(&o, &h, None, None, None, now), Pick::Start { place: "d1|/w/shop-admin".into(), agent: "codex".into() });
+        assert_eq!(decide(&o, &h, None, None, now), Pick::Start { place: "d1|/w/shop-admin".into(), agent: "codex".into() });
         // 24 小时内的会话：接着说
         record(&mut h, &o, "d1|/w/shop-admin", "codex", Some(("d1", "i1")), false, now - 1000);
-        assert_eq!(decide(&o, &h, None, None, None, now), Pick::Continue { dev: "d1".into(), inst: "i1".into() });
-        // 写明的最优先；写明了助手不接旧会话
-        assert_eq!(decide(&o, &h, Some("d2|/home/me/looklook"), None, None, now), Pick::Start { place: "d2|/home/me/looklook".into(), agent: "codex".into() });
-        assert_eq!(decide(&o, &h, None, None, Some("claude"), now), Pick::Start { place: "d1|/w/shop-admin".into(), agent: "claude".into() });
+        assert_eq!(decide(&o, &h, None, None, now), Pick::Continue { dev: "d1".into(), inst: "i1".into() });
+        // 写明了助手不接旧会话
+        assert_eq!(decide(&o, &h, None, Some("claude"), now), Pick::Start { place: "d1|/w/shop-admin".into(), agent: "claude".into() });
         // 会话结束了：不再接
         assert!(close(&mut h, "i1"));
-        assert_eq!(decide(&o, &h, None, None, None, now), Pick::Start { place: "d1|/w/shop-admin".into(), agent: "codex".into() });
+        assert_eq!(decide(&o, &h, None, None, now), Pick::Start { place: "d1|/w/shop-admin".into(), agent: "codex".into() });
         // 换了项目：绑定解开
         unrecord(&mut h, &o, "d1|/w/shop-admin");
         assert!(h["u:ou_a"].bound.is_empty());
         // 认不出来源：只能问
-        assert_eq!(decide(&Origin::default(), &h, None, None, None, now), Pick::Ask { prefer: None });
+        assert_eq!(decide(&Origin::default(), &h, None, None, now), Pick::Ask { prefer: None });
     }
 }

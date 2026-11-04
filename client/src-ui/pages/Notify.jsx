@@ -1,20 +1,18 @@
-// 设置页“通知”分区（docs/TASK_BOARD.md §6.1、§6.5）：
-// - FeishuCard：没配时用飞书扫码一键建应用（权限、事件、回调、长连接都带上，扫码的人自动绑定，src/feishu/register.rs）；
-//   公司不让建、或者已有应用的，展开手动配置的向导（建应用 → 权限 → 填 App ID / Secret → 长连接和回调 → 发布 → 绑定）；
-//   配好后显示连接状态、绑定、测试，以及“扫码补全权限”；
-// - HooksCard：只通知的渠道（企业微信、钉钉、Server酱、PushPlus、Bark、ntfy），和飞书同时发，只带“打开”的链接；
-// - IntroCard：通知什么时候发、发到哪、现在配到哪一步了（点一下跳到那张卡片）；
-// - RulesCard：发哪些通知、看看开着时不发、能不能在飞书里处理、卡片里显示不显示内容、每个项目一个群、少打扰、静音的项目；
-// - AgentCard：飞书机器人（在飞书里和 AI 对话）：开关、怎么用、群里的隐私、机器人菜单。
+// AI 页“远程与通知”（docs/TASK_BOARD.md §6.1、§6.5，按 docs/DONT_MAKE_ME_THINK_2026-11.md 的规矩）：
+// - FeishuCard：没配时一个按钮“用飞书扫码创建机器人”，手动配置收起来；配好后一行状态 + “发一条测试” + ⋯（修改、补权限、解绑、断开）；
+// - AgentCard：飞书机器人（在飞书里和 AI 对话、自动建项目群、群里 @），用法和少用的选项收起来；
+// - RulesCard：什么时候通知；勿扰、合并、卡住提醒、静音项目收进“少打扰”；
+// - HooksCard：只通知的渠道（企业微信、钉钉、Server酱、PushPlus、Bark、ntfy），每行“发一条测试” + ⋯。
 // 配置经“设置同步”在用户自己的电脑之间传；连接状态是当前这台电脑的。
-import { CheckCircle2, ExternalLink } from 'lucide-react';
+import { CheckCircle2, ExternalLink, KeyRound, Link2Off, Pencil, Power, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { api } from '../shared/api.js';
 import { isTouch } from '../shared/KeyBar.jsx';
+import PopMenu from '../shared/PopMenu.jsx';
 import { useSessions } from '../shared/sessions.jsx';
-import { Button, Card, CopyButton, ErrorNote, Field, Note, PasswordInput, QrCode, Switch, useAction, useLoad } from '../shared/ui.jsx';
+import { Button, Card, CopyButton, ErrorNote, Field, More, Note, PasswordInput, QrCode, Row, Switch, useAction, useLoad } from '../shared/ui.jsx';
 
 const CONSOLE = {
   feishu: 'https://open.feishu.cn/app',
@@ -53,19 +51,11 @@ const KINDS = {
   ntfy: { secret: true, help: 'https://docs.ntfy.sh/' },
 };
 
-function Toggle({ r, k, title, hint, busy, save, disabled }) {
+function Toggle({ r, k, title, hint, busy, save, disabled, checked, onChange }) {
   return (
-    <div className="between" style={{ flexWrap: 'nowrap', gap: 12 }}>
-      <span>
-        <b>{title}</b>
-        {hint && (
-          <span className="small muted" style={{ display: 'block' }}>
-            {hint}
-          </span>
-        )}
-      </span>
-      <Switch checked={Boolean(r[k])} disabled={busy || disabled} onChange={(v) => save({ [k]: v })} label={title} />
-    </div>
+    <Row label={title} hint={hint}>
+      <Switch checked={checked ?? Boolean(r[k])} disabled={busy || disabled} onChange={onChange ?? ((v) => save({ [k]: v }))} label={title} />
+    </Row>
   );
 }
 
@@ -79,46 +69,6 @@ function useRules(data, reload) {
     if (await run(() => api.put('/notify/rules', { ...r, ...patch, lang }))) reload();
   };
   return { r, lang, save, busy, error };
-}
-
-const jump = (id) => document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-
-/** 最上面：通知什么时候发、发到哪，现在配到哪一步了 */
-function IntroCard({ data }) {
-  const { t } = useTranslation();
-  if (!data) return null;
-  const f = data.feishu;
-  const hooks = data.hooks?.length ?? 0;
-  const r = data.rules ?? {};
-  const rows = [
-    { id: 'nt-feishu', ok: Boolean(f?.bound), label: t('notify.intro_feishu'), state: f?.bound ? t('notify.intro_feishu_on') : f ? t('notify.intro_feishu_unbound') : t('notify.intro_off') },
-    { id: 'nt-hooks', ok: hooks > 0, label: t('notify.intro_hooks'), state: hooks > 0 ? t('notify.intro_hooks_n', { n: hooks }) : t('notify.intro_off') },
-  ];
-  if (f?.bound) rows.push({ id: 'nt-agent', ok: Boolean(r.agent && r.actions), label: t('notify.intro_agent'), state: r.agent && r.actions ? t('notify.intro_on') : t('notify.intro_off') });
-  return (
-    <Card title={t('notify.intro_title')}>
-      <div className="stack" style={{ gap: 10 }}>
-        <p className="small muted" style={{ margin: 0 }}>
-          {t('notify.intro_lead')}
-        </p>
-        <ul className="nt-intro">
-          <li>{t('notify.intro_what')}</li>
-          <li>{t('notify.intro_where')}</li>
-          <li>{t('notify.intro_fg')}</li>
-        </ul>
-        <div className="nt-intro-rows">
-          {rows.map((x) => (
-            <button key={x.id} type="button" className="nt-intro-row" onClick={() => jump(x.id)}>
-              <span className={`nt-dot ${x.ok ? 'ok' : ''}`} aria-hidden="true" />
-              <span className="grow">{x.label}</span>
-              <span className="small muted">{x.state}</span>
-            </button>
-          ))}
-        </div>
-        {!f && !hooks && <Note>{t('notify.intro_start')}</Note>}
-      </div>
-    </Card>
-  );
 }
 
 function Code({ text }) {
@@ -277,16 +227,19 @@ function ScanSetup({ data, reload, update = false }) {
       </div>
     );
   }
+  // 补权限：从 ⋯ 菜单开始，这里只显示结果
+  if (update) {
+    if (!failed && reg?.state !== 'done') return null;
+    return failed ? <Note kind="warn">{failed}</Note> : <Note kind="ok">{t('notify.scan_update_done')}</Note>;
+  }
   return (
     <div className="stack" style={{ gap: 8 }}>
       {failed && <Note kind="warn">{failed}</Note>}
-      {update && reg?.state === 'done' && <Note kind="ok">{t('notify.scan_update_done')}</Note>}
       <div className="nt-actions">
-        <Button variant={update ? 'ghost' : 'primary'} className={update ? 'btn-sm' : undefined} busy={busy} onClick={start}>
-          {t(update ? 'notify.scan_update' : 'notify.scan_start')}
+        <Button busy={busy} onClick={start}>
+          {t('notify.scan_start')}
         </Button>
       </div>
-      {update ? <span className="small muted">{t('notify.scan_update_hint')}</span> : null}
       <FeishuError error={error} />
     </div>
   );
@@ -321,6 +274,9 @@ export function FeishuCard({ data, reload }) {
   };
   const disconnect = async () => {
     if (await run(() => api.delete('/notify/feishu'))) reload();
+  };
+  const grant = async () => {
+    if (await run(() => api.post('/notify/feishu/register', { update: true }))) reload();
   };
 
   const steps = (
@@ -368,63 +324,59 @@ export function FeishuCard({ data, reload }) {
     </ol>
   );
 
-  const connection = f && (
-    <div className="stack" style={{ gap: 8 }}>
-      <div className="between" style={{ gap: 12 }}>
-        <span>
-          <span className={`nt-dot ${st.connected ? 'ok' : 'bad'}`} aria-hidden="true" />
-          {st.connected ? t('notify.connected') : t('notify.disconnected')}
-          <span className="small muted"> · {f.app_id}</span>
-        </span>
-        <span className="nt-actions">
-          <Button variant="ghost" className="btn-sm" onClick={() => setEditing(true)}>
-            {t('notify.edit')}
-          </Button>
-          <Button variant="ghost" className="btn-sm danger-text" busy={busy} onClick={disconnect}>
-            {t('notify.disconnect')}
-          </Button>
-        </span>
-      </div>
-      {st.error && <FeishuError error={{ code: 'NOTIFY_FEISHU', params: st.error }} />}
-      {!data.sync_enabled && <Note kind="warn">{t('notify.sync_off')}</Note>}
-      {editing && <CredsForm data={data} onSaved={saved} onCancel={() => setEditing(false)} />}
-      {f.bound && (
-        <div className="between" style={{ gap: 12 }}>
-          <span className="small">
-            {t('notify.bound')}
-            {f.callback_ok ? <span className="muted"> · {t('notify.callback_ok')}</span> : <span className="muted"> · {t('notify.callback_unknown')}</span>}
-          </span>
-          <span className="nt-actions">
-            <Button className="btn-sm" busy={busy} onClick={test}>
-              {t('notify.test')}
-            </Button>
-            <Button variant="ghost" className="btn-sm" disabled={busy} onClick={unbind}>
-              {t('notify.unbind')}
-            </Button>
-          </span>
-        </div>
-      )}
-      {f.bound && !f.callback_ok && <Note>{t(tested ? 'notify.test_sent' : 'notify.callback_pending')}</Note>}
-      {!editing && <ScanSetup data={data} reload={reload} update />}
-      <ErrorNote error={error && error.code !== 'NOTIFY_FEISHU' ? error : null} />
-      {error?.code === 'NOTIFY_FEISHU' && <FeishuError error={error} />}
-    </div>
-  );
+  // 没配：一个按钮，手动配置收起来
+  if (!f) {
+    return (
+      <Card id="nt-feishu" title={t('notify.feishu_title')} sub={t('notify.feishu_lead')}>
+        <ScanSetup data={data} reload={reload} />
+        <More summary={t('notify.manual')}>{steps}</More>
+      </Card>
+    );
+  }
 
+  const menu = [
+    { icon: Pencil, label: t('notify.edit_creds'), onClick: () => setEditing(true) },
+    f.bound && { icon: KeyRound, label: t('notify.scan_update'), hint: t('notify.scan_update_hint'), onClick: grant },
+    f.bound && { icon: Link2Off, label: t('notify.unbind'), onClick: unbind },
+    'sep',
+    { icon: Power, label: t('notify.disconnect'), onClick: disconnect, danger: true },
+  ];
+  const label = !st.connected ? t('notify.disconnected') : f.bound ? t('notify.connected') : t('notify.connected_unbound');
+  const hint = f.bound ? t('notify.bound_hint', { app: f.app_id }) : t('notify.unbound_hint', { app: f.app_id });
   return (
     <Card id="nt-feishu" title={t('notify.feishu_title')}>
-      <p className="small muted" style={{ marginTop: 0 }}>
-        {t('notify.feishu_lead')}
-      </p>
-      {connection}
-      {!f && <ScanSetup data={data} reload={reload} />}
-      {/* 手动配置：公司不让建个人应用、或者想用已有的应用；手动连上后还要发绑定码，所以没绑定时展开 */}
-      {(!f || !f.bound) && (
-        <details className="nt-manual" open={Boolean(f && !f.bound)}>
-          <summary className="small">{t('notify.manual')}</summary>
-          {steps}
-        </details>
-      )}
+      <Row
+        label={
+          <>
+            <span className={`nt-dot ${st.connected ? 'ok' : 'bad'}`} aria-hidden="true" />
+            {label}
+          </>
+        }
+        hint={hint}
+      >
+        {f.bound && st.connected && (
+          <Button variant="secondary" className="btn-sm" busy={busy} onClick={test}>
+            {t('notify.test')}
+          </Button>
+        )}
+        <PopMenu items={menu} label={t('action.more')} className="btn btn-plain btn-icon" />
+      </Row>
+      <div className="stack" style={{ gap: 8 }}>
+        {st.error && <FeishuError error={{ code: 'NOTIFY_FEISHU', params: st.error }} />}
+        {/* 一次只一条：连不上时只说连不上 */}
+        {f.bound && st.connected && !st.error && !f.callback_ok && <Note>{t(tested ? 'notify.test_sent' : 'notify.callback_pending')}</Note>}
+        {!data.sync_enabled && <Note kind="warn">{t('notify.sync_off')}</Note>}
+        {editing && <CredsForm data={data} onSaved={saved} onCancel={() => setEditing(false)} />}
+        <ScanSetup data={data} reload={reload} update />
+        <ErrorNote error={error && error.code !== 'NOTIFY_FEISHU' ? error : null} />
+        {error?.code === 'NOTIFY_FEISHU' && <FeishuError error={error} />}
+        {/* 手动连上了还没绑定：展开步骤，显示绑定码 */}
+        {!f.bound && (
+          <More summary={t('notify.manual_rest')} open>
+            {steps}
+          </More>
+        )}
+      </div>
     </Card>
   );
 }
@@ -518,30 +470,30 @@ function HookRow({ hook, onChanged }) {
       />
     );
   }
+  const menu = [
+    { icon: Pencil, label: t('notify.edit'), onClick: () => setEditing(true) },
+    { icon: Trash2, label: t('notify.hook_remove'), onClick: remove, danger: true },
+  ];
   return (
-    <div className="stack" style={{ gap: 6 }}>
-      <div className="between" style={{ gap: 12 }}>
-        <span style={{ minWidth: 0 }}>
-          <span className={`nt-dot ${st.error ? 'bad' : st.sent_at ? 'ok' : ''}`} aria-hidden="true" />
-          <b>{hook.name || t(`notify.hook_${hook.kind}`)}</b>
-          <span className="small muted"> · {hook.target}</span>
-        </span>
-        <span className="nt-actions">
-          <Button className="btn-sm" busy={busy} onClick={test}>
-            {t('notify.test')}
-          </Button>
-          <Button variant="ghost" className="btn-sm" disabled={busy} onClick={() => setEditing(true)}>
-            {t('notify.edit')}
-          </Button>
-          <Button variant="ghost" className="btn-sm danger-text" disabled={busy} onClick={remove}>
-            {t('notify.hook_remove')}
-          </Button>
-        </span>
-      </div>
+    <>
+      <Row
+        label={
+          <>
+            <span className={`nt-dot ${st.error ? 'bad' : st.sent_at ? 'ok' : ''}`} aria-hidden="true" />
+            {hook.name || t(`notify.hook_${hook.kind}`)}
+          </>
+        }
+        hint={hook.target}
+      >
+        <Button variant="secondary" className="btn-sm" busy={busy} onClick={test}>
+          {t('notify.test')}
+        </Button>
+        <PopMenu items={menu} label={t('action.more')} className="btn btn-plain btn-icon" />
+      </Row>
       {tested && !error && <Note kind="ok">{t('notify.hook_test_ok')}</Note>}
       {st.error && !error && <Note kind="error">{t('notify.hook_error', { msg: st.error.msg })}</Note>}
       <ErrorNote error={error} />
-    </div>
+    </>
   );
 }
 
@@ -551,27 +503,29 @@ export function HooksCard({ data, reload }) {
   const hooks = data?.hooks ?? [];
   if (!data) return null;
   return (
-    <Card id="nt-hooks" title={t('notify.hooks_title')}>
-      <div className="stack" style={{ gap: 14 }}>
-        <p className="small muted" style={{ margin: 0 }}>
-          {t('notify.hooks_lead')}
-        </p>
-        {hooks.map((h) => (
-          <HookRow key={h.id} hook={h} onChanged={reload} />
-        ))}
+    <Card id="nt-hooks" title={t('notify.hooks_title')} sub={t('notify.hooks_lead')}>
+      {hooks.map((h) => (
+        <HookRow key={h.id} hook={h} onChanged={reload} />
+      ))}
+      <div className="stack" style={{ gap: 12, marginTop: hooks.length ? 8 : 0 }}>
         {hooks.length > 0 && !data.sync_enabled && <Note kind="warn">{t('notify.hooks_sync_off')}</Note>}
         {adding ? (
-          <HookForm
-            onSaved={() => {
-              setAdding(false);
-              reload();
-            }}
-            onCancel={() => setAdding(false)}
-          />
+          <>
+            <p className="small muted" style={{ margin: 0 }}>
+              {t('notify.hooks_privacy')}
+            </p>
+            <HookForm
+              onSaved={() => {
+                setAdding(false);
+                reload();
+              }}
+              onCancel={() => setAdding(false)}
+            />
+          </>
         ) : (
           hooks.length < 10 && (
             <div className="nt-actions">
-              <Button variant={hooks.length ? 'ghost' : 'primary'} onClick={() => setAdding(true)}>
+              <Button variant={hooks.length || data.feishu ? 'ghost' : 'primary'} onClick={() => setAdding(true)}>
                 {t('notify.hook_add')}
               </Button>
             </div>
@@ -581,6 +535,8 @@ export function HooksCard({ data, reload }) {
     </Card>
   );
 }
+
+const QUIET_DEFAULT = { start: '23:00', end: '08:00' };
 
 export function RulesCard({ data, reload }) {
   const { t } = useTranslation();
@@ -596,81 +552,55 @@ export function RulesCard({ data, reload }) {
   const toggle = (k, title, hint) => <Toggle r={r} k={k} title={title} hint={hint} busy={busy} save={save} />;
   const name = (d) => d.split(/[\\/]/).filter(Boolean).pop() || d;
   const pick = (k, title, hint, options) => (
-    <div className="between" style={{ flexWrap: 'nowrap', gap: 12 }}>
-      <span>
-        <b>{title}</b>
-        <span className="small muted" style={{ display: 'block' }}>
-          {hint}
-        </span>
-      </span>
-      <select value={r[k] ?? 0} disabled={busy} onChange={(e) => save({ [k]: Number(e.target.value) })} aria-label={title} style={{ width: 'auto', minWidth: 120, flexShrink: 0 }}>
+    <Row label={title} hint={hint}>
+      <select value={r[k] ?? 0} disabled={busy} onChange={(e) => save({ [k]: Number(e.target.value) })} aria-label={title} style={{ width: 'auto', minWidth: 120 }}>
         {options.map(([v, label]) => (
           <option key={v} value={v}>
             {label}
           </option>
         ))}
       </select>
-    </div>
+    </Row>
   );
   const quiet = r.quiet;
   const setQuiet = (patch) => {
-    const q = { start: '23:00', end: '08:00', ...quiet, ...patch };
+    const q = { ...QUIET_DEFAULT, ...quiet, ...patch };
     if (/^\d{2}:\d{2}$/.test(q.start) && /^\d{2}:\d{2}$/.test(q.end) && q.start !== q.end) save({ quiet: q });
   };
+  // 改过“少打扰”里的哪一项就默认展开
+  const calmSet = Boolean(quiet) || r.done_batch > 0 || r.stall_min !== 20 || r.muted.length > 0;
   return (
-    <Card title={t('notify.rules_title')}>
-      <div className="stack" style={{ gap: 14 }}>
-        <p className="small muted" style={{ margin: 0 }}>
-          {t('notify.rules_lead')}
-        </p>
-        {toggle('done', t('notify.rule_done'), t('notify.rule_done_hint'))}
-        {toggle('failed', t('notify.rule_failed'))}
-        {toggle('fg_quiet', t('notify.rule_fg_quiet'), t('notify.rule_fg_quiet_hint'))}
-        {toggle('content', t('notify.rule_content'), t('notify.rule_content_hint'))}
-        {data.feishu && (
-          <div className="stack nt-calm" style={{ gap: 14 }}>
-            <b className="nt-calm-title">{t('notify.feishu_rules_title')}</b>
-            {toggle('actions', t('notify.rule_actions'), t('notify.rule_actions_hint'))}
-            {toggle('project_groups', t('notify.rule_project_groups'), t('notify.rule_project_groups_hint'))}
+    <Card title={t('notify.rules_title')} sub={t('notify.rules_lead')}>
+      {toggle('done', t('notify.rule_done'), t('notify.rule_done_hint'))}
+      {toggle('failed', t('notify.rule_failed'))}
+      {toggle('fg_quiet', t('notify.rule_fg_quiet'), t('notify.rule_fg_quiet_hint'))}
+      {data.feishu && toggle('actions', t('notify.rule_actions'), t('notify.rule_actions_hint'))}
+      {toggle('content', t('notify.rule_content'), t('notify.rule_content_hint'))}
+      <More summary={t('notify.calm_title')} open={calmSet}>
+        <Row label={t('notify.quiet')} hint={t('notify.quiet_hint')}>
+          <Switch checked={Boolean(quiet)} disabled={busy} onChange={(v) => (v ? setQuiet({}) : save({ quiet: null }))} label={t('notify.quiet')} />
+        </Row>
+        {quiet && (
+          <div className="nt-actions nt-quiet" style={{ marginBottom: 8 }}>
+            <input type="time" value={quiet.start} disabled={busy} aria-label={t('notify.quiet_start')} onChange={(e) => setQuiet({ start: e.target.value })} />
+            <span className="muted">–</span>
+            <input type="time" value={quiet.end} disabled={busy} aria-label={t('notify.quiet_end')} onChange={(e) => setQuiet({ end: e.target.value })} />
           </div>
         )}
-        <div className="stack nt-calm" style={{ gap: 14 }}>
-          <b className="nt-calm-title">{t('notify.calm_title')}</b>
-          <div className="stack" style={{ gap: 8 }}>
-            <div className="between" style={{ flexWrap: 'nowrap', gap: 12 }}>
-              <span>
-                <b>{t('notify.quiet')}</b>
-                <span className="small muted" style={{ display: 'block' }}>
-                  {t('notify.quiet_hint')}
-                </span>
-              </span>
-              <Switch checked={Boolean(quiet)} disabled={busy} onChange={(v) => (v ? setQuiet({}) : save({ quiet: null }))} label={t('notify.quiet')} />
-            </div>
-            {quiet && (
-              <div className="nt-actions nt-quiet">
-                <input type="time" value={quiet.start} disabled={busy} aria-label={t('notify.quiet_start')} onChange={(e) => setQuiet({ start: e.target.value })} />
-                <span className="muted">–</span>
-                <input type="time" value={quiet.end} disabled={busy} aria-label={t('notify.quiet_end')} onChange={(e) => setQuiet({ end: e.target.value })} />
-              </div>
-            )}
-          </div>
-          {pick('done_batch', t('notify.batch'), t('notify.batch_hint'), [
-            [0, t('notify.batch_off')],
-            [10, t('notify.every_min', { n: 10 })],
-            [30, t('notify.every_min', { n: 30 })],
-            [60, t('notify.every_hour')],
-          ])}
-          {pick('stall_min', t('notify.stall'), t('notify.stall_hint'), [
-            [0, t('notify.stall_off')],
-            [10, t('notify.after_min', { n: 10 })],
-            [20, t('notify.after_min', { n: 20 })],
-            [30, t('notify.after_min', { n: 30 })],
-            [60, t('notify.after_min', { n: 60 })],
-          ])}
-        </div>
-        <div className="stack" style={{ gap: 8 }}>
-          <b>{t('notify.muted')}</b>
-          <span className="small muted">{t('notify.muted_hint')}</span>
+        {pick('done_batch', t('notify.batch'), t('notify.batch_hint'), [
+          [0, t('notify.batch_off')],
+          [10, t('notify.every_min', { n: 10 })],
+          [30, t('notify.every_min', { n: 30 })],
+          [60, t('notify.every_hour')],
+        ])}
+        {pick('stall_min', t('notify.stall'), t('notify.stall_hint'), [
+          [0, t('notify.stall_off')],
+          [10, t('notify.after_min', { n: 10 })],
+          [20, t('notify.after_min', { n: 20 })],
+          [30, t('notify.after_min', { n: 30 })],
+          [60, t('notify.after_min', { n: 60 })],
+        ])}
+        <Row label={t('notify.muted')} hint={t('notify.muted_hint')} stack>
           {r.muted.length > 0 && (
             <div className="nt-chips">
               {r.muted.map((m) => (
@@ -705,78 +635,73 @@ export function RulesCard({ data, reload }) {
               {t('notify.mute')}
             </Button>
           </div>
-        </div>
-        <ErrorNote error={error} />
-      </div>
+        </Row>
+      </More>
+      <ErrorNote error={error} />
     </Card>
   );
 }
 
-const HOW = ['dm', 'reply', 'new', 'stop', 'forward', 'group', 'help'];
+const HOW = ['dm', 'group', 'reply', 'new', 'stop', 'forward', 'help'];
 
 /** 飞书机器人：在飞书里和 AI 对话（docs/FEISHU_AGENT.md）。绑定好飞书以后才有 */
 export function AgentCard({ data, reload }) {
   const { t } = useTranslation();
   const { r, save, busy, error } = useRules(data, reload);
   if (!r || !data.feishu?.bound) return null;
-  const toggle = (k, title, hint, disabled) => <Toggle r={r} k={k} title={title} hint={hint} busy={busy} save={save} disabled={disabled} />;
+  const toggle = (k, title, hint) => <Toggle r={r} k={k} title={title} hint={hint} busy={busy} save={save} />;
+  // 和 AI 对话要能在飞书里处理（审批）：打开时一起打开
   const on = r.agent && r.actions;
   return (
-    <Card id="nt-agent" title={t('notify.agent_title')}>
-      <div className="stack" style={{ gap: 14 }}>
-        <p className="small muted" style={{ margin: 0 }}>
-          {t('notify.agent_lead')}
-        </p>
-        {toggle('agent', t('notify.rule_agent'), t('notify.rule_agent_hint'), !r.actions)}
-        {!r.actions && <Note>{t('notify.agent_need_actions')}</Note>}
-        {on && (
-          <>
+    <Card id="nt-agent" title={t('notify.agent_title')} sub={on ? undefined : t('notify.agent_lead')}>
+      <Toggle r={r} title={t('notify.rule_agent')} hint={t('notify.rule_agent_hint')} busy={busy} checked={on} onChange={(v) => save(v ? { agent: true, actions: true } : { agent: false })} />
+      {on && (
+        <>
+          {toggle('auto_groups', t('notify.rule_auto_groups'), t('notify.rule_auto_groups_hint'))}
+          {toggle('agent_groups', t('notify.rule_agent_groups'), t('notify.rule_agent_groups_hint'))}
+          {/* 打开了“回答直接发在群里”（有风险）时露在外面，否则收进“怎么用和更多选项” */}
+          {r.agent_groups && r.agent_group_public && (
+            <>
+              {toggle('agent_group_public', t('notify.rule_agent_group_public'), t('notify.rule_agent_group_public_hint'))}
+              <Note kind="warn">{t('notify.agent_group_public_warn')}</Note>
+            </>
+          )}
+          <More summary={t('notify.agent_how_title')}>
+            {r.agent_groups && !r.agent_group_public && toggle('agent_group_public', t('notify.rule_agent_group_public'), t('notify.rule_agent_group_public_hint'))}
+            <ul className="nt-intro">
+              {HOW.map((k) => (
+                <li key={k}>{t(`notify.agent_how_${k}`)}</li>
+              ))}
+            </ul>
+            <p className="small muted">{t('notify.rule_agent_note')}</p>
             <div className="stack" style={{ gap: 6 }}>
-              <b>{t('notify.agent_how_title')}</b>
-              <ul className="nt-intro">
-                {HOW.map((k) => (
-                  <li key={k}>{t(`notify.agent_how_${k}`)}</li>
-                ))}
-              </ul>
+              <b className="small">{t('notify.agent_menu_title')}</b>
+              <span className="small muted">{t('notify.agent_menu')}</span>
+              {MENU_KEYS.map((k) => (
+                <span key={k} className="small">
+                  {t(`notify.agent_menu_${k}`)} <Code text={k} />
+                </span>
+              ))}
             </div>
-            <Note>{t('notify.rule_agent_note')}</Note>
-            <div className="stack nt-calm" style={{ gap: 14 }}>
-              <b className="nt-calm-title">{t('notify.agent_groups_title')}</b>
-              {toggle('agent_groups', t('notify.rule_agent_groups'), t('notify.rule_agent_groups_hint'))}
-              {r.agent_groups && toggle('agent_group_public', t('notify.rule_agent_group_public'), t('notify.rule_agent_group_public_hint'))}
-              {r.agent_groups && r.agent_group_public && <Note kind="warn">{t('notify.agent_group_public_warn')}</Note>}
-            </div>
-            <details className="nt-manual">
-              <summary className="small">{t('notify.agent_menu_title')}</summary>
-              <div className="stack" style={{ gap: 6, marginTop: 8 }}>
-                <span className="small muted">{t('notify.agent_menu')}</span>
-                {MENU_KEYS.map((k) => (
-                  <span key={k} className="small">
-                    {t(`notify.agent_menu_${k}`)} <Code text={k} />
-                  </span>
-                ))}
-              </div>
-            </details>
-          </>
-        )}
-        <ErrorNote error={error} />
-      </div>
+          </More>
+        </>
+      )}
+      <ErrorNote error={error} />
     </Card>
   );
 }
 
-/** 设置页“通知”分区：先说清楚怎么发，再配渠道（飞书在前），配好了才有规则和飞书机器人 */
+/** AI 页“远程与通知”：先连飞书，再是飞书机器人、什么时候通知，最后是只通知的渠道 */
 export default function NotifySection() {
   const [data, error, reload] = useLoad(() => api.get('/notify'));
   const configured = data?.feishu || data?.hooks?.length > 0;
   return (
     <>
       <ErrorNote error={error} />
-      <IntroCard data={data} />
       <FeishuCard data={data} reload={reload} />
-      <HooksCard data={data} reload={reload} />
-      {configured && <RulesCard data={data} reload={reload} />}
       <AgentCard data={data} reload={reload} />
+      {configured && <RulesCard data={data} reload={reload} />}
+      <HooksCard data={data} reload={reload} />
     </>
   );
 }

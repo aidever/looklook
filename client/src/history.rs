@@ -8,6 +8,8 @@
 //! - **OpenCode**：数据目录（`$XDG_DATA_HOME/opencode`，默认 `~/.local/share/opencode`）里的 `opencode.db`
 //!   （新版）或 `storage/session/*/*.json`（旧版），只取标题、目录、时间。
 //!
+//!   新版 Codex 会把旧的记录压成 `rollout-*.jsonl.zst`（原来的 `.jsonl` 删掉）：也列，读的时候整个解压。
+//!
 //! 每个文件只读开头和结尾：开头拿工作目录、分支、第一句话，结尾拿最新的标题、最后一句话。
 //! 按 路径 + 修改时间 + 大小 缓存，再次打开只需要 stat。
 
@@ -244,7 +246,10 @@ fn find_in_file(path: &Path, text: &str) -> Option<String> {
     if meta.len() > MAX {
         return None;
     }
-    let raw = std::fs::read_to_string(path).ok()?;
+    let raw = String::from_utf8(read_log(path)?).ok()?;
+    if raw.len() as u64 > MAX {
+        return None;
+    }
     let lower = raw.to_lowercase();
     // 转成小写后长度可能变（少数字符），按字符位置对回原文
     let at = lower.find(text)?;
@@ -311,7 +316,11 @@ fn codex_files() -> Vec<(PathBuf, std::fs::Metadata)> {
             let p = e.path();
             if depth < 3 && e.file_type().is_ok_and(|t| t.is_dir()) {
                 stack.push((p, depth + 1));
-            } else if p.extension().is_some_and(|x| x == "jsonl") && p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("rollout-")) {
+            } else if is_rollout(&p) {
+                // 压到一半时 `.jsonl` 和 `.jsonl.zst` 同时在：用没压的
+                if is_zst(&p) && p.with_extension("").is_file() {
+                    continue;
+                }
                 if let Ok(m) = e.metadata() {
                     out.push((p, m));
                 }
@@ -321,16 +330,46 @@ fn codex_files() -> Vec<(PathBuf, std::fs::Metadata)> {
     out
 }
 
-/// Codex 对话 `thread` 的记录文件
+/// `rollout-*.jsonl` 或压缩过的 `rollout-*.jsonl.zst`
+fn is_rollout(p: &Path) -> bool {
+    p.file_name().is_some_and(|n| {
+        let n = n.to_string_lossy();
+        n.starts_with("rollout-") && (n.ends_with(".jsonl") || n.ends_with(".jsonl.zst"))
+    })
+}
+
+fn is_zst(p: &Path) -> bool {
+    p.extension().is_some_and(|x| x == "zst")
+}
+
+/// 去掉 `.zst` 后的文件名（会话号在 `.jsonl` 前）
+fn plain_name(p: &Path) -> String {
+    let n = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    n.strip_suffix(".zst").map(String::from).unwrap_or(n)
+}
+
+/// 整个读出一份记录（`.zst` 的解压）。解压失败（比如正压到一半）返回 None
+pub fn read_log(path: &Path) -> Option<Vec<u8>> {
+    let bytes = std::fs::read(path).ok()?;
+    if !is_zst(path) {
+        return Some(bytes);
+    }
+    let mut out = Vec::new();
+    let mut dec = ruzstd::decoding::StreamingDecoder::new(bytes.as_slice()).ok()?;
+    dec.read_to_end(&mut out).ok()?;
+    Some(out)
+}
+
+/// Codex 对话 `thread` 的记录文件（可能是压缩过的 `.jsonl.zst`：Codex 接着聊时自己会解压）
 pub fn codex_rollout(thread: &str) -> Option<PathBuf> {
     if thread.is_empty() {
         return None;
     }
     let tail = format!("-{thread}.jsonl");
-    codex_files().into_iter().map(|(p, _)| p).find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().ends_with(&tail)))
+    codex_files().into_iter().map(|(p, _)| p).find(|p| plain_name(p).ends_with(&tail))
 }
 
-fn codex_titles() -> HashMap<String, String> {
+pub fn codex_titles() -> HashMap<String, String> {
     let mut m = HashMap::new();
     let Ok(text) = std::fs::read_to_string(codex_dir().join("session_index.jsonl")) else { return m };
     for line in text.lines() {
@@ -356,9 +395,14 @@ fn wanted(line: &[u8], want: Want) -> bool {
 
 /// 文件开头若干字节里的完整行。
 fn head_lines(path: &Path, max: u64, want: Want) -> Vec<Value> {
-    let Ok(mut f) = File::open(path) else { return vec![] };
     let mut buf = vec![];
-    let _ = (&mut f).take(max).read_to_end(&mut buf);
+    if is_zst(path) {
+        buf = read_log(path).unwrap_or_default();
+        buf.truncate(max as usize);
+    } else {
+        let Ok(mut f) = File::open(path) else { return vec![] };
+        let _ = (&mut f).take(max).read_to_end(&mut buf);
+    }
     let complete = buf.len() as u64 == max;
     let mut lines: Vec<&[u8]> = buf.split(|b| *b == b'\n').collect();
     if complete {
@@ -369,14 +413,22 @@ fn head_lines(path: &Path, max: u64, want: Want) -> Vec<Value> {
 
 /// 文件结尾若干字节里的完整行（丢掉第一段不完整的）。
 fn tail_lines(path: &Path, max: u64, want: Want) -> Vec<Value> {
-    let Ok(mut f) = File::open(path) else { return vec![] };
-    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-    let start = len.saturating_sub(max);
-    if f.seek(SeekFrom::Start(start)).is_err() {
-        return vec![];
-    }
     let mut buf = vec![];
-    let _ = f.read_to_end(&mut buf);
+    let start = if is_zst(path) {
+        let Some(all) = read_log(path) else { return vec![] };
+        let start = all.len().saturating_sub(max as usize);
+        buf = all[start..].to_vec();
+        start
+    } else {
+        let Ok(mut f) = File::open(path) else { return vec![] };
+        let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+        let start = len.saturating_sub(max);
+        if f.seek(SeekFrom::Start(start)).is_err() {
+            return vec![];
+        }
+        let _ = f.read_to_end(&mut buf);
+        start as usize
+    };
     let mut lines: Vec<&[u8]> = buf.split(|b| *b == b'\n').collect();
     if start > 0 && !lines.is_empty() {
         lines.remove(0);
@@ -639,7 +691,7 @@ fn preview_blocking(agent: &str, id: &str, full: bool) -> Option<Vec<Message>> {
             (p, claude_msg, CLAUDE_MSGS)
         }
         "codex" => {
-            let p = codex_files().into_iter().map(|(p, _)| p).find(|p| p.file_stem().is_some_and(|s| s.to_string_lossy().ends_with(id)))?;
+            let p = codex_files().into_iter().map(|(p, _)| p).find(|p| plain_name(p).strip_suffix(".jsonl").is_some_and(|s| s.ends_with(id)))?;
             (p, codex_msg, CODEX_MSGS)
         }
         "opencode" => return Some(vec![]),
@@ -744,6 +796,15 @@ mod tests {
         assert!(parse_codex(&sub).is_none());
         let exec = write(dir.path(), "rollout-exec.jsonl", &[meta(Value::from("exec"), "user"), msg("user", "input_text", "hi", "2026-10-08T03:21:04Z")]);
         assert!(parse_codex(&exec).is_none());
+
+        // Codex 压缩过的旧记录：一样认得，读出来的一样
+        let zst = p.with_file_name(format!("{}.zst", plain_name(&p)));
+        std::fs::write(&zst, ruzstd::encoding::compress_to_vec(std::fs::read(&p).unwrap().as_slice(), ruzstd::encoding::CompressionLevel::Fastest)).unwrap();
+        let z = parse_codex(&zst).unwrap();
+        assert_eq!((z.id, z.title, z.last), (c.id, c.title, c.last));
+        assert_eq!(tail_lines(&zst, 200, CODEX_MSGS), tail_lines(&p, 200, CODEX_MSGS));
+        assert!(find_in_file(&zst, "afs-analyzer").is_some());
+        assert!(is_rollout(&zst) && is_zst(&zst) && plain_name(&zst).ends_with("-01a11987-078c-7c91-9ef9-c10914660ea2.jsonl"));
     }
 
     #[test]

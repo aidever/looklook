@@ -6,6 +6,7 @@ import { useId } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { deviceName, osLabel, useDevices } from './devices.jsx';
+import { sessionLaunch, sessionMode } from './sessions.jsx';
 
 const BRAND = {
   "claude": "<path clip-rule=\"evenodd\" d=\"M20.998 10.949H24v3.102h-3v3.028h-1.487V20H18v-2.921h-1.487V20H15v-2.921H9V20H7.488v-2.921H6V20H4.487v-2.921H3V14.05H0V10.95h3V5h17.998v5.949zM6 10.949h1.488V8.102H6v2.847zm10.51 0H18V8.102h-1.49v2.847z\" fill=\"#D97757\" fill-rule=\"evenodd\"></path>",
@@ -34,6 +35,31 @@ export function LaunchIcon({ launch, size = 16, className = '', mono = false }) 
   if (svg) return <svg className={`brand-icon ${className}`} width={size} height={size} viewBox="0 0 24 24" aria-hidden="true" dangerouslySetInnerHTML={{ __html: svg }} />;
   const Icon = launch === 'custom' ? Command : SquareTerminal;
   return <Icon className={className} size={size} aria-hidden="true" />;
+}
+
+/**
+ * 会话的图标：在跑的工具的图标；AI 工具在终端里跑（不是对话界面）时右下角加一个终端小角标，
+ * 免得终端里的 Codex 和对话界面的 Codex 看起来一样。悬停说明是哪一种。
+ */
+export function SessionIcon({ inst, size = 16, className = '' }) {
+  const { t } = useTranslation();
+  const launch = sessionLaunch(inst) ?? 'shell';
+  const mode = sessionMode(inst);
+  if (mode !== 'term') {
+    return (
+      <span className={`sess-icon ${className}`} title={mode ? t(`sess.mode.${mode}`) : undefined}>
+        <LaunchIcon launch={launch} size={size} />
+      </span>
+    );
+  }
+  return (
+    <span className={`sess-icon sess-icon-term ${className}`} title={t('sess.mode.term')} style={{ width: size, height: size }}>
+      <LaunchIcon launch={launch} size={size} />
+      <span className="sess-icon-badge" aria-hidden="true">
+        <SquareTerminal size={Math.max(9, Math.round(size * 0.6))} strokeWidth={2.5} />
+      </span>
+    </span>
+  );
 }
 
 const osKey = (os) => {

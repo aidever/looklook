@@ -19,8 +19,8 @@ import { AI_LAUNCHES } from '../shared/keys.js';
 import KeyBar, { isTouch, keepFocus, useKeybarShown, useTouchTerminal } from '../shared/KeyBar.jsx';
 import PopMenu from '../shared/PopMenu.jsx';
 import { useRouter } from '../shared/router.jsx';
-import { customName, sessionLaunch, sessionTitle, useSessions } from '../shared/sessions.jsx';
-import { LaunchIcon } from '../shared/brands.jsx';
+import { customName, sessionTitle, useSessions } from '../shared/sessions.jsx';
+import { SessionIcon } from '../shared/brands.jsx';
 import TextSelect, { useTextSelect } from '../shared/TextSelect.jsx';
 import { TermThemeModal } from '../shared/ThemePicker.jsx';
 import { Button, Card, useLoad, useToast } from '../shared/ui.jsx';
@@ -764,7 +764,7 @@ function TermPage({ id }) {
         <span className="term-title">
           {/* 手机上的会话页：工具图标，右下角一个在线小点 */}
           <span className="term-lead">
-            <LaunchIcon launch={sessionLaunch(inst) ?? 'shell'} size={18} />
+            <SessionIcon inst={inst} size={18} />
             <span className={`dot ${live ? 'on' : ''}`} />
           </span>
           <span className="ellipsis">{inst ? sessionTitle(inst) : "…"}</span>

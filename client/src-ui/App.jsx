@@ -48,7 +48,7 @@ import { JustUpdatedBanner, shouldRemind, UpdateBanner, UpdateProvider } from '.
 import { TransferBanner } from './pages/SshTransfer.jsx';
 import { remoteAllowed, renewSoon } from './shared/Remote.jsx';
 import { splitTitle } from './shared/title.js';
-import { useForegroundPing, useInAppAlerts } from './shared/inapp.js';
+import { InAppAlerts, useForegroundPing } from './shared/inapp.jsx';
 
 const StatusCtx = createContext({ status: null, reload: () => {} });
 
@@ -557,9 +557,9 @@ function ConsoleLayout({ path, stale, children }) {
   const pane = paneOpen && isSessionArea(path);
   useTitleCount();
   useForegroundPing();
-  useInAppAlerts(sess, ui.openSession);
   return (
     <>
+      <InAppAlerts activeId={sess} open={ui.openSession} />
       {/* 手机上的顶栏；电脑上这些都在图标栏里 */}
       <header className="topbar topbar-console">
         <Link to="/" className="brand">

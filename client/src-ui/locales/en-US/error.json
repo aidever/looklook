@@ -230,6 +230,7 @@
   "CHAT_UNAVAILABLE": "The chat view isn't turned on for this terminal",
   "CHAT_NOT_RUNNING": "Claude Code isn't running",
   "CHAT_BUSY": "Claude Code is waiting for your choice; finish that first",
+  "CHAT_SCREEN_OTHER": "A screen that can't be shown here is open in the terminal. Handle it there or close it, then send again",
   "CHAT_STALE": "This was already handled",
   "CHAT_SCREEN_CHANGED": "Claude Code's screen changed; try again",
   "CHAT_CLAUDE_RUNNING": "Claude Code is still running",

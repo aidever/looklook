@@ -33,11 +33,12 @@ pub fn classify(capture: &str) -> Screen {
     }
     let start = end.saturating_sub(BOTTOM);
     let bottom = &lines[start..end];
-    if bottom.iter().any(|(p, _)| is_option(p)) {
+    // 最后一个 `› ` 开头的行是输入框（`/` 命令的候选也是 `›` 开头，但在输入框上面）。
+    // 对话历史里用户发过的消息也是 `› ` 开头：发过 `1. …` 开头的消息时历史里有 `› 1. …`，只看最后一个 `›`
+    let Some(i) = bottom.iter().rposition(|(p, _)| p.trim_start().starts_with('›')) else { return Screen::Modal };
+    if is_option(&bottom[i].0) {
         return Screen::Modal;
     }
-    // 最后一个 `› ` 开头的行是输入框（`/` 命令的候选也是 `›` 开头，但在输入框上面）
-    let Some(i) = bottom.iter().rposition(|(p, _)| p.starts_with('›')) else { return Screen::Modal };
     let mut text = bottom[i].1.strip_prefix('›').unwrap_or("").trim_start().trim_end().to_string();
     for (plain, bright) in &bottom[i + 1..] {
         if plain.trim().is_empty() || !plain.starts_with("  ") {
@@ -55,8 +56,8 @@ pub fn classify(capture: &str) -> Screen {
 
 /// TUI 上的选择框（信任文件夹、Codex 自己的确认框、更新提示……）：和 Claude Code 的一样解析，只是光标是 `›`。
 pub fn dialog(capture: &str) -> Option<super::screen::Dialog> {
-    // 输入框那一行也是 `›` 开头：有带编号的选项（`› 1. …`）才是选择框
-    if !capture.lines().any(|l| is_option(&strip(l).0)) {
+    // 输入框那一行也是 `›` 开头：最后一个 `›` 是带编号的选项（`› 1. …`）才是选择框
+    if classify(capture) != Screen::Modal || !capture.lines().rev().map(|l| strip(l).0).find(|l| l.trim_start().starts_with('›')).is_some_and(|l| is_option(&l)) {
         return None;
     }
     super::screen::dialog_with(capture, '›')
@@ -115,6 +116,14 @@ mod tests {
     fn activity_line() {
         assert_eq!(live(&sample("busy2")).activity.as_deref(), Some("Working (6s • esc to interrupt)"));
         assert_eq!(live(&sample("done")), Live::default());
+    }
+
+    /// 用户发过 `1. …` 开头的消息：历史里的 `› 1. …` 不是选择框
+    #[test]
+    fn numbered_message_in_history() {
+        let s = "› 1. 修一下登录\n  2. 再跑测试\n\n• Working (3s • esc to interrupt)\n\n› Ask Codex to do anything\n\n  GPT-6-Astra medium · ~/proj\n  ? for shortcuts\n";
+        assert_eq!(classify(s), Screen::Input { text: "Ask Codex to do anything".into(), busy: true });
+        assert!(dialog(s).is_none());
     }
 
     #[test]

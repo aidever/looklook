@@ -278,8 +278,12 @@ JSON（允许 `//` 注释和尾逗号，按 JSONC 解析）。下面每个字段
 - `DELETE /api/pets/local/{id}`
 - 从 GitHub 装（`src/pet_github.rs`）：
   - `POST /api/pets/from-github {url}`：认 `owner/repo`、`owner/repo@ref`、仓库链接、`/tree/<ref>/<文件夹>` 链接 → 下载 `github.com/<owner>/<repo>/archive/<ref|HEAD>.zip`（≤ 600 MB）→
-    找出所有带 `pet.json` 的文件夹（套在别的宠物文件夹里的、`.` 开头的不算；最多 60 只）→ 每只只解它自己的文件夹到 `pets/.gh-<令牌>/p/<序号>/`，按导入一样校验 →
+    找出所有宠物（套在别的宠物文件夹里的、`.` 开头的、`node_modules` 里的不算；最多 60 只）→ 每只只解它自己的文件到 `pets/.gh-<令牌>/p/<序号>/`，按导入一样校验 →
     返回 `{token, repo, items: [摘要 + path + index]}`，坏的也列出来写原因。仓库里别的文件不解。
+    认三种：带 `pet.json` 的文件夹（本格式、Codex 宠物）；dsh-pet 插件本体（`<dir>/assets/config.jsonc` + `assets/webm/`，只解这两样和 `assets/mov/`，
+    id 取文件夹名，带 dsh-pet 的许可和署名）；dsh-pet 种类（`<dir>/<种类>-config.json` + `<种类>-animation/`，中文名的 id 是 `dsh-<名字哈希>`）。
+    dsh-pet 格式的装好后包里是一份安装时写的 `pet.json`：`{"format": "dsh-pet", "id", "config", "webm", "mov", "license"?, "credits"?}`，扫描时按 §5 换算。
+    看看只是替用户从原仓库下载、在本机换算，不托管、不推荐第三方形象。
   - `GET /api/pets/from-github/preview/{token}/{index}`：挑的时候看封面。
   - `POST /api/pets/from-github/install {token, indexes}`：装挑中的，同 id 覆盖；挑的里面 id 重复 → `dup_id`。装完删临时目录；没装的 1 小时后下次查找时清掉。
   - 装好的包里写 `.origin.json`（`{github, ref, path}`），列表摘要带 `origin`，卡片上显示“来自 GitHub”并链回仓库。

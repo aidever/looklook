@@ -121,8 +121,12 @@ export function useTermTheme(frame, name, loaded) {
   }, [name, loaded]);
 }
 
-export function termFit(frame) {
-  frame.current?.contentWindow?.postMessage({ type: 'looklook:fit' }, frameOrigin(frame));
+/**
+ * 让终端按现在的大小重新适配。`light`（切会话、布局变化、拿到焦点）：只在尺寸变了时改行列，不重画字形、不向 tmux 要尺寸，
+ * 切换时不闪；不带（页面从后台回来）：整个重新测量、重画，并把 tmux 的尺寸要回来（见 term-inject.js 的 claimSize）。
+ */
+export function termFit(frame, light = false) {
+  frame.current?.contentWindow?.postMessage({ type: 'looklook:fit', light }, frameOrigin(frame));
 }
 
 /**
@@ -133,19 +137,22 @@ export function useRefitOnReturn(frame, enabled = true) {
   useEffect(() => {
     if (!enabled) return undefined;
     let timers = [];
-    const later = () => {
+    const later = (light) => {
       if (document.visibilityState !== 'visible') return;
       timers.forEach(clearTimeout);
-      timers = [60, 400].map((ms) => setTimeout(() => termFit(frame), ms));
+      timers = [60, 400].map((ms) => setTimeout(() => termFit(frame, light), ms));
     };
-    document.addEventListener('visibilitychange', later);
-    window.addEventListener('pageshow', later);
-    window.addEventListener('focus', later);
+    // 拿到焦点（从终端点回侧栏、切会话也会触发）只轻量适配；页面从后台回来才整个重来
+    const back = () => later(false);
+    const focus = () => later(true);
+    document.addEventListener('visibilitychange', back);
+    window.addEventListener('pageshow', back);
+    window.addEventListener('focus', focus);
     return () => {
       timers.forEach(clearTimeout);
-      document.removeEventListener('visibilitychange', later);
-      window.removeEventListener('pageshow', later);
-      window.removeEventListener('focus', later);
+      document.removeEventListener('visibilitychange', back);
+      window.removeEventListener('pageshow', back);
+      window.removeEventListener('focus', focus);
     };
   }, [frame, enabled]);
 }

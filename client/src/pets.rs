@@ -769,6 +769,8 @@ pub fn load_dir(source: &'static str, dir: &Path) -> Result<Pack, PackError> {
     let v = read_json(&dir.join("pet.json"))?;
     if v["format"] == "looklook-pet" {
         load_ours(source, dir, v)
+    } else if v["format"] == "dsh-pet" {
+        load_dsh_local(source, dir, &v)
     } else if v.get("spritesheetPath").is_some() || dir.join("spritesheet.webp").is_file() {
         load_codex(source, dir, v)
     } else {
@@ -940,12 +942,38 @@ fn find_dsh_package(dsh: &Path) -> Option<PathBuf> {
     None
 }
 
-fn dsh_credits() -> Vec<Credit> {
+pub(crate) fn dsh_credits() -> Vec<Credit> {
     vec![
         Credit { role: "原角色（溟月）".into(), name: "上善无形".into(), url: Some("https://space.bilibili.com/4456176".into()) },
         Credit { role: "DeepSeek 女仆设计".into(), name: "ZipZipPipe".into(), url: Some("https://space.bilibili.com/4168597".into()) },
         Credit { role: "动画".into(), name: "dsh-pet".into(), url: Some("https://github.com/PC2005-cloud/dsh-pet".into()) },
     ]
+}
+
+/// dsh-pet 自带形象（大肥鱼）的许可
+pub(crate) fn dsh_license() -> License {
+    License {
+        spdx: "LicenseRef-dsh-pet".into(),
+        commercial: Some(false),
+        url: Some("https://github.com/PC2005-cloud/dsh-pet#许可".into()),
+        note: Some("dsh-pet 素材允许开源使用、禁止商用；形象 CC BY-NC-SA 4.0".into()),
+    }
+}
+
+/// 从 GitHub 装来的 dsh-pet 格式的宠物：`pet.json` 是安装时写的
+/// `{"format": "dsh-pet", "id", "name"?, "config", "webm", "mov"?, "license"?, "credits"?}`（路径相对包目录）
+fn load_dsh_local(source: &'static str, dir: &Path, v: &Value) -> Result<Pack, PackError> {
+    let rel = |k: &str| -> Result<PathBuf, PackError> {
+        let s = v[k].as_str().ok_or_else(|| perr("field", k))?;
+        entry_path(s).map(|p| dir.join(p)).ok_or_else(|| perr("bad_name", s))
+    };
+    let id = v["id"].as_str().filter(|s| valid_id(s)).ok_or_else(|| perr("field", "id"))?;
+    let cfg = read_json(&rel("config")?)?;
+    let name = v["name"].as_str().or(cfg["pets"][0]["name"].as_str()).filter(|s| !s.trim().is_empty()).unwrap_or(id).to_string();
+    let dirs = DshDirs { webm: vec![rel("webm")?], mov: rel("mov").ok().into_iter().collect() };
+    let license = serde_json::from_value(v["license"].clone()).ok().filter(|l: &License| !l.spdx.is_empty());
+    let credits = serde_json::from_value(v["credits"].clone()).unwrap_or_default();
+    convert_dsh(source, id, dir, name, &cfg, &dirs, license, credits)
 }
 
 /// `$DSH_HOME/dsh-pet/` 里的宠物：默认宠物 `main` 和 `pet/` 下的各个种类
@@ -968,12 +996,7 @@ fn load_dsh(dsh: &Path) -> Vec<Pack> {
             mov: vec![root.join("main-animation").join("mov")],
         };
         let name = cfg["pets"][0]["name"].as_str().filter(|s| !s.is_empty()).unwrap_or("dsh-pet").to_string();
-        let license = License {
-            spdx: "LicenseRef-dsh-pet".into(),
-            commercial: Some(false),
-            url: Some("https://github.com/PC2005-cloud/dsh-pet#许可".into()),
-            note: Some("dsh-pet 素材允许开源使用、禁止商用；形象 CC BY-NC-SA 4.0".into()),
-        };
+        let license = dsh_license();
         let dir = pkg.clone().unwrap_or_else(|| root.clone());
         out.push(convert_dsh("dsh", "main", &dir, name, &cfg, &dirs, Some(license), dsh_credits()).unwrap_or_else(|e| Pack::broken("dsh", &dir, e)));
     }
@@ -1179,6 +1202,11 @@ fn unzip(zip_path: &Path, dest: &Path) -> Result<(), PackError> {
 
 /// 只解出 `prefix`（空 = 全部，否则以 `/` 结尾）下面的条目，去掉前缀放进 `dest`；限制同 [`unzip`]
 pub(crate) fn extract<R: Read + std::io::Seek>(z: &mut zip::ZipArchive<R>, prefix: &str, dest: &Path) -> Result<(), PackError> {
+    extract_some(z, prefix, dest, &|_| true)
+}
+
+/// 同 [`extract`]，只解 `keep`（去掉前缀后的名字）认的条目
+pub(crate) fn extract_some<R: Read + std::io::Seek>(z: &mut zip::ZipArchive<R>, prefix: &str, dest: &Path, keep: &dyn Fn(&str) -> bool) -> Result<(), PackError> {
     let mut total = 0u64;
     let mut files = 0usize;
     for i in 0..z.len() {
@@ -1190,7 +1218,7 @@ pub(crate) fn extract<R: Read + std::io::Seek>(z: &mut zip::ZipArchive<R>, prefi
         if name.starts_with("__MACOSX/") || name.ends_with(".DS_Store") || full.contains("/__MACOSX/") {
             continue;
         }
-        if name.is_empty() {
+        if name.is_empty() || !keep(&name) {
             continue;
         }
         let rel = entry_path(&name).ok_or_else(|| perr("bad_name", &name))?;

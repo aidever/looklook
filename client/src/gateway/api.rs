@@ -593,7 +593,8 @@ async fn create_dsh(app: &App, mut input: Input) -> R<crate::instances::View> {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct PageQ {
-    /// 桌面应用：由看看用系统浏览器打开（带着口令），不在应用窗口里打开
+    /// 桌面应用：由看看用系统浏览器打开（带着口令），不在应用窗口里打开（前端发 `?open=1`）
+    #[serde(deserialize_with = "de_flag")]
     open: bool,
 }
 
@@ -2955,7 +2956,8 @@ mod tests {
 
 #[derive(Deserialize)]
 struct FreshQ {
-    #[serde(default)]
+    /// 前端发 `?fresh=1`：普通 bool 只认 true/false，`1` 会 400
+    #[serde(default, deserialize_with = "de_flag")]
     fresh: bool,
 }
 

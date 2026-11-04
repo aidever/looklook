@@ -108,13 +108,20 @@ pub fn run(rt: tokio::runtime::Runtime, home: Option<PathBuf>, listen: Option<So
         .manage(shell)
         .on_menu_event(on_menu)
         .on_window_event(|window, event| {
-            // 关掉主窗口只是隐藏：服务和托盘继续在后台运行。
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() == MAIN {
+            if window.label() != MAIN {
+                return;
+            }
+            match event {
+                // 关掉主窗口只是隐藏：服务和托盘继续在后台运行。
+                WindowEvent::CloseRequested { api, .. } => {
+                    geometry::save_now(window);
                     api.prevent_close();
                     let _ = window.hide();
                     dock(window.app_handle(), false);
                 }
+                // 记住窗口大小和位置：下次打开、升级后重启都按上次的来
+                WindowEvent::Resized(_) | WindowEvent::Moved(_) => geometry::save_later(window),
+                _ => {}
             }
         })
         .setup(move |app| {
@@ -145,6 +152,9 @@ pub fn run(rt: tokio::runtime::Runtime, home: Option<PathBuf>, listen: Option<So
         // 窗口都关了不退出（托盘常驻）；只有“退出”菜单（app.exit）才真正退出。
         RunEvent::ExitRequested { code: None, api, .. } => api.prevent_exit(),
         RunEvent::Exit => {
+            if let Some(w) = app.get_webview_window(MAIN) {
+                geometry::save_now(&w.as_ref().window());
+            }
             // 退出前把服务停干净（ttyd/实例收尾、关通道），最多等 10 秒。
             let (tx, rx) = std_mpsc::channel();
             if app.state::<Shell>().cmd.send(Cmd::Exit(tx)).is_ok() {
@@ -197,8 +207,23 @@ fn show_main(app: &AppHandle) {
         let handle = app.clone();
         // 创建窗口要在主线程上做。
         let _ = app.run_on_main_thread(move || {
-            match window(&handle, MAIN, url.clone(), url).inner_size(1280.0, 820.0).min_inner_size(420.0, 480.0).center().build() {
+            let saved = geometry::load(&handle);
+            let mut b = window(&handle, MAIN, url.clone(), url).min_inner_size(420.0, 480.0);
+            b = match &saved {
+                Some(g) => {
+                    let b = b.inner_size(g.width, g.height);
+                    match g.position {
+                        Some((x, y)) => b.position(x, y),
+                        None => b.center(),
+                    }
+                }
+                None => b.inner_size(1280.0, 820.0).center(),
+            };
+            match b.build() {
                 Ok(w) => {
+                    if saved.as_ref().is_some_and(|g| g.maximized) {
+                        let _ = w.maximize();
+                    }
                     let _ = w.set_focus();
                 }
                 Err(e) => tracing::error!(error = %e, "无法创建窗口"),
@@ -644,5 +669,93 @@ mod autostart {
             }
             std::thread::sleep(std::time::Duration::from_millis(500));
         }
+    }
+}
+
+/// 主窗口的大小、位置、是否最大化，存在数据目录的 `window.json`。
+/// 以前每次都按 1280×820 居中新建，打开、升级后重启都回到默认大小。
+mod geometry {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+
+    use serde::{Deserialize, Serialize};
+    use tauri::{AppHandle, Manager, Runtime, Window};
+
+    use super::Shell;
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct Geometry {
+        /// 逻辑像素（和 `inner_size` 一样，换了缩放比例的屏幕也对）
+        pub width: f64,
+        pub height: f64,
+        /// 外框左上角，逻辑像素；不在任何屏幕上时不用（屏幕拔掉了），改为居中
+        pub position: Option<(f64, f64)>,
+        pub maximized: bool,
+    }
+
+    fn file<R: Runtime>(app: &AppHandle<R>) -> Option<std::path::PathBuf> {
+        let home = app.try_state::<Shell>()?.home.clone();
+        Some(crate::paths::Paths::discover(home).ok()?.home.join("window.json"))
+    }
+
+    /// 读上次存的；尺寸不合理、位置不在现在任何一块屏幕上时去掉对应部分
+    pub fn load<R: Runtime>(app: &AppHandle<R>) -> Option<Geometry> {
+        let mut g: Geometry = serde_json::from_slice(&std::fs::read(file(app)?).ok()?).ok()?;
+        if !(g.width >= 420.0 && g.height >= 480.0 && g.width < 20000.0 && g.height < 20000.0) {
+            return None;
+        }
+        if let Some((x, y)) = g.position {
+            let monitors = app.available_monitors().unwrap_or_default();
+            // 标题栏那一条（左上角往里 80×40）要落在某块屏幕里，不然窗口拖不回来
+            let on_screen = monitors.iter().any(|m| {
+                let s = m.scale_factor();
+                let (p, z) = (m.position().to_logical::<f64>(s), m.size().to_logical::<f64>(s));
+                x + 80.0 > p.x && x + 80.0 < p.x + z.width && y + 10.0 >= p.y && y + 40.0 < p.y + z.height
+            });
+            if !on_screen {
+                g.position = None;
+            }
+        }
+        Some(g)
+    }
+
+    /// 现在的样子；最小化、全屏时不算（那时的尺寸不是用户要的）。最大化时只记“最大化”，尺寸留上次正常时的
+    fn current<R: Runtime>(w: &Window<R>) -> Option<Geometry> {
+        if w.is_minimized().unwrap_or(false) || w.is_fullscreen().unwrap_or(false) || !w.is_visible().unwrap_or(false) {
+            return None;
+        }
+        let app = w.app_handle();
+        let old = file(app).and_then(|f| std::fs::read(f).ok()).and_then(|b| serde_json::from_slice::<Geometry>(&b).ok());
+        if w.is_maximized().unwrap_or(false) {
+            let mut g = old.unwrap_or(Geometry { width: 1280.0, height: 820.0, position: None, maximized: true });
+            g.maximized = true;
+            return Some(g);
+        }
+        let s = w.scale_factor().ok()?;
+        let size = w.inner_size().ok()?.to_logical::<f64>(s);
+        let pos = w.outer_position().ok().map(|p| p.to_logical::<f64>(s));
+        Some(Geometry { width: size.width.round(), height: size.height.round(), position: pos.map(|p| (p.x.round(), p.y.round())), maximized: false })
+    }
+
+    pub fn save_now<R: Runtime>(w: &Window<R>) {
+        let Some(g) = current(w) else { return };
+        let Some(f) = file(w.app_handle()) else { return };
+        if let Ok(b) = serde_json::to_vec(&g) {
+            let _ = std::fs::write(f, b);
+        }
+    }
+
+    /// 拖动、缩放时一秒内只在停下来后存一次
+    pub fn save_later<R: Runtime>(w: &Window<R>) {
+        static GEN: AtomicU64 = AtomicU64::new(0);
+        let my = GEN.fetch_add(1, Ordering::Relaxed) + 1;
+        let w = w.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(800)).await;
+            if GEN.load(Ordering::Relaxed) == my {
+                let h = w.clone();
+                let _ = w.run_on_main_thread(move || save_now(&h));
+            }
+        });
     }
 }

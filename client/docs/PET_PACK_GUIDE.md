@@ -285,6 +285,7 @@ my-pets/
 
 - 填 `owner/repo` 或仓库链接；只想装其中一只，贴那个文件夹的链接（`…/tree/main/pets/blue-cat`）；指定分支或标签写 `owner/repo@v1`。
 - 命令行：`looklook pet install owner/repo`，好几只时加 `--pick orange-girl,blue-cat` 或 `--all`。
+- dsh-pet 格式的仓库也能直接装（插件本体的 `assets/config.jsonc` + `assets/webm/`，或者自己做的 `<种类>-config.json` + `<种类>-animation/`），只解配置和动画。
 - 只能装公开仓库；整个仓库的 zip 不超过 600 MB，每只宠物的限制和导入一样。
 - 在 README 和 `pet.json` 的 `license` 里写清楚授权。
 

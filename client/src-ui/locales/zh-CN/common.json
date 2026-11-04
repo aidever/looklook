@@ -3259,7 +3259,7 @@
     "gh_repo": "仓库",
     "gh_repo_hint": "填 owner/repo 或仓库链接；只装某个文件夹就贴它的链接（…/tree/main/pets/cat），指定分支写 owner/repo@分支。",
     "gh_find": "查找",
-    "gh_downloading": "正在下载仓库…",
+    "gh_downloading": "正在下载仓库…大仓库可能要几分钟",
     "gh_found": "在 {{repo}} 里找到 {{n}} 只。",
     "gh_found_many": "在 {{repo}} 里找到 {{n}} 只，勾选要装的。",
     "gh_install": "安装 {{n}} 只",

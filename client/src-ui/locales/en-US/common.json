@@ -3259,7 +3259,7 @@
     "gh_repo": "Repository",
     "gh_repo_hint": "owner/repo or a repo link. To install one folder, paste its link (…/tree/main/pets/cat); for a branch use owner/repo@branch.",
     "gh_find": "Find",
-    "gh_downloading": "Downloading the repository…",
+    "gh_downloading": "Downloading the repository… large repos can take a few minutes",
     "gh_found": "Found {{n}} in {{repo}}.",
     "gh_found_many": "Found {{n}} in {{repo}}. Tick the ones to install.",
     "gh_install": "Install {{n}}",

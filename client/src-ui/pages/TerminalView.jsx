@@ -400,7 +400,7 @@ export function TermPane({ id, inst, active, missing, offline = false, onStart, 
   useEffect(() => {
     if (!active) return undefined;
     const timer = setTimeout(() => {
-      termFit(frame);
+      termFit(frame, true);
       focusInput();
     }, 30);
     return () => clearTimeout(timer);
@@ -647,7 +647,7 @@ function TermPage({ id }) {
   }, []);
   // 终端所在页面尺寸变化（按键条、标签栏显示/隐藏、从“文件”切回来）时让终端重新适配。
   useEffect(() => {
-    termFit(frame);
+    termFit(frame, true);
     if (tab === 'term' && !touch) termFocus(frame);
   }, [keys, tab, tabbarShown]);
   const insertPath = (text) => {

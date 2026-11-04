@@ -500,18 +500,36 @@
     claimTimer = setTimeout(function () { report(term.rows); }, 80);
   }
 
+  // 轻量适配：尺寸变了才改行列，再按缓冲区重画一遍（内容一样，看不出来）。不重新测量字体（会清掉 WebGL 字形图集整个重画），
+  // 也不向 tmux 要尺寸（tmux 和里面的程序会整屏重排）。切会话、点进终端、外层布局变化用这个，切换时不再闪一下。
+  function lightFit(term) {
+    try {
+      if (typeof term.fit === 'function') term.fit();
+      term.refresh(0, term.rows - 1);
+    } catch (e) {
+      /* 终端还没准备好，忽略 */
+    }
+  }
+
   // 切到别的窗口（或手机切到别的应用）再回来：浏览器在后台时会暂停终端的绘制，窗口尺寸也可能在这期间变过，
   // 回来后屏幕只画了一部分（例如 AI 编程助手底部的输入框不见了），要刷新或切到别的终端再切回来才恢复。
-  // 回到前台 / 窗口重新拿到焦点时重新测量、适配并整屏重画；布局稳定需要一点时间，过一会儿再来一次。
+  // 页面从后台回到前台时重新测量、适配并整屏重画，再把 tmux 的尺寸要回来；布局稳定需要一点时间，过一会儿再来一次。
+  // 只是窗口拿到焦点（点进终端、管理台里切会话都会触发）时轻量适配就够了。
   function refitOnReturn(term) {
     var timers = [];
-    function later() {
+    function later(full) {
       timers.forEach(clearTimeout);
-      timers = [60, 400].map(function (ms) { return setTimeout(function () { refit(term); if (ms === 400) claimSize(term); }, ms); });
+      timers = [60, 400].map(function (ms) {
+        return setTimeout(function () {
+          if (!full) return lightFit(term);
+          refit(term);
+          if (ms === 400) claimSize(term);
+        }, ms);
+      });
     }
-    document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') later(); });
-    window.addEventListener('pageshow', later);
-    window.addEventListener('focus', later);
+    document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') later(true); });
+    window.addEventListener('pageshow', function () { later(true); });
+    window.addEventListener('focus', function () { later(false); });
     window.addEventListener('resize', function () { setTimeout(function () { try { term.refresh(0, term.rows - 1); } catch (e) { /* 忽略 */ } }, 120); });
     // 按到终端上（准备打字、滑动翻看）：先把窗口尺寸要回来
     document.addEventListener('pointerdown', function () { claimSize(term, 10000); }, true);
@@ -954,6 +972,7 @@
   //   xterm.js 就自己发出英文 “(” 并取消事件，输入法没机会换成全角。数字和标点键改由浏览器正常输入，
   //   在随后的 input 事件里把实际上屏的字（输入法给的全角或原样的半角）发给终端；字母、空格仍走 xterm 的处理。
   var MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || '');
+  var PUNCT_CODE = /^(Digit\d|Semicolon|Quote|Comma|Period|Slash|Backslash|BracketLeft|BracketRight|Minus|Equal|Backquote|IntlBackslash|IntlRo|IntlYen)$/;
   function setupKeys(term) {
     var punct = null; // 放行给浏览器的标点键：{ key, ime, before, timer }
     var own = null; // 标点键引起、由这里接管的输入法组字（搜狗、微信输入法等把标点也走一遍组字）：{ before }
@@ -1011,7 +1030,9 @@
       // macOS App（WKWebView）里中文输入法的标点：按键报 229、key 却是实际的键（Chrome 报 Process）。交给 xterm 的话，
       // 它在 setTimeout(0) 里比对输入框找新上屏的字，WKWebView 的输入法异步上屏，比对时还没有字，这一下就丢了。
       var ime = e.keyCode === 229;
-      if (e.key && e.key.length === 1 && !/[A-Za-z ]/.test(e.key) && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      // 输入法接手的按键（229）有的 WebView / 输入法把 key 报成 Process、Unidentified，不是实际的标点：按物理键（code）认
+      var symbol = (e.key && e.key.length === 1 && !/[A-Za-z ]/.test(e.key)) || (ime && PUNCT_CODE.test(e.code || ''));
+      if (symbol && !e.ctrlKey && !e.altKey && !e.metaKey) {
         e.stopImmediatePropagation(); // 不 preventDefault：输入法照常处理这个键
         if (punct) clearTimeout(punct.timer);
         var p = { key: e.key, ime: ime, before: term.textarea.value };
@@ -1111,7 +1132,8 @@
       if (d.type === 'looklook:send' && typeof d.data === 'string') window.looklookSend(d.data, opts);
       if (d.type === 'looklook:paste' && typeof d.data === 'string') window.looklookPaste(d.data, opts);
       if (d.type === 'looklook:focus') term.focus();
-      if (d.type === 'looklook:fit') { refit(term); claimSize(term); }
+      // light：切会话、布局变化，只适配；不带 light：外层从后台回来，整个重来并要回 tmux 尺寸
+      if (d.type === 'looklook:fit') { if (d.light) lightFit(term); else { refit(term); claimSize(term); } }
       if (d.type === 'looklook:text') toParent({ type: 'looklook:text', text: bufferText(term) });
     });
     // 告诉管理台终端准备好了：当前显示的终端由它再聚焦一次

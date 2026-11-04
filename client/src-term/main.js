@@ -99,19 +99,31 @@ class Xterm {
     return undefined;
   }
 
+  /**
+   * 按容器大小调整行列。终端藏起来时（管理台切到别的会话，iframe 是 display:none）容器是 0×0：
+   * 这时调整会把终端缩成 2 列 1 行报给 tmux，切回来再撑开，tmux 和里面的程序整屏重排、重画（macOS App 上尤其明显）。
+   * 太小的尺寸一律不理，等显示出来再调。
+   */
+  fit() {
+    const el = this.parent;
+    if (!el || el.clientWidth < 40 || el.clientHeight < 20) return;
+    this.fitAddon.fit();
+  }
+
   open(parent) {
     const terminal = (this.terminal = new Terminal(termOptions));
     window.term = terminal;
-    terminal.fit = () => this.fitAddon.fit();
+    terminal.fit = () => this.fit();
     terminal.loadAddon(this.fitAddon);
     terminal.loadAddon(this.overlay);
     terminal.loadAddon(new WebLinksAddon());
     const progress = new ProgressAddon();
     terminal.loadAddon(progress);
     terminal.open(parent);
+    this.parent = parent;
     const bar = new ProgressBar(parent, () => terminal.options.theme);
     progress.onChange((p) => bar.set(p));
-    this.fitAddon.fit();
+    this.fit();
     // 网页字体（终端字体由 /fonts/fonts.css 提供）加载完时 term-inject.js 会让 xterm 重新测量字符宽度；
     // WebGL 的字形图集是按旧字体画的，一并清掉重画。
     document.fonts?.addEventListener?.('loadingdone', () => this.webgl?.clearTextureAtlas());
@@ -127,7 +139,7 @@ class Xterm {
   }
 
   initListeners() {
-    const { terminal, fitAddon, overlay } = this;
+    const { terminal, overlay } = this;
     this.register(terminal.onTitleChange((data) => {
       if (data && !this.titleFixed) document.title = data + ' | ' + this.title;
     }));
@@ -147,7 +159,7 @@ class Xterm {
       }
       overlay.show('✂', 200);
     }));
-    this.register(listen(window, 'resize', () => fitAddon.fit()));
+    this.register(listen(window, 'resize', () => this.fit()));
     this.register(listen(window, 'beforeunload', this.onUnload));
   }
 
@@ -280,7 +292,7 @@ class Xterm {
   }
 
   applyPreferences(prefs) {
-    const { terminal, fitAddon } = this;
+    const { terminal } = this;
     if (prefs.enableTrzsz) {
       this.trzsz = new TrzszAddon({
         windows: prefs.isWindows,
@@ -329,12 +341,12 @@ class Xterm {
         default:
           if (terminal.options[key] instanceof Object) terminal.options[key] = Object.assign({}, terminal.options[key], value);
           else terminal.options[key] = value;
-          if (key.indexOf('font') === 0) fitAddon.fit();
+          if (key.indexOf('font') === 0) this.fit();
           break;
       }
     }
     // lineHeight、letterSpacing 也改变格子大小，上面只在 font* 时重新适配，最后统一再来一次（否则最下面几行被裁掉）
-    fitAddon.fit();
+    this.fit();
   }
 
   setRenderer(type) {

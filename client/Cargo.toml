@@ -1,6 +1,6 @@
 [package]
 name = "looklook-client"
-version = "1.64.0"
+version = "1.65.0"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 description = "看看客户端：在自己的电脑上运行终端与 AI 助手，并通过看看服务端随时随地访问"
@@ -86,7 +86,8 @@ libc = "0.2"
 # 桌面应用（Windows / macOS）：Tauri 窗口直接显示管理台，关闭窗口后留在系统托盘（src/desktop.rs）。
 # 放在按平台生效的 [target] 依赖里，原生 Linux 构建不会编译它们，也不需要 GTK / WebKitGTK。
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
+# macos-private-api：桌面宠物的透明窗口（tauri.conf.json 的 macOSPrivateApi 要一起开）
+tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
 tauri-plugin-single-instance = "2"
 
 # macOS：关掉 App Nap（托盘常驻、窗口隐藏时系统会节流定时器，在线心跳迟到，远程就显示离线，src/desktop.rs）

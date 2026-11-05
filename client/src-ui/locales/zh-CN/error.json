@@ -290,5 +290,9 @@
   "DSH_IMAGES_UNSUPPORTED": "现在选的模型不能看图片：在模型菜单里换一个支持图片的模型（例如 Flash）再发",
   "PET_INVALID": "宠物包有问题：{{reason_text}}",
   "TOO_LARGE": "文件太大",
-  "UPLOAD_FAILED": "上传失败：{{message}}"
+  "UPLOAD_FAILED": "上传失败：{{message}}",
+  "PET_GEN_NONE": "没有可用的模型：这台电脑上找不到 Claude Code / Codex，也没配生成台词的接口",
+  "PET_GEN_FAIL": "生成台词失败：{{detail}}",
+  "PET_PEER_OLD": "那台电脑的看看版本太旧，还不能导出宠物，先把它升级到最新版",
+  "PET_GEN_BAD": "模型的回答看不懂，再试一次"
 }

@@ -1,4 +1,4 @@
-import { StrictMode } from 'react';
+import { StrictMode, Suspense, lazy } from 'react';
 import { createRoot } from 'react-dom/client';
 
 import App from './App.jsx';
@@ -18,7 +18,20 @@ window.addEventListener('unhandledrejection', (e) => {
 
 installRtcDownloads();
 
-createRoot(document.getElementById('root')).render(
+// 桌面应用的宠物窗口：只放宠物（src/desktop.rs 开的透明置顶窗口）
+const DeskPet = lazy(() => import('./pages/DeskPet.jsx'));
+const root = createRoot(document.getElementById('root'));
+
+if (window.location.pathname === '/pet-desk') {
+  root.render(
+    <StrictMode>
+      <Suspense fallback={null}>
+        <DeskPet />
+      </Suspense>
+    </StrictMode>,
+  );
+} else {
+  root.render(
   <StrictMode>
     <ToastProvider>
       <ConfirmProvider>
@@ -28,4 +41,5 @@ createRoot(document.getElementById('root')).render(
       </ConfirmProvider>
     </ToastProvider>
   </StrictMode>,
-);
+  );
+}

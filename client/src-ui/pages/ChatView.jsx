@@ -48,7 +48,9 @@ import {
   MessageCircleQuestion,
   PanelRight,
   Plug,
+  AtSign,
   Plus,
+  Sparkles,
   Search,
   ShieldAlert,
   ShieldCheck,
@@ -63,7 +65,7 @@ import {
   Zap,
   UserRound,
 } from 'lucide-react';
-import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 
@@ -95,10 +97,13 @@ import {
   KNOWN_DIALOGS,
   knownDialog,
   insertMention,
+  insertSkill,
   latestTodos,
   maskEmail,
   maskEmails,
   mentionAt,
+  skillAt,
+  slashAt,
   modelLabel,
   modelView,
   parseJson,
@@ -190,7 +195,7 @@ function codexActivity(t, activity, tool) {
  * SSE 连不上时 EventSource 自己重连，服务端拒绝（4xx）时它会放弃，这里隔几秒再试，并取一次快照拿到错误。
  * WebSocket 用不了、退回 SSE 时只给显示着的对话（`active`）开，免得把浏览器同一地址的 6 条连接占满。
  */
-function useChat(id, active) {
+export function useChat(id, active) {
   const [state, dispatch] = useReducer((s, a) => applyEvent(s, a.type, a.data), EMPTY);
   const [online, setOnline] = useState(false);
   const [error, setError] = useState(null);
@@ -2731,21 +2736,21 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
     }
   };
   const onKey = (e) => {
-    if (ment.length && !imeComposing(e) && !e.altKey && !e.ctrlKey && !e.metaKey) {
-      // @ 的提示开着：上下键选、回车或 Tab 用上、Esc 关掉
+    if (pickList.length && !imeComposing(e) && !e.altKey && !e.ctrlKey && !e.metaKey) {
+      // @ 文件、$ 技能的提示开着：上下键选、回车或 Tab 用上、Esc 关掉
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         e.preventDefault();
-        setMentPick((p) => (p + (e.key === 'ArrowDown' ? 1 : -1) + ment.length) % ment.length);
+        setMentPick((p) => (p + (e.key === 'ArrowDown' ? 1 : -1) + pickList.length) % pickList.length);
         return;
       }
       if ((e.key === 'Enter' || e.key === 'Tab') && !e.shiftKey) {
         e.preventDefault();
-        pickMention(ment[mentPick] ?? ment[0]);
+        pickMention(pickList[mentPick] ?? pickList[0]);
         return;
       }
       if (e.key === 'Escape') {
         e.preventDefault();
-        setMentOff(mention.start);
+        setMentOff((skillQ ?? mention).start);
         return;
       }
     }
@@ -2790,42 +2795,65 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
   // 输入 / 时：内置的常用命令 + 这个项目和用户自己的命令、技能（第一次用到时取）
   const [custom, setCustom] = useState(null);
   const [slashPick, setSlashPick] = useState(null);
-  const wantSlash = /^\/\S*$/.test(text);
+  // 输入 @ 时：这段对话的工作目录里的文件、目录（和 TUI 一样，选中后写成 @路径）
+  const [caret, setCaret] = useState(0);
+  // 开头的 /命令：光标在第一个词里就提示（后面已经有字也行）
+  const slashWord = slashAt(text, caret <= text.length ? caret : text.length);
+  const wantSlash = slashWord != null;
+  // Codex 的技能写成 `$名字`，句子里哪里都能写（和 Codex TUI 一样）
+  const skillQ = agentId === 'codex' && !disabled && caret <= text.length ? skillAt(text, caret) : null;
+  const wantList = wantSlash || skillQ != null;
   useEffect(() => {
-    if (wantSlash && custom === null) {
+    if (wantList && custom === null) {
       setCustom([]);
       api.get(`/instances/${id}/chat/commands`).then((r) => setCustom(r?.items ?? []), () => {});
     }
     setSlashPick(null);
-  }, [wantSlash, text]);
+  }, [wantList, text]);
   const slash = useMemo(() => {
     if (!wantSlash) return [];
-    const q = text.toLowerCase();
+    const q = slashWord.toLowerCase();
     const builtin = COMMANDS.filter(([name]) => (agentId === 'codex' ? CODEX_COMMANDS.includes(name) : agentId === 'dsh' ? DSH_COMMANDS.includes(name) : !CODEX_ONLY.includes(name))).map(([name, action]) => {
       const codex = agentId === 'codex' ? CODEX_ACTIONS[name] : null;
       return { name, action: codex ?? action, description: t(codex ? `chat.cmd.codex_${name.slice(1)}` : `chat.cmd.${name.slice(1)}`) };
     });
     const names = new Set([...builtin.map((c) => c.name), ...TERMINAL_ONLY]);
-    const mine = (custom ?? []).filter((c) => !names.has(c.name));
+    const mine = (custom ?? []).filter((c) => c.name.startsWith('/') && !names.has(c.name));
     const all = [...builtin, ...mine];
     const hit = all.filter((c) => c.name.toLowerCase().startsWith(q));
     return (hit.length ? hit : all.filter((c) => c.name.toLowerCase().includes(q.slice(1)))).slice(0, 40);
-  }, [wantSlash, text, custom]);
+  }, [wantSlash, slashWord, custom]);
+  // 把光标放到 at，并记下来（程序改了输入框的字以后）：在这次渲染完、下一个按键之前放好，
+  // 不用 requestAnimationFrame——选完马上接着打字时，晚到的光标会把刚打的字挤到后面去
+  const pendingCaret = useRef(null);
+  const caretTo = (at) => {
+    pendingCaret.current = at;
+    setCaret(at);
+  };
+  useLayoutEffect(() => {
+    const at = pendingCaret.current;
+    const el = area.current;
+    if (at == null || !el) return;
+    pendingCaret.current = null;
+    el.focus();
+    el.setSelectionRange(at, at);
+  });
   const pickSlash = (c) => {
+    const rest = text.slice(slashWord?.length ?? 0).replace(/^\s+/, '');
     if (c.action) {
-      setText('');
+      setText(rest);
+      caretTo(0);
       menuFor(c.action);
       return;
     }
-    setText(`${c.name} `);
-    area.current?.focus();
+    const head = `${c.name} `;
+    setText(head + rest);
+    caretTo(head.length);
   };
-  // 输入 @ 时：这段对话的工作目录里的文件、目录（和 TUI 一样，选中后写成 @路径）
-  const [caret, setCaret] = useState(0);
   const [mentOff, setMentOff] = useState(null);
   const [mentFound, setMentFound] = useState({ q: null, items: [] });
   const [mentPick, setMentPick] = useState(0);
-  const mention = !wantSlash && !disabled && caret <= text.length ? mentionAt(text, caret) : null;
+  const mention = !wantSlash && !skillQ && !disabled && caret <= text.length ? mentionAt(text, caret) : null;
   const mentQ = mention && mention.start !== mentOff ? mention.q : null;
   useEffect(() => {
     setMentPick(0);
@@ -2843,16 +2871,39 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
     };
   }, [mentQ, id]);
   const ment = mentQ != null && mentFound.q != null ? mentFound.items : [];
+  // $ 技能的提示：名字里有打的字就算（开头相同的排前面）
+  const skills = useMemo(() => {
+    if (!skillQ || skillQ.start === mentOff) return [];
+    const q = skillQ.q.toLowerCase();
+    const all = (custom ?? []).filter((c) => c.name.startsWith('$'));
+    const hit = all.filter((c) => c.name.slice(1).toLowerCase().includes(q));
+    hit.sort((a, b) => Number(!a.name.slice(1).toLowerCase().startsWith(q)) - Number(!b.name.slice(1).toLowerCase().startsWith(q)));
+    return hit.slice(0, 40);
+  }, [skillQ?.start, skillQ?.q, mentOff, custom]);
+  const pickList = skills.length ? skills : ment;
+  useEffect(() => setMentPick(0), [skillQ?.q]);
   const pickMention = (m) => {
-    const r = insertMention(text, mention.start, caret, m.path);
+    const r = m.path == null ? insertSkill(text, skillQ.start, caret, m.name) : insertMention(text, mention.start, caret, m.path);
     setText(r.text);
-    setCaret(r.caret);
-    requestAnimationFrame(() => {
-      const el = area.current;
-      if (!el) return;
-      el.focus();
-      el.setSelectionRange(r.caret, r.caret);
-    });
+    caretTo(r.caret);
+  };
+  // 输入框下面的 @、技能按钮（手机上打 @、$ 不方便）：在光标处插入，弹出同样的提示
+  const insertTrigger = (ch) => {
+    const el = area.current;
+    const at = el ? el.selectionStart ?? text.length : text.length;
+    if (ch === '/') {
+      // Claude Code / DSH 的命令和技能只认开头的 /
+      const rest = text.replace(/^\s+/, '');
+      setMentOff(null);
+      setText(rest ? `/ ${rest}` : '/');
+      caretTo(1);
+      return;
+    }
+    const pad = at > 0 && !/\s/.test(text[at - 1]) ? ' ' : '';
+    const next = `${text.slice(0, at)}${pad}${ch}${text.slice(at)}`;
+    setMentOff(null);
+    setText(next);
+    caretTo(at + pad.length + 1);
   };
   // Claude Code 跑完一轮后推荐的下一句（终端里灰着显示在输入框里）：空闲、输入框空着时显示，点一下或按 Tab 填进来
   const suggestion = phase === 'idle' && !offline && !text && !files.length ? status?.suggestion || null : null;
@@ -2906,7 +2957,20 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
           ))}
         </ul>
       )}
-      {ment.length > 0 && (
+      {skills.length > 0 && (
+        <ul className="chat-slash" role="listbox" aria-label={t('chat.skill_pick')}>
+          {skills.map((c, n) => (
+            <li key={c.name}>
+              <button type="button" aria-selected={mentPick === n} onMouseDown={(e) => e.preventDefault()} onClick={() => pickMention(c)}>
+                <b>{c.name}</b>
+                <span className="chat-note ellipsis">{c.description}</span>
+                {c.source && <span className="badge">{t(`chat.cmd_source_${c.source}`, { defaultValue: '' })}</span>}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {!skills.length && ment.length > 0 && (
         <ul className="chat-slash chat-mention" role="listbox" aria-label={t('chat.mention')}>
           {ment.map((m, n) => (
             <li key={m.path}>
@@ -3064,6 +3128,13 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
         <div className="chat-input-tools">
           <button type="button" className="btn btn-plain btn-icon" onClick={() => picker.current?.click()} disabled={disabled || caps.images === false} aria-label={t('chat.attach')} title={caps.images === false ? t('chat.no_images') : t('chat.attach')}>
             <Plus size={18} />
+          </button>
+          {/* 和终端里一样引用文件（@）、指定技能（Codex 是 $，Claude Code / DSH 是开头的 /） */}
+          <button type="button" className="btn btn-plain btn-icon chat-trigger-btn" onMouseDown={(e) => e.preventDefault()} onClick={() => insertTrigger('@')} disabled={disabled} aria-label={t('chat.mention')} title={t('chat.mention_hint')}>
+            <AtSign size={17} />
+          </button>
+          <button type="button" className="btn btn-plain btn-icon chat-trigger-btn" onMouseDown={(e) => e.preventDefault()} onClick={() => insertTrigger(agentId === 'codex' ? '$' : '/')} disabled={disabled} aria-label={t('chat.skill_pick')} title={t(agentId === 'codex' ? 'chat.skill_pick_codex' : 'chat.skill_pick_hint')}>
+            <Sparkles size={17} />
           </button>
           {caps.mode !== false && (
           <button type="button" className={`btn btn-plain chat-chip chat-chip-mode`} data-mode={status?.mode ?? ''} data-pop-anchor="" aria-expanded={menu === 'mode'} disabled={!ready} onClick={() => setMenu(menu === 'mode' ? null : 'mode')} title={t('chat.mode_pick')}>
@@ -4590,7 +4661,7 @@ export default function ChatView({ id, launch, active, touch, offline = false, o
           )}
           {status && <SideToggle side={side} onSide={setSide} />}
           {phase === 'tui' && <TuiDialog id={id} dialog={status?.dialog ?? null} limit={status?.limit} />}
-          <ChatPet id={id} active={active} status={status} touch={touch} />
+          <ChatPet id={id} active={active} status={status} items={items} touch={touch} />
         </div>
         <div className="chat-dock">
           {todos && todos.some((x) => x.status !== 'completed') && (

@@ -1,6 +1,6 @@
 # 对话宠物与宠物包格式（设计）
 
-2026-11-03 · 状态：设计稿，未开发。制作教程见 [PET_PACK_GUIDE.md](PET_PACK_GUIDE.md)。
+2026-11-03 · 状态：一期、二期已开发（二期 2026-11-04）。制作教程见 [PET_PACK_GUIDE.md](PET_PACK_GUIDE.md)。
 
 结论：对话界面角落住一只会动的宠物，跟着 agent 的状态换动作（思考、调工具、等你确认、做完庆祝、出错叹气），
 点它、拖它、甩它都有反应，闲着时自己玩、走来走去、困了睡觉。宠物是**宠物包**：一个文件夹或 zip，里面一份 `pet.json` 加一组透明动画。
@@ -160,6 +160,22 @@ JSON（允许 `//` 注释和尾逗号，按 JSONC 解析）。下面每个字段
 }
 ```
 
+#### 3.4.1 看得懂在干什么（可选）
+
+看看从对话里认出一些事（`src-ui/shared/pet/events.js`），会说一句台词（§3.6），下面这几种还会插播一段动作。
+都不是必需的，没配就借 `done` / `error` 的动作，再没有就只说话：
+
+| 状态 | 什么时候 | 没配时用 |
+| --- | --- | --- |
+| `testPass` | 跑测试的命令成功了（含“之前挂的测试修好了”） | `done` |
+| `testFail` | 跑测试的命令失败了 | `error` |
+| `commit` | `git commit` / `git push` 成功了 | `done` |
+| `hello` | 今天第一次见面打招呼 | `done` |
+| `levelUp` | 好感度升级（§3.7） | `done` |
+
+只说话、不插播动作的：发出消息、想了很久、改文件 / 改了很多文件、搜索、上网、装依赖、编译、派子代理、连着出错、
+等你批准危险命令（删文件、强推、`reset --hard`……）、一轮做完的总结（很快 / 很久 / 很忙）、深夜、连续干太久。
+
 **最小可用包**只要 `idle` 一段；7 段（idle、thinking、tool、waiting、done、error、click）就能把所有状态演出来。
 
 ### 3.5 互动和闲时（actions、behavior）
@@ -167,6 +183,8 @@ JSON（允许 `//` 注释和尾逗号，按 JSONC 解析）。下面每个字段
 ```jsonc
 "actions": {
   "click":  ["click-happy", "click-shy", "click-pout"],   // 点一下
+  "pet":    ["happy"],                                    // 可选：被摸头（鼠标在身上来回蹭）；没配用 click
+  "annoyed": ["pout"],                                    // 可选：2.5 秒里连点 5 下以上，烦了；没配用 click
   "drag":   ["held"],                                     // 被拎起来悬空（应能 loop）
   "land":   ["land"],                                     // 可选：被甩出去落地
   "turn":   ["look-around"],                              // 转身（每项都必须 turn: true）
@@ -198,8 +216,33 @@ JSON（允许 `//` 注释和尾逗号，按 JSONC 解析）。下面每个字段
 }
 ```
 
-进入对应状态或动作时随机抽一句，头顶冒 3 秒气泡。按界面语言取，取不到用 `zh-CN`，再取不到就不说。
-第二期打算加 `persona`（人设提示词，让模型生成碎碎念），v1 里写了也忽略。
+进入对应状态或动作时随机抽一句，头顶冒 3~6 秒气泡。按界面语言取，取不到用 `zh-CN`（英文界面不退回中文）。
+
+台词从三个地方找，前面的优先：
+
+1. 包里写的 `lines`；
+2. 按人设生成的一批（设置 → 宠物 → 台词 → 生成：让模型照 `persona` 一次写一批存起来，之后只是挑一句，不再花 token）；
+3. 看看内置的通用台词（`src-ui/shared/pet/lines.js`）。包里写 `"builtinLines": false` 就不用内置的。
+
+```jsonc
+"persona": { "zh-CN": "傲娇的猫娘，嘴上嫌弃主人写的代码，其实很关心；句尾爱带“喵”" },   // 可选
+"builtinLines": true                                                                   // 可选，缺省 true
+```
+
+台词键（全部见 `src/pet_lines.rs` 的 `KEYS`）：除了上面那些，还有
+`hello` `morning` `evening` `lateNight` `longSession` `sent` `longThink` `edit` `editMany` `search` `web` `testRun` `testPass` `testFail` `fixed`
+`install` `build` `commit` `push` `agentSpawn` `errorStreak` `danger` `recapQuick` `recapLong` `recapBusy` `petted` `annoyed` `dragged` `thrown` `levelUp`。
+句子里可以用占位符，数据填不上的句子不会被选：`{min}`（分钟）、`{n}`（个数）、`{file}`（文件名）、`{dur}`（用时，如 `6m 12s`）、
+`{files}`、`{cmds}`（这一轮改了几个文件、跑了几条命令）、`{level}`（好感等级）。
+
+“碎碎念”（设置里的开关，默认开）管的是 §3.4.1 那些按运行数据说的话；关掉后只在状态变化、点它时说话。
+
+### 3.7 好感度
+
+和每只宠物的好感（经验）存在这台电脑上（`pet.bond`，按 `source:id`），手机、电脑打开都算：
+摸头 +3、点一下 +1（3 秒内连点只算一次）、陪你做完一轮 +2、测试通过 +1、修好挂掉的测试 +3、提交 +2、每天第一次见面 +5。
+等级：Lv2 20、Lv3 60、Lv4 150、Lv5 300、Lv6 600、Lv7 1000，之后每级 +600。升级时插播 `levelUp`、头顶冒心。
+设置的宠物卡片上显示等级、一起过了几天、做完几轮、摸了几次头。
 
 ## 4. 播放规则
 
@@ -211,7 +254,10 @@ JSON（允许 `//` 注释和尾逗号，按 JSONC 解析）。下面每个字段
 - 睡着时 agent 开始干活 → 播醒来段再进状态；睡着时点它 = 叫醒。
 - 朝向：走动方向决定朝向，`mirror: false` 的段在朝右时跳过（池子里全是这种就不翻转直接播）。
 - `move`：只沿对话区底边走，不出界；走到边上就掉头。
-- 拖拽：手指或鼠标按住拖，松手按速度甩出去，碰边反弹、落地（物理参数看看自己定，不进包）。
+- 拖拽：手指或鼠标按住拖，**拖到哪停在哪**（网页里是整个页面，桌面宠物是整个屏幕）；松手时有速度就甩出去，滑一段、碰边反弹后停下（不往下掉）。位置记在浏览器里。
+- 摸头：鼠标没按着、在身上左右来回蹭（1.2 秒里换向 4 次）。连点：2.5 秒里 5 下烦了，8 下以上跳开。
+- 看人：闲着时鼠标在另一边停 1.5 秒，转过去看（有 `turn` 段播转身，没有就直接翻过来）；在输入框里打字时看向输入框。
+- 头顶的小特效（心、怒、闪光、汗、Zzz……）是看看画的，不进包。
 - 系统开了“减少动态效果”：只显示封面，状态变化只换气泡。
 - 页面在后台（`document.hidden`）时暂停播放。
 
@@ -251,6 +297,13 @@ JSON（允许 `//` 注释和尾逗号，按 JSONC 解析）。下面每个字段
 
 远程（中转 / WebRTC）打开时文件也从这台电脑拿；片段按需加载，一个状态只先拿池子里抽中的那段。
 
+### 6.2.1 好感度、台词、桌面宠物的接口
+
+- `POST /api/pets/{source}/{id}/bond {add: {xp, clicks, pets, turns, tests, fixes, commits, errors}, day: "YYYY-MM-DD"}` → 累计的好感；`day`（页面的本地日期）换了一天时 `days + 1`、返回 `newDay: true`（页面打招呼）。
+- `GET /api/pets/{source}/{id}/lines` → 生成的台词 `{ "zh-CN": { 键: [句子] }, at, via }`；`POST … {lang, via: auto|claude|codex|api}` 生成（`src/pet_lines.rs`：
+  OpenAI 兼容接口，或本机 `claude -p --model haiku`、`codex exec`，在空的临时目录里跑，3 分钟超时）；`DELETE …` 删掉。
+- `GET /api/desktop/pet` → `{running, focus}`；`PUT /api/desktop/pet {hit, grab, focus}`（只认本机）。见 §6.5。
+
 ### 6.3 设置
 
 存在 `Settings`（`src/settings.rs`）里：
@@ -260,12 +313,25 @@ JSON（允许 `//` 注释和尾逗号，按 JSONC 解析）。下面每个字段
   "enabled": true,
   "byAgent": { "claude": "local:claude-girl", "codex": "local:robot", "dsh": null },
   "default": null,            // 上面没配的对话类型用哪只
-  "size": 1,                  // 缩放，1 = 桌面 160 px 高、手机 112 px 高
-  "lines": true               // 显示气泡
+  "size": 1,                  // 缩放，1 = 桌面 130 px 高、手机 96 px 高
+  "lines": true,              // 显示气泡
+  "chatter": true,            // 碎碎念（§3.6）
+  "desktop": true,            // 桌面应用里宠物住在桌面上（§6.5）
+  "api": { "url": "https://api.deepseek.com/v1", "model": "deepseek-chat", "key": "…" }   // 可选：生成台词用；页面只看到 keySet
 }
 ```
 
 浏览器各自记“这只藏起来了”（localStorage），和以前的小胖鱼一样。
+
+### 6.3.1 从其他电脑导入
+
+同一账户有多台电脑时，设置 → 宠物下面多一张“从其他电脑导入”：点开一台电脑列出它导入过的宠物（`local` 的），点“导入”才开始。
+
+- 导出方（A）：`GET /api/pets/local/{id}/export`，把 `pets/<id>/` 打成不压缩的 zip（不带隐藏文件、不跟符号链接）流式发出；
+- 导入方（B，界面当前选中的电脑）：`POST /api/pets/from-device {device, id}` 马上返回，B 的后端经 `rtc::outbound` 向 A 取包，
+  存成临时文件后按普通导入校验、装好（同 id 覆盖），`.origin.json` 记 `{device}`；`GET /api/pets/from-device` 看进度
+  （进行中的 + 10 分钟内做完的），界面每秒轮询，做完弹提示。离开页面不影响。
+- A 是旧版本（没有这个接口）时报 `PET_PEER_OLD`。实现在 `src/pet_transfer.rs`。
 
 ### 6.4 前端
 
@@ -276,10 +342,22 @@ JSON（允许 `//` 注释和尾逗号，按 JSONC 解析）。下面每个字段
 - 状态来源就是对话页已有的 `status`：`phase`（`running` / `approval` / `tui` / `idle` / `detached`）、`tool`、`error`、`pending.kind`。
   `running` 且有 `tool` → `tool`；`tool` 从有变没 → `toolDone`；`running → idle` 且没有 `error` → `done`，有 → `error`。
 
-### 6.5 分期
+### 6.5 桌面宠物（桌面应用）
+
+Windows / macOS 桌面应用（`src/desktop.rs`）开一个铺满主屏工作区的透明、无边框、置顶、不进任务栏的窗口（标签 `pet`），
+加载 `/pet-desk`（`src-ui/pages/DeskPet.jsx`，只放宠物）。应用最小化、主窗口关掉（隐藏）时它都在，能拖到屏幕任何地方。
+
+- 鼠标穿透：页面每次宠物动了把人物的框报给 `PUT /api/desktop/pet`（`src/desk_pet.rs` 记着），桌面这边每 40 ms 看一次光标在不在框里，
+  在就让窗口接鼠标，不在就 `set_ignore_cursor_events(true)` 穿透到下面的窗口；拖着时（`grab`）一直接。
+- 跟哪个对话：主窗口的对话页把正在看的对话报成 `focus`，宠物窗口每 2 秒看一次、跟着换；还没打开过对话时用默认宠物待着。
+- 开关：设置里的“桌面宠物”（只在桌面应用里显示），改了通过 `desk_pet::set_wanted` 通知桌面那边开、关窗口；开着时主窗口的对话页不再放宠物。
+- macOS 透明窗口要 Tauri 的 `macos-private-api`（Cargo 特性 + `tauri.conf.json` 的 `macOSPrivateApi`）。
+
+### 6.6 分期
 
 1. 第一期：格式、导入、视频 + 精灵图播放、状态联动、点击、拖拽甩抛、闲时随机 / 走动 / 睡觉、气泡、`looklook pet check`。
-2. 第二期：碎碎念（`persona`，用哪个模型、费用怎么控制另行设计）。
+2. 第二期（2026-11-04）：看得懂在干什么、碎碎念（按运行数据套台词，不花 token；按 `persona` 一次性生成一批台词）、
+   摸头 / 连点 / 看人、整页随意拖放、好感度、桌面宠物窗口。
 3. 第三期：做包的辅助（从立绘出提示词、批量抠像脚本）。
 
 ## 7. 许可

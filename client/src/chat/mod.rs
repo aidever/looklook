@@ -1321,6 +1321,9 @@ impl Chat {
         if self.is_dsh(id) {
             return self.dsh_commands(id).await;
         }
+        if self.is_codex(id) {
+            return self.codex_commands(id).await;
+        }
         let row = self.store.instance(id)?.ok_or_else(LocalError::not_found)?;
         Ok(json!({ "items": self.inst(id).agent.commands(Path::new(&row.workdir)) }))
     }

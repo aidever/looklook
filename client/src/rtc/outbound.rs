@@ -742,6 +742,37 @@ mod loopback {
         assert_eq!(r.into_body().collect().await.unwrap().to_bytes().len(), big.len());
     }
 
+    /// 从另一台电脑导入宠物（pet_transfer.rs）：导出的 zip 过通道，这边装好；没有的宠物报找不到，旧版本（没有接口）报 PET_PEER_OLD
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pet_pack_crosses_the_channel() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        crate::pets::tests::min_pack(src.path());
+        // 加一个大一点的文件：要分很多帧
+        let id = crate::pets::import_path(a.path(), src.path()).unwrap().id;
+        std::fs::write(crate::pets::local_dir(a.path()).join(&id).join("big.bin"), vec![7u8; 3 << 20]).unwrap();
+        let home = a.path().to_path_buf();
+        let router = axum::Router::new().route(
+            "/api/pets/local/{id}/export",
+            get(move |axum::extract::Path(id): axum::extract::Path<String>| {
+                let home = home.clone();
+                async move { crate::pet_transfer::export_response(home, id).await.map_err(|e| e.into_response()) }
+            }),
+        );
+        let link = pair(router).await;
+        let p = crate::pet_transfer::download(link.clone(), b.path(), "k", "deva", &id).await.unwrap();
+        assert_eq!(p.id, id);
+        let dir = crate::pets::local_dir(b.path()).join(&id);
+        assert_eq!(std::fs::read(dir.join("big.bin")).unwrap().len(), 3 << 20);
+        assert!(std::fs::read_to_string(dir.join(".origin.json")).unwrap().contains("deva"));
+        let e = crate::pet_transfer::download(link.clone(), b.path(), "k", "deva", "nope").await.unwrap_err();
+        assert_eq!(e.code, "NOT_FOUND");
+        let old = pair(axum::Router::new()).await;
+        let e = crate::pet_transfer::download(old, b.path(), "k", "deva", &id).await.unwrap_err();
+        assert_eq!(e.code, "PET_PEER_OLD");
+    }
+
     fn text_router() -> (axum::Router, String) {
         let text: String = (0..20_000).map(|i| format!("line {i}\n")).collect();
         let t = text.clone();

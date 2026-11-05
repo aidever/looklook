@@ -24,7 +24,11 @@ pub const MAX_FILE: u64 = 8 << 20;
 pub const MAX_FILES: usize = 400;
 const MAX_MANIFEST: u64 = 1 << 20;
 /// 状态（§3.4）
-const STATES: &[&str] = &["idle", "thinking", "tool", "toolDone", "waiting", "terminal", "done", "error", "offline"];
+const STATES: &[&str] = &[
+    "idle", "thinking", "tool", "toolDone", "waiting", "terminal", "done", "error", "offline",
+    // 看得懂在干什么（§3.4.1）：没配时按 FALLBACK 用 done / error，都没有就只说话
+    "testPass", "testFail", "commit", "hello", "levelUp",
+];
 const AGENTS: &[&str] = &["claude", "codex", "dsh", "opencode"];
 const SETTINGS_KEY: &str = "pet";
 /// 装进 `pets/<id>/` 时记下从哪来的（现在只有 GitHub：`{"github": "owner/repo", "ref", "path"}`）
@@ -231,6 +235,10 @@ pub struct Group {
 #[serde(default)]
 pub struct Actions {
     pub click: Vec<Pick>,
+    /// 被摸头（鼠标在身上来回蹭）；没配用 click
+    pub pet: Vec<Pick>,
+    /// 连着点太多下，烦了；没配用 click
+    pub annoyed: Vec<Pick>,
     pub drag: Vec<Pick>,
     pub land: Vec<Pick>,
     pub turn: Vec<Pick>,
@@ -284,6 +292,12 @@ pub struct Manifest {
     pub actions: Actions,
     pub behavior: Behavior,
     pub lines: BTreeMap<String, BTreeMap<String, Vec<String>>>,
+    /// 人设（§3.6）：生成碎碎念文案时交给模型；不写就按名字和介绍
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub persona: Option<Text>,
+    /// 内置的通用台词（包里没写的键用它补）；false = 只说包里写的
+    #[serde(rename = "builtinLines", skip_serializing_if = "Option::is_none")]
+    pub builtin_lines: Option<bool>,
     /// 输出时填：封面的键
     #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
@@ -669,7 +683,7 @@ pub fn validate(m: &Manifest) -> Result<(), PackError> {
         return Err(perr("field", "states.idle"));
     }
     let a = &m.actions;
-    for (list, what) in [(&a.click, "click"), (&a.drag, "drag"), (&a.land, "land"), (&a.turn, "turn"), (&a.walk, "move")] {
+    for (list, what) in [(&a.click, "click"), (&a.pet, "pet"), (&a.annoyed, "annoyed"), (&a.drag, "drag"), (&a.land, "land"), (&a.turn, "turn"), (&a.walk, "move")] {
         check(list, &format!("actions.{what}"))?;
     }
     if let Some(p) = a.turn.iter().find(|p| !m.clips[&p.clip].turn) {
@@ -766,12 +780,31 @@ pub struct PetSettings {
     pub default: Option<String>,
     pub size: f64,
     pub lines: bool,
+    /// 碎碎念：按运行数据（做完一轮花了多久、改了几个文件、测试过没过……）套文案说一句，不花 token
+    pub chatter: bool,
+    /// 桌面应用里宠物住在桌面上（独立的透明窗口，应用最小化也在），不在页面里
+    pub desktop: bool,
+    /// 生成人设文案用的接口（OpenAI 兼容）；没配就用本机的 Claude Code / Codex
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api: Option<GenApi>,
 }
 
 impl Default for PetSettings {
     fn default() -> Self {
-        Self { enabled: true, by_agent: BTreeMap::new(), default: None, size: 1.0, lines: true }
+        Self { enabled: true, by_agent: BTreeMap::new(), default: None, size: 1.0, lines: true, chatter: true, desktop: true, api: None }
     }
+}
+
+/// OpenAI 兼容的接口：`{url}/chat/completions`
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct GenApi {
+    pub url: String,
+    pub key: String,
+    pub model: String,
+    /// 只在给前端时用：存着密钥（密钥本身不发给页面）
+    #[serde(rename = "keySet", skip_deserializing)]
+    pub key_set: bool,
 }
 
 impl PetSettings {
@@ -779,7 +812,31 @@ impl PetSettings {
         store.get(SETTINGS_KEY).ok().flatten().unwrap_or_default()
     }
 
+    /// 给页面看的：密钥换成 `keySet`
+    pub fn masked(mut self) -> Self {
+        if let Some(a) = self.api.as_mut() {
+            a.key_set = !a.key.is_empty();
+            a.key.clear();
+        }
+        self
+    }
+
     pub fn save(mut self, store: &crate::store::Store) -> Result<Self, LocalError> {
+        // 页面不知道密钥：没填新的就留着原来的
+        if let Some(a) = self.api.as_mut() {
+            a.url = a.url.trim().trim_end_matches('/').to_string();
+            a.model = a.model.trim().to_string();
+            a.key = a.key.trim().to_string();
+            if a.key.is_empty() {
+                a.key = Self::load(store).api.map(|o| o.key).unwrap_or_default();
+            }
+            if !(a.url.starts_with("http://") || a.url.starts_with("https://")) || a.url.len() > 500 || a.model.len() > 200 || a.key.len() > 1000 {
+                return Err(LocalError::invalid("pet", "api"));
+            }
+        }
+        if self.api.as_ref().is_some_and(|a| a.url.is_empty() && a.model.is_empty()) {
+            self.api = None;
+        }
         self.size = if self.size.is_finite() { self.size.clamp(0.5, 2.0) } else { 1.0 };
         self.by_agent.retain(|k, _| AGENTS.contains(&k.as_str()));
         let ok = |k: &Option<String>| k.as_ref().is_none_or(|k| k.len() <= 200 && k.contains(':'));
@@ -787,7 +844,8 @@ impl PetSettings {
             return Err(LocalError::invalid("pet", "format"));
         }
         store.set(SETTINGS_KEY, &self)?;
-        Ok(self)
+        crate::desk_pet::set_wanted(self.enabled && self.desktop);
+        Ok(self.masked())
     }
 
     /// 这种对话用哪只（`source:id`）
@@ -810,7 +868,94 @@ pub fn for_agent(home: &Path, store: &crate::store::Store, agent: &str) -> Value
         "pet": pack.as_ref().map(|p| json!({ "key": p.key(), "source": p.source, "id": p.id, "manifest": p.manifest_out() })),
         "size": s.size,
         "lines": s.lines,
+        "chatter": s.chatter,
+        "desktop": s.desktop,
+        "gen": pack.as_ref().map(|p| gen_lines(store, &p.key())),
     })
+}
+
+// ---------------- 好感度、碎碎念文案 ----------------
+
+const BOND_KEY: &str = "pet.bond";
+static BOND_LOCK: Mutex<()> = Mutex::new(());
+
+/// 和一只宠物处了多久、一起干了多少事（存在这台电脑上，手机电脑打开都算）
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Bond {
+    /// 好感（经验）：摸头、点、陪着做完一轮都加
+    pub xp: u64,
+    pub clicks: u64,
+    pub pets: u64,
+    pub turns: u64,
+    pub tests: u64,
+    pub fixes: u64,
+    pub commits: u64,
+    pub errors: u64,
+    /// 第一次见面（毫秒）
+    pub met: u64,
+    /// 一起过了几天（有打开过的日子）、最后一天（浏览器本地日期 `YYYY-MM-DD`）
+    pub days: u32,
+    #[serde(rename = "lastDay")]
+    pub last_day: String,
+}
+
+/// 加一些计数。`day` 是页面的本地日期：换了一天 `days` + 1，返回里 `newDay` = true（页面据此打招呼）
+pub fn bond_add(store: &crate::store::Store, key: &str, add: &BTreeMap<String, u64>, day: Option<&str>) -> Result<Value, LocalError> {
+    let _g = BOND_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut all: BTreeMap<String, Bond> = store.get(BOND_KEY).ok().flatten().unwrap_or_default();
+    let b = all.entry(key.to_string()).or_default();
+    if b.met == 0 && day.is_some() {
+        b.met = crate::util::system_ms().max(0) as u64;
+    }
+    // 一次最多加这么多，防止页面出错刷爆
+    let n = |k: &str| add.get(k).copied().unwrap_or(0).min(50);
+    b.xp += n("xp");
+    b.clicks += n("clicks");
+    b.pets += n("pets");
+    b.turns += n("turns");
+    b.tests += n("tests");
+    b.fixes += n("fixes");
+    b.commits += n("commits");
+    b.errors += n("errors");
+    let mut new_day = false;
+    if let Some(d) = day.filter(|d| d.len() == 10 && d.bytes().all(|c| c.is_ascii_digit() || c == b'-')) {
+        if b.last_day.as_str() < d {
+            b.last_day = d.to_string();
+            b.days += 1;
+            new_day = true;
+        }
+    }
+    let out = b.clone();
+    if all.len() > 200 {
+        // 删掉的宠物留下的：只留最近的
+        let mut keys: Vec<_> = all.iter().map(|(k, v)| (v.last_day.clone(), k.clone())).collect();
+        keys.sort();
+        for (_, k) in keys.into_iter().take(all.len() - 200) {
+            all.remove(&k);
+        }
+    }
+    store.set(BOND_KEY, &all)?;
+    let mut v = serde_json::to_value(out).unwrap_or_default();
+    v["newDay"] = json!(new_day);
+    Ok(v)
+}
+
+fn gen_key(pet: &str) -> String {
+    format!("pet.lines.{pet}")
+}
+
+/// 按人设生成的一批文案：`{ lang: { 键: [句子] } , at, via }`
+pub fn gen_lines(store: &crate::store::Store, pet: &str) -> Value {
+    store.get::<Value>(&gen_key(pet)).ok().flatten().unwrap_or(Value::Null)
+}
+
+pub fn set_gen_lines(store: &crate::store::Store, pet: &str, v: Option<&Value>) -> Result<(), LocalError> {
+    match v {
+        Some(v) => store.set(&gen_key(pet), v)?,
+        None => store.remove(&gen_key(pet))?,
+    }
+    Ok(())
 }
 
 // ---------------- 文件 ----------------
@@ -951,12 +1096,17 @@ pub(crate) fn pack_root(dir: &Path) -> Option<PathBuf> {
 
 /// 导入一个 `.llpet` / `.zip`：解压到临时目录 → 校验 → 换掉 `pets/<id>/`（同 id 覆盖）
 pub fn import(home: &Path, zip_path: &Path) -> Result<Pack, PackError> {
+    import_with_origin(home, zip_path, None)
+}
+
+/// 同 [`import`]，`origin` 写进 `.origin.json`（从哪装的，比如另一台电脑）
+pub fn import_with_origin(home: &Path, zip_path: &Path, origin: Option<&Value>) -> Result<Pack, PackError> {
     let base = local_dir(home);
     std::fs::create_dir_all(&base).map_err(|e| perr("io", e.to_string()))?;
     let tmp = tempfile::Builder::new().prefix(".import-").tempdir_in(&base).map_err(|e| perr("io", e.to_string()))?;
     unzip(zip_path, tmp.path())?;
     let root = pack_root(tmp.path()).ok_or_else(|| perr("missing_file", "pet.json"))?;
-    install_root(home, &root, None)
+    install_root(home, &root, origin)
 }
 
 /// 从这台电脑上的路径装：`.llpet` / `.zip` 文件，或者解开的宠物文件夹（选文件夹本身或里面的 `pet.json` 都行）。

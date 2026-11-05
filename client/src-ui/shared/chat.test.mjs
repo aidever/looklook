@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { applyEvent, insertMention, mentionAt, backgroundCounts, chatRows, conversationResources, diffLines, diffStat, EMPTY, fieldKind, knownDialog, latestTodos, localFilePath, lineDiff, baseModel, modelFamily, modelLabel, modelView, parseJson, questionAnswers, slashAction, splitLinks, tokens, resultsById, toolCounts, toolSummary, toolUseIds, workParts } from './chat.js';
+import { applyEvent, insertMention, insertSkill, mentionAt, skillAt, slashAt, backgroundCounts, chatRows, conversationResources, diffLines, diffStat, EMPTY, fieldKind, knownDialog, latestTodos, localFilePath, lineDiff, baseModel, modelFamily, modelLabel, modelView, parseJson, questionAnswers, slashAction, splitLinks, tokens, resultsById, toolCounts, toolSummary, toolUseIds, workParts } from './chat.js';
 
 test('events merge into the tail and update the last item', () => {
   let s = applyEvent(EMPTY, 'snapshot', { status: { phase: 'idle' }, start: 10, total: 12, items: [{ key: 'a' }, { key: 'b' }] });
@@ -262,6 +262,19 @@ test('work parts: process collapses into one block, trailing text is the answer'
   assert.deepEqual(live[1], { k: 'work', key: 'w:a', rows: [1, 2], running: true, answer: false, turn: null });
   // 没配上的工具结果不打断处理过程
   assert.deepEqual(workParts([tool('a'), item('r', 'tool_result'), text('b')], false).map((p) => p.k), ['work', 'row']);
+});
+
+test('skillAt / insertSkill / slashAt：$技能、开头的 /命令', () => {
+  assert.deepEqual(skillAt('用 $pd', 5), { start: 2, q: 'pd' });
+  assert.deepEqual(skillAt('$', 1), { start: 0, q: '' });
+  assert.equal(skillAt('a$b', 3), null, '前面不是空白不算');
+  assert.equal(skillAt('$a b', 4), null);
+  assert.deepEqual(insertSkill('用 $pd 读', 2, 5, '$pdf'), { text: '用 $pdf 读', caret: 7 });
+  assert.equal(slashAt('/re', 3), '/re');
+  assert.equal(slashAt('/ 说点什么', 1), '/', '后面已经有字也能补全');
+  assert.equal(slashAt('/review 改', 9), null, '光标不在第一个词里');
+  assert.equal(slashAt('/rev', 2), null, '光标后面紧跟着字');
+  assert.equal(slashAt('hi /x', 5), null);
 });
 
 test('mentionAt / insertMention：输入框里的 @ 提示', () => {

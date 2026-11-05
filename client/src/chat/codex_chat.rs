@@ -77,6 +77,56 @@ pub struct Hub {
     /// 这些对话起过名或正在起（没拿到名字的会拿掉，下一轮再试）；还有每个对话等着起名用的那句话
     titled: Mutex<HashSet<String>>,
     title_prompts: Mutex<HashMap<String, String>>,
+    /// `skills/list` 的结果（工作目录 → 什么时候取的、技能列表），输入 `$` 时提示、发送时把 `$名字` 换成技能
+    skills: Mutex<HashMap<String, (Instant, Vec<Skill>)>>,
+}
+
+/// Codex 的一个技能（app-server `skills/list` 里启用了的）
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Skill {
+    pub name: String,
+    pub path: String,
+    pub description: String,
+    /// user | repo | system | admin
+    pub scope: String,
+}
+
+const SKILLS_TTL: Duration = Duration::from_secs(20);
+
+fn parse_skills(r: &Value) -> Vec<Skill> {
+    let mut out: Vec<Skill> = vec![];
+    for e in r["data"].as_array().into_iter().flatten() {
+        for s in e["skills"].as_array().into_iter().flatten() {
+            let (Some(name), Some(path)) = (s["name"].as_str(), s["path"].as_str()) else { continue };
+            if s["enabled"] == false || out.iter().any(|x| x.name == name) {
+                continue;
+            }
+            let short = s["interface"]["shortDescription"].as_str().or(s["shortDescription"].as_str());
+            let description = short.or(s["description"].as_str()).unwrap_or("").lines().next().unwrap_or("").trim().chars().take(200).collect();
+            out.push(Skill { name: name.into(), path: path.into(), description, scope: s["scope"].as_str().unwrap_or("user").into() });
+        }
+    }
+    out
+}
+
+/// 文字里点名的技能（`$名字`，和 Codex TUI 一样）：前面是开头或空白，名字后面不能紧跟名字里的字符
+fn mentioned_skills<'a>(text: &str, skills: &'a [Skill]) -> Vec<&'a Skill> {
+    let mut out: Vec<&Skill> = vec![];
+    let name_char = |c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | ':' | '.');
+    for (i, _) in text.match_indices('$') {
+        if text[..i].chars().next_back().is_some_and(|c| !c.is_whitespace()) {
+            continue;
+        }
+        let rest = &text[i + 1..];
+        let end = rest.find(|c: char| !name_char(c)).unwrap_or(rest.len());
+        let word = rest[..end].trim_end_matches('.');
+        if let Some(s) = skills.iter().find(|s| s.name == word) {
+            if !out.iter().any(|x| x.name == s.name) {
+                out.push(s);
+            }
+        }
+    }
+    out
 }
 
 /// Codex 这边每个终端多记的状态
@@ -957,7 +1007,16 @@ impl Chat {
             Self::set_phase(&inst, &mut st, Phase::Running, None);
             return Ok(json!({ "delivered": true }));
         }
-        let input = text_input(text, images);
+        let mut input = text_input(text, images);
+        // `$技能名`：和 TUI 一样另外带上技能（名字 + SKILL.md 的路径），Codex 才会按技能读进来
+        if text.contains('$') {
+            let skills = self.codex_skill_list(id, false).await.unwrap_or_default();
+            if let Some(v) = input.as_array_mut() {
+                for s in mentioned_skills(text, &skills) {
+                    v.push(json!({ "type": "skill", "name": s.name, "path": s.path }));
+                }
+            }
+        }
         // 这一轮还在跑：插话（Codex 会在下一步之前看到）
         if let (Phase::Running, Some(turn)) = (phase, turn) {
             // 先记下再发：Codex 读到它的通知可能比这次请求的答复先到
@@ -1162,6 +1221,31 @@ impl Chat {
         }
         Self::emit_status(&inst, &st);
         Ok(())
+    }
+
+    /// 这段对话工作目录下能用的技能（app-server `skills/list`，缓存 [`SKILLS_TTL`]）
+    pub(super) async fn codex_skill_list(&self, id: &str, fresh: bool) -> Result<Vec<Skill>, LocalError> {
+        let cwd = self.codex_current_cwd(id)?;
+        if !fresh {
+            if let Some((at, v)) = lock(&self.codex.skills).get(&cwd) {
+                if at.elapsed() < SKILLS_TTL {
+                    return Ok(v.clone());
+                }
+            }
+        }
+        let server = self.codex_server().await?;
+        let r = server.call("skills/list", json!({ "cwds": [cwd], "forceReload": fresh })).await?;
+        let list = parse_skills(&r);
+        let mut m = lock(&self.codex.skills);
+        m.retain(|_, (at, _)| at.elapsed() < SKILLS_TTL);
+        m.insert(cwd, (Instant::now(), list.clone()));
+        Ok(list)
+    }
+
+    /// 输入框打 `$` 时提示的技能：名字写成 `$名字`
+    pub(super) async fn codex_commands(&self, id: &str) -> Result<Value, LocalError> {
+        let list = self.codex_skill_list(id, true).await?;
+        Ok(json!({ "items": list.iter().map(|s| json!({ "name": format!("${}", s.name), "description": s.description, "source": format!("codex_{}", s.scope) })).collect::<Vec<_>>() }))
     }
 
     pub(super) async fn codex_models(&self, id: &str) -> Result<Value, LocalError> {
@@ -2202,6 +2286,15 @@ mod tests {
     #[test]
     fn input_with_images() {
         let v = text_input("hi", &["C:\\a.png".into()]);
+        let skills = parse_skills(&json!({ "data": [{ "cwd": "/p", "errors": [], "skills": [
+            { "name": "pdf", "path": "/s/pdf/SKILL.md", "description": "Read PDFs\nmore", "enabled": true, "scope": "user" },
+            { "name": "off", "path": "/s/off/SKILL.md", "description": "x", "enabled": false, "scope": "user" },
+            { "name": "my-tool", "path": "/r/SKILL.md", "description": "d", "shortDescription": "short", "enabled": true, "scope": "repo" },
+        ] }] }));
+        assert_eq!(skills.iter().map(|s| (s.name.as_str(), s.description.as_str())).collect::<Vec<_>>(), [("pdf", "Read PDFs"), ("my-tool", "short")]);
+        let hit = |t: &str| mentioned_skills(t, &skills).iter().map(|s| s.name.clone()).collect::<Vec<_>>();
+        assert_eq!(hit("用 $pdf 读一下，再 $my-tool."), ["pdf", "my-tool"]);
+        assert_eq!(hit("a$pdf $pdfx $off $pdf"), ["pdf"]);
         assert_eq!(v[0]["type"], "text");
         assert_eq!(v[1], json!({ "type": "localImage", "path": "C:\\a.png" }));
     }

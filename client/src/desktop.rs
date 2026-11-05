@@ -33,6 +33,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 const MAIN: &str = "main";
+/// 桌面宠物窗口（`desk_pet`）：铺满主屏工作区、透明、置顶，只有宠物身上能点
+const PET: &str = "pet";
 
 /// 托盘菜单、窗口标题是原生控件，走不了网页那套 i18n：`src-ui/shared/i18n.js` 选的语言只存在浏览器的
 /// `localStorage`（键 `ll_locale`）里，主进程完全拿不到。这里退而求其次，用系统语言猜一下，
@@ -139,6 +141,7 @@ pub fn run(rt: tokio::runtime::Runtime, home: Option<PathBuf>, listen: Option<So
                 rt.block_on(supervisor(home, listen, server, cmd_rx, rt_running, rt_url));
             })?;
             tauri::async_runtime::spawn(refresh_menu(items, running.clone()));
+            tauri::async_runtime::spawn(pet_supervisor(handle.clone()));
             tauri::async_runtime::spawn(exit_on_sigterm(handle.clone()));
             if no_browser {
                 dock(&handle, false);
@@ -189,6 +192,91 @@ async fn wait_url(app: &AppHandle) -> Option<String> {
     }
     tracing::error!("管理台没有启动，查看日志 logs/looklook.log");
     None
+}
+
+/// 桌面宠物：设置里开着就开窗口，关了就关；窗口在时按鼠标位置切换“鼠标穿透”。
+async fn pet_supervisor(app: AppHandle) {
+    let mut rx = crate::desk_pet::wanted();
+    let mut poll: Option<CancellationToken> = None;
+    loop {
+        let on = *rx.borrow_and_update();
+        if on && app.get_webview_window(PET).is_none() {
+            if let Some(url) = wait_url(&app).await.and_then(|u| u.parse::<Url>().ok()).and_then(|u| u.join("/pet-desk").ok()) {
+                let h = app.clone();
+                let _ = app.run_on_main_thread(move || {
+                    if let Err(e) = pet_window(&h, url) {
+                        tracing::warn!(error = %e, "桌面宠物窗口没开起来");
+                    }
+                });
+                let stop = CancellationToken::new();
+                tauri::async_runtime::spawn(pet_hover(app.clone(), stop.clone()));
+                poll = Some(stop);
+                crate::desk_pet::set_running(true);
+            }
+        } else if !on {
+            if let Some(stop) = poll.take() {
+                stop.cancel();
+            }
+            if let Some(w) = app.get_webview_window(PET) {
+                let _ = w.close();
+            }
+            crate::desk_pet::set_running(false);
+        }
+        if rx.changed().await.is_err() {
+            break;
+        }
+    }
+}
+
+fn pet_window(app: &AppHandle, url: Url) -> tauri::Result<()> {
+    let w = WebviewWindowBuilder::new(app, PET, WebviewUrl::External(url))
+        .initialization_script("window.__LOOKLOOK_DESKTOP__ = true; window.__LOOKLOOK_PET_DESK__ = true;")
+        .title(tr("看看宠物", "Looklook pet"))
+        .transparent(true)
+        .decorations(false)
+        .shadow(false)
+        .resizable(false)
+        .always_on_top(true)
+        .visible_on_all_workspaces(true)
+        .skip_taskbar(true)
+        .focused(false)
+        .accept_first_mouse(true)
+        .visible(false)
+        .build()?;
+    // 铺满主屏的工作区（不盖任务栏 / 程序坞）
+    if let Some(m) = w.primary_monitor()?.or(w.current_monitor()?) {
+        let a = m.work_area();
+        w.set_position(a.position)?;
+        w.set_size(a.size)?;
+    }
+    w.set_ignore_cursor_events(true)?;
+    w.show()?;
+    Ok(())
+}
+
+/// 每 40 ms 看一次鼠标在不在宠物身上：在就让窗口接鼠标，不在就穿透到下面的窗口
+async fn pet_hover(app: AppHandle, stop: CancellationToken) {
+    let mut through = true;
+    loop {
+        tokio::select! {
+            _ = stop.cancelled() => return,
+            _ = tokio::time::sleep(Duration::from_millis(40)) => {}
+        }
+        let Some(w) = app.get_webview_window(PET) else { continue };
+        let st = crate::desk_pet::get();
+        let inside = st.grab
+            || match (st.hit, app.cursor_position(), w.outer_position(), w.scale_factor()) {
+                (Some([x, y, wd, ht]), Ok(c), Ok(o), Ok(k)) if k > 0.0 => {
+                    let (cx, cy) = ((c.x - o.x as f64) / k, (c.y - o.y as f64) / k);
+                    cx >= x && cx <= x + wd && cy >= y && cy <= y + ht
+                }
+                _ => false,
+            };
+        if inside == through {
+            through = !inside;
+            let _ = w.set_ignore_cursor_events(through);
+        }
+    }
 }
 
 /// 显示（没有就创建）主窗口并置前。
@@ -296,7 +384,7 @@ fn next_label() -> String {
 fn dock(app: &AppHandle, visible: bool) {
     #[cfg(target_os = "macos")]
     {
-        let visible = visible || app.webview_windows().iter().any(|(l, w)| l != MAIN && w.is_visible().unwrap_or(false));
+        let visible = visible || app.webview_windows().iter().any(|(l, w)| l != MAIN && l != PET && w.is_visible().unwrap_or(false));
         let policy = if visible { tauri::ActivationPolicy::Regular } else { tauri::ActivationPolicy::Accessory };
         let _ = app.set_activation_policy(policy);
     }

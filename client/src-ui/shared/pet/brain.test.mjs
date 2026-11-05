@@ -166,3 +166,32 @@ test('台词和名字按语言取', () => {
   assert.equal(textOf({ 'zh-CN': '橙子', 'en-US': 'Orange' }, 'en-US'), 'Orange');
   assert.equal(textOf('x', 'en-US'), 'x');
 });
+
+test('事件插播：没配专门的段借 done / error；拖着、睡着时不插', () => {
+  const b = createBrain(M, { rng: seq(0.1), now: 0 });
+  b.start(0, ROOM);
+  assert.equal(b.event('testPass', 1).clip, 'cheer');
+  assert.equal(b.event('testFail', 1).clip, 'sigh');
+  assert.equal(b.event('levelUp', 1).layer, LAYER.once);
+  b.dragStart(2);
+  assert.equal(b.event('commit', 3), null);
+});
+
+test('摸头、烦了没配就用点击；看向一边有转身段播转身段', () => {
+  const b = createBrain(M, { rng: seq(0.1), now: 0 });
+  b.start(0, ROOM);
+  assert.equal(b.petted(1).clip, 'click');
+  assert.equal(b.annoyed(1).clip, 'click');
+  const c = createBrain(M, { rng: seq(0.1), now: 0 });
+  c.start(0, ROOM);
+  const p = c.face('right', 1);
+  assert.equal(p.clip, 'look');
+  assert.equal(p.turn, true);
+  // 没有转身段：直接翻过来
+  const N = { ...M, actions: { ...M.actions, turn: [] } };
+  const d = createBrain(N, { rng: seq(0.1), now: 0 });
+  d.start(0, ROOM);
+  assert.deepEqual(d.face('right', 1), { flip: true, mirror: true });
+  assert.equal(d.facing, 'right');
+  assert.equal(d.face('right', 2), null);
+});

@@ -48,7 +48,10 @@ mod notify;
 mod feishu_agent;
 mod feishu_route;
 mod paths;
+mod desk_pet;
 mod pet_github;
+mod pet_lines;
+mod pet_transfer;
 mod pets;
 mod platform;
 mod ports;
@@ -607,6 +610,10 @@ async fn run(home: Option<PathBuf>, listen: Option<SocketAddr>, server: Option<S
         }
     };
     let store = Arc::new(Store::open(&paths.db())?);
+    {
+        let p = pets::PetSettings::load(&store);
+        desk_pet::set_wanted(p.enabled && p.desktop);
+    }
     let ui = listen::bind(listen, &store).await?;
     hardening::check_self_integrity(&store);
     let account = Account::new(store.clone(), paths.clone(), &hardening::default_server(), &hardening::builtin_platform_keys())?;

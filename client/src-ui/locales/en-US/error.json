@@ -290,5 +290,9 @@
   "DSH_IMAGES_UNSUPPORTED": "The selected model can't take images. Pick one that does (for example Flash) in the model menu and send again",
   "PET_INVALID": "Pet pack problem: {{reason_text}}",
   "TOO_LARGE": "File too large",
-  "UPLOAD_FAILED": "Upload failed: {{message}}"
+  "UPLOAD_FAILED": "Upload failed: {{message}}",
+  "PET_GEN_NONE": "No model available: Claude Code / Codex not found on this computer and no API is set for generating lines",
+  "PET_GEN_FAIL": "Generating lines failed: {{detail}}",
+  "PET_PEER_OLD": "Looklook on that computer is too old to share pets. Update it first.",
+  "PET_GEN_BAD": "Couldn't read the model's answer, please try again"
 }

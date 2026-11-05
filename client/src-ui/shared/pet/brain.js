@@ -18,6 +18,13 @@ const FALLBACK = {
   done: ['done'],
   error: ['error'],
   offline: ['offline'],
+  // 看得懂在干什么（events.js）：没配专门的动作就借 done / error 的
+  testPass: ['testPass', 'done'],
+  fixed: ['testPass', 'done'],
+  testFail: ['testFail', 'error'],
+  commit: ['commit', 'done'],
+  hello: ['hello', 'done'],
+  levelUp: ['levelUp', 'done'],
 };
 
 /**
@@ -237,6 +244,56 @@ export function createBrain(m, { rng = Math.random, now = 0 } = {}) {
       }
       if (state === 'idle' && layer === LAYER.state) return resume(t, room);
       return null;
+    },
+
+    /** 插播一段事件动作（testPass、commit、levelUp……）：只在闲着、持续状态里插，不打断点、拖、睡觉 */
+    event(key, t) {
+      if (s.dragging || s.sleep) return null;
+      if ((s.cur?.layer ?? 0) > LAYER.once) return null;
+      const p = pool(key);
+      if (!p) return null;
+      if (key === 'hello') s.idleSince = t;
+      return fromList(p.list, LAYER.once, { fade: true });
+    },
+
+    /** 被摸头：有专门的段用它，没有用点击的 */
+    petted(t) {
+      s.idleSince = t;
+      if (s.dragging) return null;
+      if (s.sleep) return wake('wake');
+      const l = (actions.pet ?? []).filter(exists);
+      const list = l.length ? l : (actions.click ?? []).filter(exists);
+      return list.length ? fromList(list, LAYER.click, { fade: true }) : null;
+    },
+
+    /** 连着点太多下，烦了 */
+    annoyed(t) {
+      s.idleSince = t;
+      if (s.dragging) return null;
+      if (s.sleep) return wake('wake');
+      const l = (actions.annoyed ?? []).filter(exists);
+      const list = l.length ? l : (actions.click ?? []).filter(exists);
+      return list.length ? fromList(list, LAYER.click, { fade: true }) : null;
+    },
+
+    /**
+     * 看向一边（鼠标、输入框在那边）：只在闲着时。有转身段播转身段；没有就直接换朝向，
+     * 返回 `{ flip: true }` 让播放器把当前这段翻过来（这段不能镜像就不翻）。
+     */
+    face(dir, t) {
+      if (s.dragging || s.sleep || dir === s.facing) return null;
+      if ((s.cur?.layer ?? 0) > LAYER.idle || s.cur?.move) return null;
+      const turns = (actions.turn ?? []).filter(exists);
+      if (turns.length) {
+        s.busy = true;
+        s.idleSince = Math.min(s.idleSince, t);
+        return fromList(turns, LAYER.idle, { turn: true });
+      }
+      const c = s.cur && clips[s.cur.clip];
+      if (c && c.mirror === false) return null;
+      s.facing = dir;
+      if (s.cur) s.cur.mirror = mirrored();
+      return { flip: true, mirror: mirrored() };
     },
 
     /** 点了一下 */

@@ -518,6 +518,31 @@ export function insertMention(text, start, caret, path) {
   return { text: before + text.slice(caret), caret: before.length };
 }
 
+/**
+ * Codex 的 `$技能`：光标前是 `$xxx`（前面是开头或空白）时返回 { start, q }；和 @ 一样打了空格就结束。
+ */
+export function skillAt(text, caret) {
+  const m = /(^|\s)\$([^\s$]*)$/.exec(text.slice(0, caret));
+  return m ? { start: caret - m[2].length - 1, q: m[2] } : null;
+}
+
+/** 选中一个技能：把 `$q` 换成 `$名字 `。返回 { text, caret } */
+export function insertSkill(text, start, caret, name) {
+  const before = `${text.slice(0, start)}${name} `;
+  const rest = text.slice(caret).replace(/^ /, '');
+  return { text: before + rest, caret: before.length };
+}
+
+/**
+ * 在开头的 `/命令`：光标在第一个词里（`/` 开头、后面到光标没有空白，光标后面是结尾或空白）时返回这个词，否则 null。
+ * 后面已经有字也能补全（和 TUI 一样），选中后只换掉这个词。
+ */
+export function slashAt(text, caret) {
+  const head = text.slice(0, caret);
+  if (!/^\/\S*$/.test(head) || (caret < text.length && !/\s/.test(text[caret]))) return null;
+  return head;
+}
+
 /** 状态栏上的后台任务个数：{ shell: 1, subagent: 2 } */
 export function backgroundCounts(status) {
   const out = {};

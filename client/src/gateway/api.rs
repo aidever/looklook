@@ -159,8 +159,13 @@ pub fn routes(app: App) -> Router<App> {
         .route("/pets/from-github", post(pets_github_scan))
         .route("/pets/from-github/install", post(pets_github_install))
         .route("/pets/from-github/preview/{token}/{index}", get(pets_github_preview))
+        .route("/pets/from-device", get(pets_device_jobs).post(pets_device_import))
         .route("/pets/{source}/{id}", get(pets_manifest).delete(pets_delete))
+        .route("/pets/{source}/{id}/export", get(pets_export))
         .route("/pets/{source}/{id}/file/{*name}", get(pets_file))
+        .route("/pets/{source}/{id}/bond", post(pets_bond))
+        .route("/pets/{source}/{id}/lines", get(pets_lines).post(pets_lines_generate).delete(pets_lines_clear))
+        .route("/desktop/pet", get(desk_pet_get).put(desk_pet_put))
         .route("/instances/{id}/pet", get(instance_pet))
         .route("/instances/{id}/pet/file/{source}/{pid}/{*name}", get(instance_pet_file))
         .route("/tips", get(get_tips).post(mark_tips).delete(reset_tips))
@@ -2968,7 +2973,7 @@ async fn pets_list(State(app): State<App>, Query(q): Query<FreshQ>) -> Json<Valu
 }
 
 async fn pets_settings(State(app): State<App>) -> Json<crate::pets::PetSettings> {
-    Json(crate::pets::PetSettings::load(&app.store))
+    Json(crate::pets::PetSettings::load(&app.store).masked())
 }
 
 async fn put_pets_settings(State(app): State<App>, Json(s): Json<crate::pets::PetSettings>) -> R<Json<crate::pets::PetSettings>> {
@@ -3024,7 +3029,15 @@ struct ImportPathQ {
 /// 从这台电脑上选的文件 / 文件夹装（设置页“从电脑里选”）：不用经浏览器上传，远程打开时也能装电脑上的包
 async fn pets_import_path(State(app): State<App>, Json(q): Json<ImportPathQ>) -> R<Json<Value>> {
     let home = app.paths.home.clone();
-    let path = std::path::PathBuf::from(q.path.trim());
+    // 文件选择弹窗把主目录下的路径写成 ~/…（Windows 是 ~\…），这里展开回完整路径
+    let raw = q.path.trim();
+    let path = match raw.strip_prefix('~').filter(|r| r.is_empty() || r.starts_with(['/', '\\'])) {
+        Some(rest) => match dirs::home_dir() {
+            Some(h) => h.join(rest.trim_start_matches(['/', '\\'])),
+            None => std::path::PathBuf::from(raw),
+        },
+        None => std::path::PathBuf::from(raw),
+    };
     if !path.is_absolute() {
         return Err(LocalError::invalid("path", "absolute"));
     }
@@ -3072,6 +3085,29 @@ async fn pets_github_preview(State(app): State<App>, Path((token, index)): Path<
     Ok(([(axum::http::header::CONTENT_TYPE, ct), (axum::http::header::CACHE_CONTROL, "no-store")], bytes).into_response())
 }
 
+#[derive(Deserialize)]
+struct DeviceImportQ {
+    device: String,
+    id: String,
+}
+
+/// 从同一账户的另一台电脑导入它的宠物：后台下载、装好（见 pet_transfer.rs），马上返回这次的进度
+async fn pets_device_import(State(app): State<App>, Json(q): Json<DeviceImportQ>) -> R<Json<crate::pet_transfer::Job>> {
+    Ok(Json(crate::pet_transfer::start(&app, &q.device, &q.id)?))
+}
+
+async fn pets_device_jobs() -> Json<Value> {
+    Json(crate::pet_transfer::list())
+}
+
+/// 另一台电脑来取包（只给自己导入的 `local` 宠物）
+async fn pets_export(State(app): State<App>, Path((source, id)): Path<(String, String)>) -> R<Response> {
+    if source != "local" {
+        return Err(LocalError::not_found());
+    }
+    crate::pet_transfer::export_response(app.paths.home.clone(), id).await
+}
+
 async fn pets_delete(State(app): State<App>, Path((source, id)): Path<(String, String)>) -> R<StatusCode> {
     if source != "local" {
         return Err(LocalError::new("FORBIDDEN"));
@@ -3081,6 +3117,94 @@ async fn pets_delete(State(app): State<App>, Path((source, id)): Path<(String, S
 }
 
 /// 对话页：按这个终端的启动类型（claude / codex / dsh / opencode）选宠物
+#[derive(Deserialize)]
+struct BondQ {
+    #[serde(default)]
+    add: std::collections::BTreeMap<String, u64>,
+    day: Option<String>,
+}
+
+/// 好感度：加一些计数，返回累计的
+async fn pets_bond(State(app): State<App>, Path((source, id)): Path<(String, String)>, Json(q): Json<BondQ>) -> R<Json<Value>> {
+    if !crate::pets::valid_id(&id) || source.len() > 20 {
+        return Err(LocalError::not_found());
+    }
+    let store = app.store.clone();
+    let key = format!("{source}:{id}");
+    tokio::task::spawn_blocking(move || crate::pets::bond_add(&store, &key, &q.add, q.day.as_deref())).await.map_err(|_| LocalError::new("INTERNAL"))?.map(Json)
+}
+
+async fn pets_lines(State(app): State<App>, Path((source, id)): Path<(String, String)>) -> Json<Value> {
+    Json(crate::pets::gen_lines(&app.store, &format!("{source}:{id}")))
+}
+
+#[derive(Deserialize)]
+struct GenQ {
+    #[serde(default)]
+    via: Option<String>,
+}
+
+/// 按人设生成一批碎碎念文案（中英两套，花一次 token），存起来替换原来的
+async fn pets_lines_generate(State(app): State<App>, Path((source, id)): Path<(String, String)>, Json(q): Json<GenQ>) -> R<Json<Value>> {
+    let home = app.paths.home.clone();
+    let (s2, i2) = (source.clone(), id.clone());
+    let pack = tokio::task::spawn_blocking(move || crate::pets::find(&home, &s2, &i2)).await.ok().flatten().ok_or_else(LocalError::not_found)?;
+    let via = q.via.unwrap_or_else(|| "auto".into());
+    if !matches!(via.as_str(), "auto" | "api" | "claude" | "codex") {
+        return Err(LocalError::invalid("via", "one_of"));
+    }
+    let settings = crate::pets::PetSettings::load(&app.store);
+    let (used, langs) = crate::pet_lines::generate(&pack, &via, settings.api.as_ref(), app.instances.shell()).await?;
+    let mut all = json!(langs);
+    all["at"] = json!(crate::util::system_ms());
+    all["via"] = json!(used);
+    crate::pets::set_gen_lines(&app.store, &pack.key(), Some(&all))?;
+    Ok(Json(all))
+}
+
+async fn pets_lines_clear(State(app): State<App>, Path((source, id)): Path<(String, String)>) -> R<StatusCode> {
+    crate::pets::set_gen_lines(&app.store, &format!("{source}:{id}"), None)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// 桌面宠物（`desk_pet`）：桌面应用开着宠物窗口没有、主窗口在看哪个对话
+async fn desk_pet_get() -> Json<Value> {
+    let s = crate::desk_pet::get();
+    Json(json!({ "running": crate::desk_pet::running(), "focus": s.focus }))
+}
+
+#[derive(Deserialize)]
+struct DeskPetQ {
+    /// 宠物窗口报的框；`null` = 藏起来了
+    #[serde(default, deserialize_with = "some_value")]
+    hit: Option<Option<[f64; 4]>>,
+    focus: Option<String>,
+    grab: Option<bool>,
+}
+
+fn some_value<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
+    T::deserialize(d).map(Some)
+}
+
+async fn desk_pet_put(Extension(access): Extension<Access>, Json(q): Json<DeskPetQ>) -> Json<Value> {
+    // 只有这台电脑上的窗口能改（远程打开的页面不该挪桌面上的宠物）
+    if !access.is_local() {
+        return desk_pet_get().await;
+    }
+    let s = crate::desk_pet::update(|s| {
+        if let Some(h) = q.hit {
+            s.hit = h.filter(|r| r.iter().all(|v| v.is_finite()));
+        }
+        if let Some(f) = q.focus.filter(|f| f.len() <= 100) {
+            s.focus = Some(f);
+        }
+        if let Some(g) = q.grab {
+            s.grab = g;
+        }
+    });
+    Json(json!({ "running": crate::desk_pet::running(), "focus": s.focus }))
+}
+
 async fn instance_pet(State(app): State<App>, Path(id): Path<String>) -> R<Json<Value>> {
     let row = app.store.instance(&id)?.ok_or_else(LocalError::not_found)?;
     let home = app.paths.home.clone();

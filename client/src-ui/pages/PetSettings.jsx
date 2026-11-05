@@ -1,10 +1,12 @@
 // 设置 → 宠物（docs/PET_PACK.md §6.3）：给每种对话配一只宠物、大小、气泡；列出找得到的宠物包，导入、试播、删除。
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { FolderOpen, Github, Play, RefreshCw, Trash2, Upload } from 'lucide-react';
-import { api, postFile } from '../shared/api.js';
+import { Download, FolderOpen, Github, Heart, MessageCircle, Monitor, Play, RefreshCw, Trash2, Upload } from 'lucide-react';
+import { api, deviceApi, postFile } from '../shared/api.js';
+import { deviceName, useDevices } from '../shared/devices.jsx';
 import { errorText } from '../shared/i18n.js';
-import { PETS_CHANGED } from '../shared/ChatPet.jsx';
+import { PETS_CHANGED, inDesktopMain } from '../shared/ChatPet.jsx';
+import { levelOf } from '../shared/pet/bond.js';
 import PetPlayer from '../shared/pet/PetPlayer.jsx';
 import { loadBlob, videoFormat } from '../shared/pet/media.js';
 import { textOf } from '../shared/pet/brain.js';
@@ -106,7 +108,124 @@ export default function PetSection() {
           </dl>
         )}
       </Card>
+      <FromDevices mine={items} onDone={onInstalled} />
     </>
+  );
+}
+
+/**
+ * 从同一账户的其他电脑导入（多台电脑时才有）：点开一台看它装了哪些宠物，点“导入”才开始；
+ * 下载、校验、安装都在这台电脑的后台进行，离开这个页面也照样装完。
+ */
+function FromDevices({ mine, onDone }) {
+  const { t, i18n } = useTranslation();
+  const d = useDevices();
+  const toast = useToast();
+  const [open, setOpen] = useState(null);
+  const [jobs, setJobs] = useState([]);
+  const seen = useRef(new Set());
+  const others = d.multi ? d.items.filter((x) => x.id !== d.selected) : [];
+  const running = jobs.some((j) => j.state === 'running');
+  // 第一次打开时看看有没有还在进行的（之前点过、离开了页面）；已经做完的不再提示
+  useEffect(() => {
+    if (!others.length) return;
+    api.get('/pets/from-device').then(
+      (r) => {
+        const items = r?.items ?? [];
+        for (const j of items) if (j.state !== 'running') seen.current.add(j.key + j.state);
+        setJobs(items);
+      },
+      () => {},
+    );
+  }, [others.length > 0, d.selected]);
+  useEffect(() => {
+    if (!running) return undefined;
+    const poll = () =>
+      api.get('/pets/from-device').then(
+        (r) => {
+          const items = r?.items ?? [];
+          setJobs(items);
+          for (const j of items) {
+            if (j.state === 'running' || seen.current.has(j.key + j.state)) continue;
+            seen.current.add(j.key + j.state);
+            if (j.state === 'done') {
+              toast?.(t('pet.imported', { name: textOf(j.pack?.name, i18n.language) || j.pet }));
+              onDone(j.pack);
+            } else toast?.(errorText(t, j.error ?? {}), 'error');
+          }
+        },
+        () => {},
+      );
+    const id = setInterval(poll, 1000);
+    return () => clearInterval(id);
+  }, [running]);
+  if (!others.length) return null;
+  const start = async (dev, p) => {
+    try {
+      const j = await api.post('/pets/from-device', { device: dev.id, id: p.id });
+      seen.current.delete(j.key + 'done');
+      seen.current.delete(j.key + 'failed');
+      setJobs((old) => [...old.filter((x) => x.key !== j.key), j]);
+    } catch (e) {
+      toast?.(errorText(t, e), 'error');
+    }
+  };
+  return (
+    <Card title={t('pet.from_devices')}>
+      <p className="muted small">{t('pet.from_devices_hint')}</p>
+      <div className="pet-devs">
+        {others.map((dev) => (
+          <div key={dev.id} className="pet-dev">
+            <Button variant="secondary" icon={Monitor} disabled={!dev.online} aria-expanded={open === dev.id} onClick={() => setOpen(open === dev.id ? null : dev.id)}>
+              {deviceName(t, dev)}
+              {!dev.online && <span className="muted small"> · {t('pet.dev_offline')}</span>}
+            </Button>
+            {open === dev.id && dev.online && <DevicePets dev={dev} mine={mine} jobs={jobs} onImport={(p) => start(dev, p)} />}
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+function DevicePets({ dev, mine, jobs, onImport }) {
+  const { t, i18n } = useTranslation();
+  const [list, err, reload] = useLoad(() => deviceApi(dev.id).get('/pets'), [dev.id]);
+  if (err) {
+    return (
+      <div className="pet-dev-list">
+        <ErrorNote error={err} />
+        <Button variant="ghost" icon={RefreshCw} onClick={reload}>
+          {t('devices.retry')}
+        </Button>
+      </div>
+    );
+  }
+  if (!list) return <p className="muted small pet-dev-list">{t('pet.dev_loading')}</p>;
+  const items = (list.items ?? []).filter((p) => p.source === 'local' && !p.error);
+  if (!items.length) return <p className="muted small pet-dev-list">{t('pet.dev_none')}</p>;
+  const mb = (n) => (n / (1 << 20)).toFixed(n < 10 << 20 ? 1 : 0);
+  return (
+    <ul className="pet-dev-list">
+      {items.map((p) => {
+        const j = jobs.find((x) => x.key === `${dev.id}:${p.id}`);
+        const have = mine.some((m) => m.source === 'local' && m.id === p.id);
+        const busy = j?.state === 'running';
+        return (
+          <li key={p.id}>
+            <span aria-hidden="true">🐾</span>
+            <b className="ellipsis">{textOf(p.name, i18n.language) || p.id}</b>
+            <span className="muted small mono ellipsis">{p.id}</span>
+            <span className="grow" />
+            {busy && <span className="muted small">{j.total ? t('pet.dev_progress', { pct: Math.floor((j.got / j.total) * 100) }) : t('pet.dev_got', { mb: mb(j.got) })}</span>}
+            {!busy && have && <span className="badge">{t('pet.dev_have')}</span>}
+            <Button variant={have ? 'ghost' : 'secondary'} icon={Download} busy={busy} disabled={busy} onClick={() => onImport(p)}>
+              {t(have ? 'pet.dev_reimport' : 'pet.dev_import')}
+            </Button>
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 
@@ -178,10 +297,170 @@ function SettingsCard({ s, usable, save, error }) {
               ]}
             />
           </Field>
+          {s.lines !== false && (
+            <Field label={t('pet.chatter')} hint={t('pet.chatter_hint')}>
+              <Seg
+                value={s.chatter !== false}
+                label={t('pet.chatter')}
+                onChange={(v) => save({ ...s, chatter: v })}
+                options={[
+                  [true, t('pet.on')],
+                  [false, t('pet.off')],
+                ]}
+              />
+            </Field>
+          )}
+          {inDesktopMain() && (
+            <Field label={t('pet.desktop')} hint={t('pet.desktop_hint')}>
+              <Seg
+                value={s.desktop !== false}
+                label={t('pet.desktop')}
+                onChange={(v) => save({ ...s, desktop: v })}
+                options={[
+                  [true, t('pet.on')],
+                  [false, t('pet.off')],
+                ]}
+              />
+            </Field>
+          )}
+          <GenApiFields s={s} save={save} />
         </>
       )}
       <ErrorNote error={error} />
     </Card>
+  );
+}
+
+/** 生成人设台词用的接口（OpenAI 兼容）：不填就用本机的 Claude Code / Codex */
+function GenApiFields({ s, save }) {
+  const { t } = useTranslation();
+  const a = s.api ?? {};
+  const [url, setUrl] = useState(a.url ?? '');
+  const [model, setModel] = useState(a.model ?? '');
+  const [key, setKey] = useState('');
+  const dirty = url !== (a.url ?? '') || model !== (a.model ?? '') || key !== '';
+  const apply = () => {
+    const blank = !url.trim() && !model.trim();
+    save({ ...s, api: blank ? null : { url: url.trim(), model: model.trim(), key } });
+    setKey('');
+  };
+  return (
+    <details className="pet-gen-api">
+      <summary className="small">{t('pet.gen_api')}</summary>
+      <p className="muted small">{t('pet.gen_api_hint')}</p>
+      <Field label={t('pet.gen_api_url')}>
+        <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://api.deepseek.com/v1" spellCheck={false} />
+      </Field>
+      <Field label={t('pet.gen_api_model')}>
+        <input value={model} onChange={(e) => setModel(e.target.value)} placeholder="deepseek-chat" spellCheck={false} />
+      </Field>
+      <Field label={t('pet.gen_api_key')} hint={a.keySet ? t('pet.gen_api_key_set') : undefined}>
+        <input type="password" value={key} onChange={(e) => setKey(e.target.value)} autoComplete="off" placeholder={a.keySet ? '••••••••' : ''} />
+      </Field>
+      <Button variant="secondary" disabled={!dirty} onClick={apply}>
+        {t('action.save')}
+      </Button>
+    </details>
+  );
+}
+
+/** 好感度：一起几天、做完几轮、Lv */
+function BondLine({ p }) {
+  const { t } = useTranslation();
+  const [b, setB] = useState(null);
+  useEffect(() => {
+    let dead = false;
+    api.post(`/pets/${enc(p.source)}/${enc(p.id)}/bond`, { add: {} }).then((r) => !dead && setB(r), () => {});
+    return () => {
+      dead = true;
+    };
+  }, [p.key]);
+  if (!b || !b.met) return null;
+  const lv = levelOf(b.xp);
+  return (
+    <p className="small pet-bond">
+      <Heart size={13} aria-hidden="true" /> {t('pet.bond', { level: lv.level, days: b.days, turns: b.turns, pets: b.pets, tests: b.tests })}
+      <span className="pet-bond-bar" title={`${b.xp} / ${lv.to}`}>
+        <span style={{ width: `${Math.round(lv.progress * 100)}%` }} />
+      </span>
+    </p>
+  );
+}
+
+const count = (m) => (m ? Object.values(m).reduce((a, l) => a + l.length, 0) : 0);
+
+/** 按人设生成一批台词（中英两套）：花一次 token，之后宠物说话只是挑一句填数据 */
+function LinesModal({ p, name, onClose }) {
+  const { t, i18n } = useTranslation();
+  const toast = useToast();
+  const url = `/pets/${enc(p.source)}/${enc(p.id)}/lines`;
+  const [data, err, reload] = useLoad(() => api.get(url), [p.key]);
+  const [via, setVia] = useState('auto');
+  const [busy, setBusy] = useState(false);
+  const [genErr, setGenErr] = useState(null);
+  const lang = i18n.language?.startsWith('en') ? 'en-US' : 'zh-CN';
+  const mine = data?.[lang];
+  const run = async () => {
+    setBusy(true);
+    setGenErr(null);
+    try {
+      await api.post(url, { via });
+      reload();
+      changed();
+      toast?.(t('pet.gen_done'));
+    } catch (e) {
+      setGenErr(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const clear = async () => {
+    await api.del(url).catch(() => {});
+    reload();
+    changed();
+  };
+  return (
+    <Modal open onClose={onClose} title={t('pet.gen_title', { name })} wide>
+      <p className="muted small">{t('pet.gen_intro')}</p>
+      <Field label={t('pet.gen_via')}>
+        <Seg
+          value={via}
+          label={t('pet.gen_via')}
+          onChange={setVia}
+          options={[
+            ['auto', t('pet.gen_via_auto')],
+            ['claude', 'Claude Code'],
+            ['codex', 'Codex'],
+            ['api', t('pet.gen_via_api')],
+          ]}
+        />
+      </Field>
+      <div className="pet-gen-actions">
+        <Button busy={busy} icon={MessageCircle} onClick={run}>
+          {mine ? t('pet.gen_again') : t('pet.gen_run')}
+        </Button>
+        {data?.at && (
+          <Button variant="ghost" onClick={clear}>
+            {t('pet.gen_clear')}
+          </Button>
+        )}
+      </div>
+      {busy && <p className="muted small">{t('pet.gen_wait')}</p>}
+      <ErrorNote error={genErr ?? err} />
+      {mine && (
+        <div className="pet-gen-list">
+          <p className="small muted">{t('pet.gen_have', { zh: count(data['zh-CN']), en: count(data['en-US']), via: data.via })}</p>
+          <dl className="kv small">
+            {Object.entries(mine).map(([k, l]) => (
+              <div key={k} className="pet-gen-row">
+                <dt className="mono">{k}</dt>
+                <dd>{l.join(' · ')}</dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+      )}
+    </Modal>
   );
 }
 
@@ -398,6 +677,7 @@ function PetCard({ p, onRemoved }) {
   const confirm = useConfirm();
   const toast = useToast();
   const [trial, setTrial] = useState(false);
+  const [lines, setLines] = useState(false);
   const name = textOf(p.name, i18n.language) || p.id;
   const lic = p.license;
   const apple = videoFormat() === 'mov';
@@ -447,6 +727,7 @@ function PetCard({ p, onRemoved }) {
               </p>
             )}
             {p.renderer === 'video' && !p.mov && <p className="small muted">{t(apple ? 'pet.no_mov_here' : 'pet.no_mov')}</p>}
+            <BondLine p={p} />
           </>
         )}
         <p className="small muted mono ellipsis" title={p.dir}>
@@ -459,30 +740,50 @@ function PetCard({ p, onRemoved }) {
             {t('pet.trial')}
           </Button>
         )}
+        {!p.error && (
+          <Button variant="ghost" icon={MessageCircle} onClick={() => setLines(true)}>
+            {t('pet.gen_button')}
+          </Button>
+        )}
         {p.source === 'local' && <Button variant="ghost" icon={Trash2} onClick={remove} title={t('action.delete')} aria-label={t('action.delete')} />}
       </div>
       {trial && <Trial p={p} name={name} onClose={() => setTrial(false)} />}
+      {lines && <LinesModal p={p} name={name} onClose={() => setLines(false)} />}
     </div>
   );
 }
 
 const STATES = ['idle', 'thinking', 'tool', 'waiting', 'terminal', 'offline'];
 const ONCE = ['toolDone', 'done', 'error'];
+/** 试播里的“看得懂”事件：[台词键, 动作池] */
+const EVENTS = [
+  ['testPass', 'testPass'],
+  ['testFail', 'testFail'],
+  ['commit', 'commit'],
+  ['recapLong', null],
+  ['danger', null],
+  ['levelUp', 'levelUp'],
+];
 
 /** 试播：挨个播各个状态、动作，不用等 AI 真的跑起来 */
 function Trial({ p, name, onClose }) {
   const { t, i18n } = useTranslation();
   const [data, err] = useLoad(() => api.get(`/pets/${enc(p.source)}/${enc(p.id)}`), [p.key]);
+  const [gen] = useLoad(() => api.get(`/pets/${enc(p.source)}/${enc(p.id)}/lines`), [p.key]);
   const player = useRef(null);
   const [agent, setAgent] = useState({ state: 'idle', once: null, n: 0 });
   const m = data?.manifest;
   const fileUrl = useMemo(() => fileUrlOf(p), [p.key]);
   const clips = m ? Object.keys(m.clips) : [];
+  const trialAct = (kind) => {
+    player.current?.play(kind);
+    player.current?.say(kind, null, { force: true });
+  };
   return (
     <Modal open onClose={onClose} title={t('pet.trial_title', { name })} wide>
       <ErrorNote error={err} />
       <div className="pet-trial-stage">
-        {m && <PetPlayer ref={player} manifest={m} fileUrl={fileUrl} agent={agent} height={150} lang={i18n.language} label={name} />}
+        {m && <PetPlayer ref={player} manifest={m} fileUrl={fileUrl} agent={agent} height={150} lang={i18n.language} label={name} gen={gen} />}
       </div>
       {m && (
         <div className="pet-trial">
@@ -508,6 +809,20 @@ function Trial({ p, name, onClose }) {
             <button type="button" className="chip" onClick={() => player.current?.play('sleep')}>
               {t('pet.act_sleep')}
             </button>
+            <button type="button" className="chip" onClick={() => trialAct('petted')}>
+              {t('pet.act_pet')}
+            </button>
+            <button type="button" className="chip" onClick={() => trialAct('annoyed')}>
+              {t('pet.act_annoyed')}
+            </button>
+          </div>
+          <div className="pet-trial-row">
+            <span className="small">{t('pet.trial_events')}</span>
+            {EVENTS.map(([k, st]) => (
+              <button key={k} type="button" className="chip" onClick={() => player.current?.say(k, { dur: '6m 12s', files: 4, cmds: 9, level: 3, n: 42 }, { state: st, force: true })}>
+                {t(`pet.ev_${k}`)}
+              </button>
+            ))}
           </div>
           <details>
             <summary className="small">{t('pet.trial_clips', { n: clips.length })}</summary>

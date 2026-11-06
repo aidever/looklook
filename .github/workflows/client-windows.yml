@@ -1,0 +1,117 @@
+# 看看客户端 · Windows 安装包（手动触发；维护者在私有仓库里用 scripts/release.sh publish 导出代码、推送并触发）。
+#
+# 客户端按平台拆成三个工作流：client-linux、client-windows、client-macos，各自独立构建、各自失败，互不连累。
+# 每个平台构建完把安装包传到 Release client-v{版本}（第一次建成 Pre-release），再合并出 beta 通道的 release.json
+# ——看看服务端 5 分钟内同步，beta 用户就能更新到已构建的平台。三个平台都好了以后，
+# 用 client-release 工作流（release.sh promote）把它转成正式版。
+# 某个平台失败：修好后只重跑这个平台（release.sh publish --only windows），覆盖它自己的文件，其它平台不动。
+#
+# Windows x86_64：在 Linux runner 上用 zig 交叉编译，另出 Tauri 桌面安装程序（NSIS setup.exe）。
+#
+# 需要的仓库 secrets：LOOKLOOK_SERVER_URL（客户端默认服务端地址，编译时写入）、可选 LOOKLOOK_PLATFORM_KEYS（p1=<base64url>）。
+name: client-windows
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: client-windows
+  cancel-in-progress: false
+
+permissions:
+  contents: write # 建 Pre-release、上传安装包
+
+env:
+  ZIG_VERSION: 0.15.2
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+      - name: 版本、更新说明、还没转正式版
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/release-stage.sh preflight
+
+  build:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: client
+    env:
+      ZIG_SHA256: 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client
+          key: windows
+          cache-bin: true
+          cache-on-failure: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - uses: actions/cache@v4
+        with:
+          path: |
+            client/.cache
+            client/vendor
+          key: client-vendor-windows-${{ hashFiles('client/scripts/fetch-vendor.sh', 'client/scripts/build-mux.sh', 'client/scripts/build-fonts.py', 'client/scripts/data/**') }}
+
+      - name: 构建工具
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y -q python3-fonttools python3-brotli
+          # Windows 桌面应用：嵌入图标与清单（windres）、生成 NSIS 安装程序（makensis）。
+          # Tauri CLI 在 Linux 宿主上只要开了 tray-icon 就用 pkg-config 查 appindicator（目标是 Windows 也查），
+          # 查不到会直接崩溃，所以还要装 libayatana-appindicator3-dev。
+          sudo apt-get install -y -q binutils-mingw-w64-x86-64 nsis pkg-config libayatana-appindicator3-dev
+          curl -fsSL --retry 3 -o /tmp/zig.tar.xz "https://ziglang.org/download/$ZIG_VERSION/zig-x86_64-linux-$ZIG_VERSION.tar.xz"
+          echo "$ZIG_SHA256  /tmp/zig.tar.xz" | sha256sum -c -
+          sudo mkdir -p /opt/zig && sudo tar -C /opt/zig -xJf /tmp/zig.tar.xz
+          command -v cargo-zigbuild >/dev/null || cargo install cargo-zigbuild --locked
+
+      - name: 打包
+        env:
+          LOOKLOOK_SERVER_URL: ${{ secrets.LOOKLOOK_SERVER_URL }}
+          LOOKLOOK_PLATFORM_KEYS: ${{ secrets.LOOKLOOK_PLATFORM_KEYS }}
+        run: |
+          set -euo pipefail
+          [[ $LOOKLOOK_SERVER_URL == https://* ]] || { echo "::error::secret LOOKLOOK_SERVER_URL 未设置或不是 https 地址"; exit 1; }
+          [[ -n $LOOKLOOK_PLATFORM_KEYS ]] || unset LOOKLOOK_PLATFORM_KEYS
+          npm ci --no-audit --no-fund
+          scripts/package.sh windows-x86_64
+
+      - name: 上传到 beta Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/release-stage.sh upload windows
+
+  # 按已上传的平台重新生成 release.json（beta 通道）：各平台的合并串行执行（concurrency 组 client-stage）。
+  merge:
+    needs: build
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: client-stage
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+      - name: 合并 release.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/release-stage.sh merge

@@ -10,7 +10,7 @@
 # 生成后把输出的两项加到公开仓库（aidever/looklook）的 Actions secrets：
 #   MACOS_SIGN_P12           looklook-sign.p12.b64 的内容（base64）
 #   MACOS_SIGN_P12_PASSWORD  脚本打印的密码
-# client-release 工作流的 macOS 任务会导入它，打包时经 LOOKLOOK_MACOS_SIGN_IDENTITY 交给 scripts/package.sh。
+# client-macos 工作流会导入它，打包时经 LOOKLOOK_MACOS_SIGN_IDENTITY 交给 scripts/package.sh。
 # 证书和私钥请妥善保管：换了证书，用户升级后会再被询问一次。有效期 20 年。
 set -euo pipefail
 

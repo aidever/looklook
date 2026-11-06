@@ -102,7 +102,7 @@ looklook login                                    # 可选：开通远程访问�
 - **管理台和终端端到端加密：** 远程打开时，浏览器和你的电脑之间建一条 WebRTC 加密通道（[`src/rtc/`](client/src/rtc)），能直连就直连，不行再经中转转发，中转只看到密文。双方的密钥指纹由平台签发的凭证和电脑的设备密钥担保。
 - **本机网页暂时例外：** 放到专属地址下的开发网页目前走上图的 HTTPS + Noise 隧道，中转要解开 HTTPS 才能转发（不保存、不记录内容）；它的端到端加密在[路线图](https://looklook.dev/roadmap)上。
 - **数据留在本地。** 会话、文件和设置都在你的电脑上，不同步到云端。
-- **安装包在这个仓库里构建。** 本仓库的 `client-release` 工作流构建所有安装包并附带 `SHA256SUMS` 发布，安装脚本和应用内更新都会校验。签名的更新清单、代码签名和 macOS 公证在路线图上；目前首次运行时 Windows SmartScreen 和 macOS Gatekeeper 会有提示。
+- **安装包在这个仓库里构建。** 本仓库的 `client-linux`、`client-windows`、`client-macos` 工作流分别构建各平台安装包（先发 beta，三个平台齐了由 `client-release` 转正式版），并附带 `SHA256SUMS` 发布，安装脚本和应用内更新都会校验。签名的更新清单、代码签名和 macOS 公证在路线图上；目前首次运行时 Windows SmartScreen 和 macOS Gatekeeper 会有提示。
 
 发现漏洞？请看 [SECURITY.md](SECURITY.md)。
 

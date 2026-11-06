@@ -102,7 +102,7 @@ phone / any browser ──HTTPS──▶ Looklook relay ──Noise tunnel──
 - **Console and terminals are end-to-end encrypted:** when you open them remotely, the browser and your machine set up an encrypted WebRTC channel ([`src/rtc/`](client/src/rtc)), directly when possible and through a relay otherwise; relays only see ciphertext. Both sides' key fingerprints are vouched for by platform-issued credentials and the machine's device key.
 - **Local pages are the exception for now:** dev servers you put under your address still go through the HTTPS + Noise tunnel shown above, so the relay decrypts HTTPS to forward them (it doesn't store or log content). End-to-end encryption for them is [on the roadmap](https://looklook.dev/roadmap).
 - **Your data stays local.** Sessions, files and settings live on your machine; nothing is synced to the cloud.
-- **Releases are built here.** The `client-release` workflow in this repo builds every package and publishes it with `SHA256SUMS`. The installer and the in-app updater verify the checksum. Signed update manifests and code-signed or notarized installers are next on the roadmap. Today, Windows SmartScreen and macOS Gatekeeper will warn on first run.
+- **Releases are built here.** The `client-linux`, `client-windows` and `client-macos` workflows in this repo each build one platform into a beta pre-release, and `client-release` promotes it to stable once all three are in. Every package is published with `SHA256SUMS`. The installer and the in-app updater verify the checksum. Signed update manifests and code-signed or notarized installers are next on the roadmap. Today, Windows SmartScreen and macOS Gatekeeper will warn on first run.
 
 Found a vulnerability? See [SECURITY.md](SECURITY.md).
 

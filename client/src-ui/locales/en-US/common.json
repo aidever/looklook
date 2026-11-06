@@ -2510,7 +2510,9 @@
     "computers_lead_single": "{{n}} of {{max}} computers signed in. Only this computer can be managed here right now; use \"Open in browser\" for the others.",
     "address_copied": "Personal address copied. Open it in a browser on your phone or any computer.",
     "more_keys": "For servers and images: install keys",
-    "change": "Change"
+    "change": "Change",
+    "mfa_code": "Code",
+    "mfa_code_hint": "The 6-digit code in your authenticator app, or one of your recovery codes"
   },
   "conn": {
     "title": "Connection",

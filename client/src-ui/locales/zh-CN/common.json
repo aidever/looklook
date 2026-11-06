@@ -2510,7 +2510,9 @@
     "computers_lead_single": "已登录 {{n}} 台，最多 {{max}} 台。现在只能管理这台电脑；其他电脑点“在浏览器里打开”。",
     "address_copied": "已复制专属地址：在手机或其他电脑的浏览器里打开就能用",
     "more_keys": "给服务器、镜像装：安装密钥",
-    "change": "修改"
+    "change": "修改",
+    "mfa_code": "动态码",
+    "mfa_code_hint": "认证器 App 上的 6 位数字；手机不在身边时可以填一个恢复码"
   },
   "conn": {
     "title": "连接",

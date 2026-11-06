@@ -43,16 +43,34 @@ function NicknameModal({ me, onClose, onDone }) {
   );
 }
 
+/** 两步验证的动态码（认证器 App 上的 6 位数字，或一个恢复码）。 */
+export function MfaCodeField({ value, onChange }) {
+  const { t } = useTranslation();
+  return (
+    <Field label={t('acct.mfa_code')} hint={t('acct.mfa_code_hint')}>
+      <input autoComplete="one-time-code" autoCapitalize="none" spellCheck={false} maxLength={12} placeholder="000000" value={value} onChange={(e) => onChange(e.target.value)} autoFocus />
+    </Field>
+  );
+}
+
 function PasswordModal({ onClose }) {
   const { t } = useTranslation();
   const toast = useToast();
   const [cur, setCur] = useState('');
   const [next, setNext] = useState('');
+  // 账户开了两步验证：平台回 MFA_REQUIRED 后再显示动态码输入框
+  const [code, setCode] = useState('');
+  const [needCode, setNeedCode] = useState(false);
   const { busy, error, run } = useAction();
   const submit = (e) => {
     e.preventDefault();
     run(async () => {
-      await platform.put('/me/password', { current_password: cur, new_password: next });
+      try {
+        await platform.put('/me/password', { current_password: cur, new_password: next, code: needCode ? code : undefined });
+      } catch (err) {
+        if (err.code === 'MFA_REQUIRED') setNeedCode(true);
+        throw err;
+      }
       toast(t('acct.password_changed'));
       onClose();
     });
@@ -66,6 +84,7 @@ function PasswordModal({ onClose }) {
         <Field label={t('acct.new_password')} hint={t('acct.password_hint')}>
           <PasswordInput autoComplete="new-password" minLength={8} value={next} onChange={(e) => setNext(e.target.value)} />
         </Field>
+        {needCode && <MfaCodeField value={code} onChange={setCode} />}
         <p className="muted small">{t('acct.password_note')}</p>
         <ErrorNote error={error} />
         <div className="modal-actions">

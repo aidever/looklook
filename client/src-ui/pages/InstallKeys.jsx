@@ -6,6 +6,7 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { useStatus, webUrl } from '../App.jsx';
+import { MfaCodeField } from './Account.jsx';
 import { platform } from '../shared/platform.js';
 import { formatTime, relativeTime } from '../shared/time.js';
 import { Button, Card, CopyButton, ErrorNote, Field, Modal, Note, PasswordInput, useAction, useConfirm, useLoad, useToast } from '../shared/ui.jsx';
@@ -35,12 +36,19 @@ function CreateModal({ onClose, onDone }) {
   const [uses, setUses] = useState(1);
   const [note, setNote] = useState('');
   const [password, setPassword] = useState('');
+  const [code, setCode] = useState('');
+  const [needCode, setNeedCode] = useState(false);
   const [created, setCreated] = useState(null);
   const { busy, error, run } = useAction();
   const submit = (e) => {
     e.preventDefault();
     run(async () => {
-      setCreated(await platform.post('/install-keys', { hours, uses, note: note.trim(), password }));
+      try {
+        setCreated(await platform.post('/install-keys', { hours, uses, note: note.trim(), password, code: needCode ? code : undefined }));
+      } catch (err) {
+        if (err.code === 'MFA_REQUIRED') setNeedCode(true);
+        throw err;
+      }
       onDone();
     });
   };
@@ -87,6 +95,7 @@ function CreateModal({ onClose, onDone }) {
         <Field label={t('acct.password')}>
           <PasswordInput autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
         </Field>
+        {needCode && <MfaCodeField value={code} onChange={setCode} />}
         <ErrorNote error={error} />
         <div className="modal-actions">
           <Button variant="ghost" onClick={onClose}>

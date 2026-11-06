@@ -63,6 +63,10 @@ import {
   Wrench,
   X,
   Zap,
+  TextQuote,
+  Paperclip,
+  MessageSquarePlus,
+  MessageCircle,
   UserRound,
 } from 'lucide-react';
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
@@ -80,6 +84,7 @@ import {
   CODEX_ONLY,
   COMMANDS,
   EFFORTS,
+  effortShown,
   EMPTY,
   CODEX_MODE_CHOICES,
   MODE_CHOICES,
@@ -109,6 +114,11 @@ import {
   modelView,
   parseJson,
   questionAnswers,
+  ATTACH_FILE_MAX,
+  ATTACH_MAX,
+  attachName,
+  composeMessage,
+  parseUserText,
   resultsById,
   slashAction,
   splitLinks,
@@ -128,6 +138,7 @@ import { useSessions } from '../shared/sessions.jsx';
 import { formatTime, parseInstant, relativeTime, spanText } from '../shared/time.js';
 import { dropFirst, retryFirst, useFirstSend } from '../shared/firstSend.js';
 import { runUpload } from '../shared/uploader.js';
+import { formatBytes } from '../shared/xfer.js';
 import { inputHistory, rememberInput, searchInputs } from '../shared/inputHistory.js';
 import PopMenu from '../shared/PopMenu.jsx';
 import ChatPet from '../shared/ChatPet.jsx';
@@ -998,7 +1009,7 @@ function Rows({ id, items, live, limit = 0, trace = false, attention = false }) 
         // 这一轮用了多久跟在复制按钮后面（不再单独占一行）
         // 有处理过程的：用时已经在处理过程的标题上
         const turn = next?.item?.k === 'turn' && !traced.has(n + 1) ? next.item : null;
-        return <ReplyEnd key={r.key} text={r.block.text} all={all} turn={turn} />;
+        return <ReplyEnd key={r.key} id={id} text={r.block.text} all={all} turn={turn} />;
       }
       case 'thinking':
         return <Thinking key={r.key} text={r.block.text} />;
@@ -1041,7 +1052,7 @@ function Rows({ id, items, live, limit = 0, trace = false, attention = false }) 
 }
 
 /** 一段回复的最后一段文字，下面是复制和用时；手机上长按这一段弹出复制菜单 */
-function ReplyEnd({ text, all, turn }) {
+function ReplyEnd({ id, text, all, turn }) {
   const { t } = useT();
   const { links, fileUrl } = useContext(ArtifactCtx);
   const [sheet, setSheet] = useState(false);
@@ -1053,13 +1064,43 @@ function ReplyEnd({ text, all, turn }) {
         <CopyButton text={all} label={false} variant="plain" />
         {turn && <span className="chat-turn">{t('chat.turn', { s: Math.max(1, Math.round(turn.ms / 1000)) })}</span>}
       </div>
-      {sheet && <MessageSheet text={all} onClose={() => setSheet(false)} />}
+      {sheet && <MessageSheet text={all} onQuote={id ? (q) => window.dispatchEvent(new CustomEvent(`ll-chat-quote:${id}`, { detail: { quote: q, note: '' } })) : null} onClose={() => setSheet(false)} />}
     </div>
   );
 }
 
 /** 用户消息：电脑上悬停出现复制、填回输入框；手机上长按弹出菜单 */
 /** 你发的话超过这么多字或这么多行就先收起 */
+/** 用户消息正文：`> ` 开头的引用（划词评论）画成引用块，末尾的附件行收成文件卡片（docs/CHAT_UX_2026-11-06.md） */
+function UserText({ id, text }) {
+  const { open: openFile } = useContext(PreviewCtx);
+  const { parts, files } = useMemo(() => parseUserText(text), [text]);
+  if (!files.length && !parts.some((p) => p.k === 'quote')) return text;
+  return (
+    <>
+      {parts.map((p, n) =>
+        p.k === 'quote' ? (
+          // eslint-disable-next-line react/no-array-index-key -- 段落没有别的标识
+          <span key={n} className="chat-bubble-quote">{p.text}</span>
+        ) : (
+          // eslint-disable-next-line react/no-array-index-key
+          <span key={n} className="chat-bubble-text">{p.text}</span>
+        ),
+      )}
+      {files.length > 0 && (
+        <span className="chat-bubble-files">
+          {files.map((f) => (
+            <button key={f} type="button" className="chat-bubble-file" onClick={() => openFile?.({ ep: fileEndpoints(id), path: f })} title={f} disabled={!openFile || !id}>
+              <FileText size={14} aria-hidden="true" />
+              <span className="ellipsis">{attachName(f)}</span>
+            </button>
+          ))}
+        </span>
+      )}
+    </>
+  );
+}
+
 const LONG_CHARS = 800;
 const LONG_LINES = 12;
 
@@ -1092,7 +1133,7 @@ function UserItem({ id, item, thumbs, editable = false }) {
         <>
           {(text || (item.images > 0 && !thumbs)) && (
             <div className="chat-bubble" data-clip={long && !expanded ? '' : undefined} {...press}>
-              {item.text}
+              <UserText id={id} text={item.text} />
               {item.images > 0 && !thumbs && <span className="chat-note">{t('chat.images', { n: item.images })}</span>}
             </div>
           )}
@@ -1446,6 +1487,153 @@ function Item({ id, item, editable = false }) {
   }
 }
 
+// ---------------- 划词评论（docs/CHAT_UX_2026-11-06.md §1） ----------------
+
+/** 选区在不在可以评论的地方：对话列表里，不在用户自己的消息、输入框、等你处理的卡片里 */
+function quotableRange(root) {
+  const sel = document.getSelection();
+  if (!sel || sel.isCollapsed || !sel.rangeCount || !root) return null;
+  const r = sel.getRangeAt(0);
+  const el = (n) => (n?.nodeType === 1 ? n : n?.parentElement);
+  const a = el(r.startContainer);
+  const b = el(r.endContainer);
+  if (!a || !b || !root.contains(a) || !root.contains(b)) return null;
+  const skip = '.chat-user, .chat-pending, textarea, input, button, .chat-quote-pop';
+  if (a.closest(skip) || b.closest(skip)) return null;
+  const text = sel.toString().replace(/\n{3,}/g, '\n\n').trim();
+  if (!text) return null;
+  const rect = r.getBoundingClientRect();
+  if (!rect.width && !rect.height) return null;
+  return { text, rect: { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right } };
+}
+
+/** 浮在选区下面（下面放不下就放上面）、左右不出对话这一栏（旁边的会话列表会盖住它） */
+function floatAt(rect, w, h, box) {
+  const vw = window.visualViewport?.width ?? window.innerWidth;
+  const vh = window.visualViewport?.height ?? window.innerHeight;
+  const lo = Math.max(8, (box?.left ?? 0) + 8);
+  const hi = Math.min(vw, box?.right ?? vw) - w - 8;
+  const left = Math.max(lo, Math.min((rect.left + rect.right) / 2 - w / 2, hi));
+  const below = rect.bottom + 8;
+  const top = below + h < vh - 8 ? below : Math.max(8, rect.top - h - 8);
+  return { left, top };
+}
+
+/**
+ * 在 AI 的回复里选中文字：选区下面出现“评论 / 问这段 / 复制”。
+ * 评论：写一句建议，连同引用挂到输入框上方（可以挂几条），和下一句一起发出去（Composer 收 `ll-chat-quote:{id}`）。
+ */
+function SelectionActions({ id, list, disabled }) {
+  const { t } = useT();
+  const toast = useToast();
+  const [sel, setSel] = useState(null);
+  const [comment, setComment] = useState(null);
+  const [note, setNote] = useState('');
+  const down = useRef(false);
+  useEffect(() => {
+    const root = list.current;
+    if (!root || disabled) return undefined;
+    let timer = null;
+    const update = () => {
+      if (down.current) return;
+      setSel(quotableRange(list.current));
+    };
+    const later = () => {
+      clearTimeout(timer);
+      timer = setTimeout(update, 180);
+    };
+    const onDown = (e) => {
+      if (e.target.closest?.('.chat-sel-bar')) return;
+      down.current = true;
+      setSel(null);
+    };
+    const onUp = () => {
+      if (!down.current) return;
+      down.current = false;
+      later();
+    };
+    document.addEventListener('selectionchange', later);
+    root.addEventListener('pointerdown', onDown);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+    root.addEventListener('scroll', later, { passive: true });
+    window.addEventListener('resize', later);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener('selectionchange', later);
+      root.removeEventListener('pointerdown', onDown);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+      root.removeEventListener('scroll', later);
+      window.removeEventListener('resize', later);
+    };
+  }, [list, disabled]);
+  const add = (quote, text) => {
+    window.dispatchEvent(new CustomEvent(`ll-chat-quote:${id}`, { detail: { quote, note: text } }));
+    document.getSelection()?.removeAllRanges();
+    setSel(null);
+    setComment(null);
+    setNote('');
+  };
+  const keep = (e) => e.preventDefault(); // 点按钮时不让选区消失
+  if (comment) {
+    const pos = floatAt(comment.rect, 340, 190, list.current?.getBoundingClientRect());
+    const submit = () => add(comment.text, note);
+    return (
+      <div className="chat-quote-pop" style={pos} role="dialog" aria-label={t('chat.sel_comment')}>
+        <p className="chat-quote-q">{comment.text}</p>
+        <textarea
+          autoFocus
+          rows={3}
+          value={note}
+          placeholder={t('chat.sel_comment_ph')}
+          onChange={(e) => setNote(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              e.preventDefault();
+              setComment(null);
+            } else if (e.key === 'Enter' && !e.shiftKey && !imeComposing(e)) {
+              e.preventDefault();
+              submit();
+            }
+          }}
+        />
+        <div className="chat-quote-acts">
+          <span className="chat-note grow">{t('chat.sel_comment_keys')}</span>
+          <Button variant="ghost" onClick={() => setComment(null)}>
+            {t('action.cancel')}
+          </Button>
+          <Button onClick={submit}>{t('chat.sel_comment_add')}</Button>
+        </div>
+      </div>
+    );
+  }
+  if (!sel) return null;
+  const pos = floatAt(sel.rect, 300, 40, list.current?.getBoundingClientRect());
+  return (
+    <div className="chat-sel-bar" style={pos} role="toolbar" aria-label={t('chat.sel_actions')} onMouseDown={keep}>
+      <button type="button" onMouseDown={keep} onClick={() => setComment(sel)}>
+        <MessageSquarePlus size={15} aria-hidden="true" />
+        {t('chat.sel_comment')}
+      </button>
+      <button type="button" onMouseDown={keep} onClick={() => add(sel.text, '')}>
+        <MessageCircle size={15} aria-hidden="true" />
+        {t('chat.sel_ask')}
+      </button>
+      <button
+        type="button"
+        onMouseDown={keep}
+        onClick={() =>
+          copyText(sel.text).then((ok) => (ok ? toast(t('chat.sel_copied')) : toast(t('chat.sel_copy_failed'), 'error')))
+        }
+      >
+        <Copy size={15} aria-hidden="true" />
+        {t('chat.sel_copy')}
+      </button>
+    </div>
+  );
+}
+
 // ---------------- 等你处理的卡片（在对话流的最后） ----------------
 
 /** 输入框、按钮以外的地方按回车：等于点了卡片上的主按钮 */
@@ -1466,36 +1654,61 @@ function useEnterKey(active, onEnter) {
 
 function QuestionForm({ pending, onAnswer, busy }) {
   const { t } = useT();
+  const { id: agentId, caps } = useContext(AgentCtx);
   const questions = pending.input?.questions ?? [];
   const [picked, setPicked] = useState({});
+  // Codex 的提问没有多选字段：用户可以自己把某道题打开成多选
+  const [multiOn, setMultiOn] = useState({});
+  const isMulti = (q, n) => Boolean(q.multiSelect || multiOn[n]);
   const toggle = (n, label, multi) =>
     setPicked((p) => {
       const cur = p[n]?.labels ?? [];
       const labels = multi ? (cur.includes(label) ? cur.filter((x) => x !== label) : [...cur, label]) : [label];
       return { ...p, [n]: { ...p[n], labels } };
     });
-  const answers = questionAnswers(questions, picked);
-  const ready = questions.every((q) => answers[q.question]);
+  const answers = questionAnswers(questions, picked, { arrays: agentId !== 'claude' });
+  const ready = questions.every((q) => answers[q.question]?.length);
   return (
     <>
-      {questions.map((q, n) => (
-        <fieldset key={q.question} className="chat-q">
-          <legend>{q.question}</legend>
-          {(q.options ?? []).map((o) => {
-            const on = (picked[n]?.labels ?? []).includes(o.label);
-            return (
-              <button key={o.label} type="button" className="chat-opt" role={q.multiSelect ? 'checkbox' : 'radio'} aria-checked={on} data-multi={q.multiSelect ? '' : undefined} onClick={() => toggle(n, o.label, q.multiSelect)}>
-                <span className="chat-opt-dot" aria-hidden="true">{on && q.multiSelect && <Check size={12} />}</span>
-                <span className="chat-opt-text">
-                  <b>{o.label}</b>
-                  {o.description && o.description !== o.label && <span className="chat-note">{o.description}</span>}
-                </span>
-              </button>
-            );
-          })}
-          <input className="chat-field" placeholder={t('chat.q_other')} value={picked[n]?.other ?? ''} onChange={(e) => setPicked((p) => ({ ...p, [n]: { ...p[n], other: e.target.value } }))} />
-        </fieldset>
-      ))}
+      {questions.map((q, n) => {
+        const multi = isMulti(q, n);
+        return (
+          <fieldset key={q.question} className="chat-q">
+            <legend>
+              {q.question}
+              {q.multiSelect && <span className="chat-q-tag">{t('chat.q_multi')}</span>}
+            </legend>
+            {!q.multiSelect && caps?.q_multi_toggle === true && (q.options ?? []).length > 1 && (
+              <label className="chat-q-multi">
+                <input
+                  type="checkbox"
+                  checked={multi}
+                  onChange={(e) => {
+                    const on = e.target.checked;
+                    setMultiOn((m) => ({ ...m, [n]: on }));
+                    // 从多选改回单选：只留第一项
+                    if (!on) setPicked((p) => ({ ...p, [n]: { ...p[n], labels: (p[n]?.labels ?? []).slice(0, 1) } }));
+                  }}
+                />
+                {t('chat.q_multi_toggle')}
+              </label>
+            )}
+            {(q.options ?? []).map((o) => {
+              const on = (picked[n]?.labels ?? []).includes(o.label);
+              return (
+                <button key={o.label} type="button" className="chat-opt" role={multi ? 'checkbox' : 'radio'} aria-checked={on} data-multi={multi ? '' : undefined} onClick={() => toggle(n, o.label, multi)}>
+                  <span className="chat-opt-dot" aria-hidden="true">{on && multi && <Check size={12} />}</span>
+                  <span className="chat-opt-text">
+                    <b>{o.label}</b>
+                    {o.description && o.description !== o.label && <span className="chat-note">{o.description}</span>}
+                  </span>
+                </button>
+              );
+            })}
+            <input className="chat-field" placeholder={t(multi ? 'chat.q_other_multi' : 'chat.q_other')} value={picked[n]?.other ?? ''} onChange={(e) => setPicked((p) => ({ ...p, [n]: { ...p[n], other: e.target.value } }))} />
+          </fieldset>
+        );
+      })}
       <div className="chat-acts">
         <Button busy={busy} disabled={!ready} onClick={() => onAnswer('answer', { answers })}>
           {t('chat.q_submit')}
@@ -2165,7 +2378,10 @@ function ModelMenu({ id, status, models, view, onClose }) {
   const [busy, setBusy] = useState(null);
   const [custom, setCustom] = useState('');
   const [more, setMore] = useState(false);
-  const idle = status?.phase === 'idle';
+  const { id: agentId, caps } = useContext(AgentCtx);
+  // Codex、Claude（stream-json）运行中也能改，下一轮 / 下一次请求起生效；老的 TUI 会话要等这一轮做完
+  const live = caps?.live_settings === true && (status?.phase === 'running' || status?.phase === 'approval');
+  const idle = status?.phase === 'idle' || live;
   const options = models?.options ?? [];
   const set = async (kind, value) => {
     setBusy(`${kind}:${value}`);
@@ -2180,6 +2396,7 @@ function ModelMenu({ id, status, models, view, onClose }) {
   };
   const cur = options.find((o) => o.value === view.checked);
   const efforts = cur?.efforts?.length ? cur.efforts : EFFORTS;
+  const shown = effortShown(status, cur ?? options.find((o) => o.default || o.value === 'default'), models?.effort_setting);
   const row = (o) => (
     <button key={o.value} type="button" className="chat-mi" role="menuitemradio" aria-checked={view.checked === o.value} disabled={!idle || busy != null} onClick={() => set('model', o.value)}>
       <span className="chat-mi-text">
@@ -2235,16 +2452,17 @@ function ModelMenu({ id, status, models, view, onClose }) {
       <div className="chat-pop-sep" />
       <div className="chat-pop-h">
         <span>{t('chat.effort_pick')}</span>
-        <span>{status?.effort ? t(`chat.effort_${status.effort}`, { defaultValue: status.effort }) : ''}</span>
+        <span>{shown.value ? (shown.isDefault ? t('chat.effort_default_is', { name: t(`chat.effort_${shown.value}`, { defaultValue: shown.value }) }) : t(`chat.effort_${shown.value}`, { defaultValue: shown.value })) : ''}</span>
       </div>
       <div className="chat-seg" role="radiogroup" aria-label={t('chat.effort_pick')}>
         {efforts.map((x) => (
-          <button key={x} type="button" role="radio" aria-checked={status?.effort === x} disabled={!idle || busy != null} onClick={() => set('effort', x)}>
+          <button key={x} type="button" role="radio" aria-checked={shown.value === x} data-default={shown.isDefault && shown.value === x ? '' : undefined} disabled={!idle || busy != null} onClick={() => set('effort', x)}>
             {busy === `effort:${x}` ? <LoaderCircle size={13} className="spin" /> : t(`chat.effort_${x}`, { defaultValue: x })}
           </button>
         ))}
       </div>
       {!idle && <p className="chat-pop-note">{t('chat.model_wait')}</p>}
+      {live && <p className="chat-pop-note">{t(agentId === 'codex' ? 'chat.model_live_codex' : 'chat.model_live')}</p>}
       {status?.actual_model && <p className="chat-pop-note">{t('chat.model_actual', { model: status.actual_model })}</p>}
     </Popover>
   );
@@ -2646,11 +2864,14 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
     };
   }, [id]);
   const [menu, setMenu] = useState(null);
+  const [dropping, setDropping] = useState(false);
   const area = useRef(null);
   const picker = useRef(null);
   const disabled = offline || phase === 'tui' || phase === 'approval' || phase === 'detached';
   const running = phase === 'running';
   const view = modelView(status, models?.options ?? []);
+  // 思考强度：没改过时显示这个模型的默认强度（淡一点）
+  const chipEffort = effortShown(status, (models?.options ?? []).find((o) => o.value === view.checked) ?? (models?.options ?? []).find((o) => o.default || o.value === 'default'), models?.effort_setting);
   const bg = backgroundCounts(status);
   useEffect(() => {
     const el = area.current;
@@ -2696,11 +2917,30 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
     window.addEventListener(`ll-chat-fill:${id}`, fill);
     return () => window.removeEventListener(`ll-chat-fill:${id}`, fill);
   }, [id]);
-  // 图片先传到运行终端的那台电脑的附件目录，发送时把路径交给 Claude Code
+  // 划词评论（SelectionActions）挂过来的引用：发送时拼在正文前面
+  const [quotes, setQuotes] = useState([]);
+  useEffect(() => {
+    const on = (e) => {
+      if (!e.detail?.quote) return;
+      setQuotes((q) => [...q, { key: ++attachSeq, quote: e.detail.quote, note: e.detail.note ?? '' }]);
+      requestAnimationFrame(() => claimFocus(area.current));
+    };
+    window.addEventListener(`ll-chat-quote:${id}`, on);
+    return () => window.removeEventListener(`ll-chat-quote:${id}`, on);
+  }, [id]);
+  // 附件先传到运行终端的那台电脑的附件目录：图片发送时交给 AI 看图，其他文件把路径写进正文让 AI 自己读
   const addFiles = (list) => {
-    for (const file of list) {
-      if (!file.type.startsWith('image/')) continue;
-      const item = { key: ++attachSeq, name: file.name || 'image.png', url: URL.createObjectURL(file), path: null, failed: false };
+    const all = [...list];
+    if (!all.length) return;
+    const room = ATTACH_MAX - files.length;
+    const big = all.filter((f) => f.size > ATTACH_FILE_MAX);
+    if (big.length) toast(t('chat.attach_too_big', { name: big[0].name, size: formatBytes(ATTACH_FILE_MAX) }), 'error');
+    const ok = all.filter((f) => f.size <= ATTACH_FILE_MAX);
+    if (ok.length > room) toast(t('chat.attach_too_many', { n: ATTACH_MAX }), 'error');
+    for (const file of ok.slice(0, Math.max(0, room))) {
+      // 不能看图的工具：图片也按文件路径发
+      const image = file.type.startsWith('image/') && caps.images !== false;
+      const item = { key: ++attachSeq, image, name: file.name || (image ? 'image.png' : 'file'), size: file.size, url: image ? URL.createObjectURL(file) : null, path: null, failed: false };
       setFiles((f) => [...f, item]);
       runUpload({ file, dest: 'attach' }, { instanceId: id })
         .then((path) => setFiles((f) => f.map((x) => (x.key === item.key ? { ...x, path } : x))))
@@ -2713,47 +2953,53 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
   const removeFile = (key) =>
     setFiles((f) => {
       const x = f.find((y) => y.key === key);
-      if (x) URL.revokeObjectURL(x.url);
+      if (x?.url) URL.revokeObjectURL(x.url);
       return f.filter((y) => y.key !== key);
     });
   const uploading = files.some((f) => !f.path && !f.failed);
   // now：Claude Code 的“立即发送”（Ctrl+Enter）。不带 now 时运行中发的是排队
   // later：Codex 的 Tab，排到这一轮之后作为下一轮发出（不插话）
   const send = async (now = false, later = false) => {
-    const body = text.trim();
-    const images = files.filter((f) => f.path).map((f) => f.path);
-    if ((!body && !images.length && !now) || sending || uploading || disabled) return;
+    const typed = text.trim();
+    const images = files.filter((f) => f.path && f.image).map((f) => f.path);
+    const docs = files.filter((f) => f.path && !f.image).map((f) => f.path);
+    const extra = docs.length > 0 || quotes.length > 0;
+    if ((!typed && !images.length && !extra && !now) || sending || uploading || disabled) return;
     // 界面自己能做的命令（/model、/resume、/context……）不送进去
-    const action = !images.length && slashAction(body, agentId);
+    const action = !images.length && !extra && slashAction(typed, agentId);
     if (action) {
       setText('');
       menuFor(action);
       return;
     }
     // Codex 的 /new：在 Git 仓库里先问在哪运行（当前目录 / 新建工作树），菜单里再送
-    if (agentId === 'codex' && !images.length && body.toLowerCase() === '/new') {
+    if (agentId === 'codex' && !images.length && !extra && typed.toLowerCase() === '/new') {
       setText('');
       setMenu('new');
       return;
     }
+    // 引用在前、附件路径在后，拼成一句发出去
+    const body = extra ? composeMessage(typed, quotes, docs) : typed;
+    const sentQuotes = quotes;
     // 通知权限不在这里申请：等第一次需要确认、或者跑完一轮长任务时说清楚为什么再问（ChatTips.jsx 的 NotifyAsk）
     setSending(true);
     // 先清空输入框（斜杠命令也一样）；没送出去时再放回来，不丢用户打的字
-    inflight.current = body;
+    inflight.current = typed;
     setText('');
+    setQuotes([]);
     hist.current = -1;
-    if (body && agentId !== 'claude') rememberInput(body);
+    if (typed && agentId !== 'claude') rememberInput(typed);
     // 空闲时发的一句：马上在对话里显示出来（见 useSentEcho）。运行中发的是排队 / 插话，下面“排队中”里已经有了；
     // 斜杠命令不一定成为对话里的一句话
     const echo = !now && !later && phase !== 'running' && phase !== 'approval' && !body.startsWith('/');
-    const shown = files.filter((f) => f.path);
+    const shown = files.filter((f) => f.path && f.image);
     if (echo) window.dispatchEvent(new CustomEvent(`ll-chat-sent:${id}`, { detail: { text: body, images: shown.map((f) => f.url) } }));
     try {
       const r = await api.post(`/instances/${id}/chat/input`, now && canNow ? { text: body, images, now: true } : later && canLater ? { text: body, images, later: true } : { text: body, images });
       inflight.current = '';
       writeDraft(id, latest.current);
       // 先显示出来的那句还在用小图：晚点再释放
-      const urls = files.map((f) => f.url);
+      const urls = files.map((f) => f.url).filter(Boolean);
       if (echo && urls.length) setTimeout(() => urls.forEach((u) => URL.revokeObjectURL(u)), ECHO_MAX_MS + 1000);
       else urls.forEach((u) => URL.revokeObjectURL(u));
       setFiles([]);
@@ -2764,7 +3010,8 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
     } catch (e) {
       inflight.current = '';
       if (echo) window.dispatchEvent(new CustomEvent(`ll-chat-sent:${id}`, { detail: null }));
-      setText((cur) => cur || body);
+      setText((cur) => cur || typed);
+      setQuotes((q) => (q.length ? q : sentQuotes));
       toast(errorText(t, e), 'error');
     } finally {
       setSending(false);
@@ -3021,7 +3268,7 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
   const modeText = status?.mode ? t(`chat.mode_${modeChoices.includes(status.mode) || (agentId !== 'codex' && status.mode === 'dontAsk') ? status.mode : 'other'}`, { mode: status.mode }) : t('chat.mode');
   const ready = phase === 'idle' || phase === 'running';
   const showStop = running && !text.trim() && !files.length;
-  const canSend = !!text.trim() || files.some((f) => f.path);
+  const canSend = !!text.trim() || files.some((f) => f.path) || quotes.length > 0;
   // Codex 这段对话在另一个 Git 工作树里跑（/worktree、/new 选了新建）：输入框上标出来，点开换
   const workdir = useSessions()?.known(id)?.workdir;
   const trim = (p) => String(p ?? '').replace(/[\\/]+$/, '');
@@ -3044,7 +3291,24 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
   const twoWays = running && canSend && !disabled;
   const coarse = isTouch();
   return (
-    <div className="chat-composer" data-running={running ? '' : undefined} data-ways={twoWays && canNow ? '' : undefined}>
+    <div
+      className="chat-composer"
+      data-running={running ? '' : undefined}
+      data-ways={twoWays && canNow ? '' : undefined}
+      data-dropping={dropping ? '' : undefined}
+      onDragOver={(e) => {
+        if (disabled || !Array.from(e.dataTransfer?.types ?? []).includes('Files')) return;
+        e.preventDefault();
+        setDropping(true);
+      }}
+      onDragLeave={(e) => !e.currentTarget.contains(e.relatedTarget) && setDropping(false)}
+      onDrop={(e) => {
+        if (disabled || !e.dataTransfer?.files?.length) return;
+        e.preventDefault();
+        setDropping(false);
+        addFiles([...e.dataTransfer.files]);
+      }}
+    >
       {slash.length > 0 && (
         <ul className="chat-slash" role="listbox">
           {slash.map((c, n) => (
@@ -3176,24 +3440,52 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
           )}
         </div>
       )}
+      {quotes.length > 0 && (
+        <div className="chat-quotes">
+          {quotes.map((q) => (
+            <div key={q.key} className="chat-quote-chip">
+              <TextQuote size={14} aria-hidden="true" />
+              <div className="grow">
+                <p className="chat-quote-q">{q.quote}</p>
+                {q.note && <p className="chat-quote-n">{q.note}</p>}
+              </div>
+              <button type="button" className="btn btn-plain btn-icon btn-sm" onClick={() => setQuotes((all) => all.filter((x) => x.key !== q.key))} aria-label={t('chat.quote_remove')} title={t('chat.quote_remove')}>
+                <X size={14} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
       {files.length > 0 && (
         <div className="chat-files">
-          {files.map((f) => (
-            <span key={f.key} className="chat-file" data-state={f.failed ? 'err' : f.path ? 'ok' : 'up'}>
-              <img src={f.url} alt={f.name} />
-              {!f.path && !f.failed && <LoaderCircle size={14} className="spin" />}
-              <button type="button" onClick={() => removeFile(f.key)} aria-label={t('chat.remove_image')}>
-                <X size={12} />
-              </button>
-            </span>
-          ))}
+          {files.map((f) =>
+            f.image ? (
+              <span key={f.key} className="chat-file" data-state={f.failed ? 'err' : f.path ? 'ok' : 'up'}>
+                <img src={f.url} alt={f.name} />
+                {!f.path && !f.failed && <LoaderCircle size={14} className="spin" />}
+                <button type="button" onClick={() => removeFile(f.key)} aria-label={t('chat.remove_image')}>
+                  <X size={12} />
+                </button>
+              </span>
+            ) : (
+              <span key={f.key} className="chat-file chat-file-doc" data-state={f.failed ? 'err' : f.path ? 'ok' : 'up'} title={f.name}>
+                {!f.path && !f.failed ? <LoaderCircle size={16} className="spin" /> : <FileText size={16} aria-hidden="true" />}
+                <span className="chat-file-doc-text">
+                  <b className="ellipsis">{f.name}</b>
+                  <small>{f.failed ? t('chat.attach_failed') : formatBytes(f.size)}</small>
+                </span>
+                <button type="button" onClick={() => removeFile(f.key)} aria-label={t('chat.remove_file')}>
+                  <X size={12} />
+                </button>
+              </span>
+            ),
+          )}
         </div>
       )}
       <div className="chat-input-box">
         <input
           ref={picker}
           type="file"
-          accept="image/*"
           multiple
           hidden
           onChange={(e) => {
@@ -3217,10 +3509,11 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
           onSelect={(e) => setCaret(e.currentTarget.selectionStart ?? 0)}
           onKeyDown={onKey}
           onPaste={(e) => {
-            const imgs = [...(e.clipboardData?.files ?? [])].filter((f) => f.type.startsWith('image/'));
-            if (imgs.length) {
+            // 截图、从文件管理器复制的文件都收成附件
+            const list = [...(e.clipboardData?.files ?? [])];
+            if (list.length) {
               e.preventDefault();
-              addFiles(imgs);
+              addFiles(list);
             }
           }}
         />
@@ -3230,8 +3523,8 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
           </button>
         )}
         <div className="chat-input-tools">
-          <button type="button" className="btn btn-plain btn-icon" onClick={() => picker.current?.click()} disabled={disabled || caps.images === false} aria-label={t('chat.attach')} title={caps.images === false ? t('chat.no_images') : t('chat.attach')}>
-            <Plus size={18} />
+          <button type="button" className="btn btn-plain btn-icon" onClick={() => picker.current?.click()} disabled={disabled} aria-label={t('chat.attach')} title={t('chat.attach_hint')}>
+            <Paperclip size={17} />
           </button>
           {/* 和终端里一样引用文件（@）、指定技能（Codex 是 $，Claude Code / DSH 是开头的 /） */}
           <button type="button" className="btn btn-plain btn-icon chat-trigger-btn" onMouseDown={(e) => e.preventDefault()} onClick={() => insertTrigger('@')} disabled={disabled} aria-label={t('chat.mention')} title={t('chat.mention_hint')}>
@@ -3298,7 +3591,7 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
           >
             {view.mismatch && <TriangleAlert size={13} className="chat-warn" aria-label={t('chat.model_mismatch', { model: view.mismatch })} />}
             <span className="ellipsis">{view.mismatch || view.label || t('chat.model')}</span>
-            {status?.effort && <span className="chat-chip-sub">{t(`chat.effort_${status.effort}`, { defaultValue: status.effort })}</span>}
+            {chipEffort.value && <span className="chat-chip-sub" data-default={chipEffort.isDefault ? '' : undefined}>{t(`chat.effort_${chipEffort.value}`, { defaultValue: chipEffort.value })}</span>}
             <ChevronDown size={13} aria-hidden="true" />
           </button>
           )}
@@ -3426,7 +3719,11 @@ function SentEcho({ echo }) {
           ))}
         </div>
       )}
-      {echo.text && <div className="chat-bubble">{echo.text}</div>}
+      {echo.text && (
+        <div className="chat-bubble">
+          <UserText text={echo.text} />
+        </div>
+      )}
     </div>
   );
 }
@@ -3462,16 +3759,31 @@ function FirstSend({ id, first, onBack }) {
   return (
     <>
       <div className="chat-user">
-        {first.files.length > 0 && (
+        {first.files.some((f) => f.image) && (
           <div className="chat-user-imgs">
-            {first.files.map((f) => (
+            {first.files.filter((f) => f.image).map((f) => (
               <span key={f.url} className="chat-user-img">
                 <img src={f.url} alt="" />
               </span>
             ))}
           </div>
         )}
-        {first.text && <div className="chat-bubble">{first.text}</div>}
+        {(first.text || first.files.some((f) => !f.image)) && (
+          <div className="chat-bubble">
+            {first.text}
+            {first.files.some((f) => !f.image) && (
+              <span className="chat-bubble-files">
+                {first.files.filter((f) => !f.image).map((f, n) => (
+                  // eslint-disable-next-line react/no-array-index-key -- 同名文件也要分开
+                  <span key={n} className="chat-bubble-file">
+                    <FileText size={14} aria-hidden="true" />
+                    <span className="ellipsis">{f.file.name}</span>
+                  </span>
+                ))}
+              </span>
+            )}
+          </div>
+        )}
       </div>
       {failed ? (
         <div className="chat-first-fail" role="alert">
@@ -4755,6 +5067,7 @@ export default function ChatView({ id, launch, active, touch, offline = false, o
       <div className="chat-col">
         <div className="chat-main">
           {finding && <FindBar list={list} inner={inner} more={chat.start > 0} deps={[items, side]} onClose={() => setFinding(false)} />}
+          <SelectionActions id={id} list={list} disabled={phase === 'detached'} />
           <div className="chat-list" ref={list} onScroll={onScroll} tabIndex={-1}>
             <div className="chat-items" ref={inner}>
               {chat.start > 0 && <p className="chat-event">{t('chat.older')}</p>}

@@ -59,6 +59,7 @@ test('todos, slash commands, answers', () => {
   assert.equal(slashAction('/worktree', 'claude'), null, '只有 Codex 有');
   const qs = [{ question: '颜色？' }, { question: '水果？' }, { question: '空的' }];
   assert.deepEqual(questionAnswers(qs, { 0: { labels: ['红'] }, 1: { labels: ['苹果'], other: '梨' } }), { '颜色？': '红', '水果？': '苹果, 梨' });
+  assert.deepEqual(questionAnswers(qs, { 1: { labels: ['A, B', 'C'] } }, { arrays: true }), { '水果？': ['A, B', 'C'] });
 });
 
 test('consecutive tool calls are grouped', () => {
@@ -285,4 +286,21 @@ test('mentionAt / insertMention：输入框里的 @ 提示', () => {
   assert.deepEqual(insertMention('看 @ch 吧', 2, 5, 'src/chat.js'), { text: '看 @src/chat.js  吧', caret: 15 });
   assert.deepEqual(insertMention('@s', 0, 2, 'src/'), { text: '@src/', caret: 5 }, '目录不加空格，接着找');
   assert.equal(insertMention('@m', 0, 2, 'my file.txt').text, '@"my file.txt" ');
+});
+
+test('quotes and attachments round-trip through the message text', async () => {
+  const { composeMessage, parseUserText, attachName } = await import('./chat.js');
+  const msg = composeMessage('整体不错', [{ quote: '第一行\n\n第二行', note: '这里改成 X' }, { quote: 'B', note: '' }], ['/tmp/att/20261106-101530-a.pdf']);
+  assert.equal(msg, '> 第一行\n>\n> 第二行\n这里改成 X\n\n> B\n\n整体不错\n\n[Attached file: /tmp/att/20261106-101530-a.pdf]');
+  const p = parseUserText(msg);
+  assert.deepEqual(p.files, ['/tmp/att/20261106-101530-a.pdf']);
+  assert.deepEqual(p.parts, [
+    { k: 'quote', text: '第一行\n\n第二行' },
+    { k: 'text', text: '这里改成 X' },
+    { k: 'quote', text: 'B' },
+    { k: 'text', text: '整体不错' },
+  ]);
+  assert.equal(attachName('/tmp/att/20261106-101530-a.pdf'), 'a.pdf');
+  assert.deepEqual(parseUserText('plain\n'), { parts: [{ k: 'text', text: 'plain' }], files: [] });
+  assert.equal(composeMessage('', [], ['/a']), '[Attached file: /a]');
 });

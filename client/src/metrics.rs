@@ -6,6 +6,8 @@
 //! - 看看自己占了多少（[`Looklook`]）：和进程列表一起、只在有人看时算。按进程树分给各个模块——
 //!   每个终端（ttyd、tmux 面板里的程序和它们的子孙、对话模式另起的 Claude Code）、tmux 服务进程、
 //!   客户端主进程、其余由看看起的辅助进程（Codex app-server 等）。内存是各进程常驻内存（RSS）相加，共享的部分会重复算。
+//!   Codex 对话起的后台命令虽然挂在 app-server 下面，也算进各自的终端，并单独列出（能停止）；
+//!   辅助进程按程序名合并成几组（Codex 每加载一段对话就起一套 MCP 等进程，单个很小、加起来很多）。
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -23,6 +25,8 @@ const MINUTES_LEN: usize = 1440;
 /// 有人在看“系统”页的判断时长
 const WATCH_MS: i64 = 30_000;
 const TOP_PROCESSES: usize = 8;
+/// 辅助进程按程序名合并后最多列几组
+const HELPER_GROUPS: usize = 8;
 const MAX_DISKS: usize = 8;
 
 /// 一个采样点（图表用）。百分比为 0–100；网络为每秒字节数。
@@ -62,6 +66,21 @@ pub struct Roots {
     pub sessions: Vec<SessionRoots>,
     /// 不是客户端子进程、但是看看起的（Codex app-server 单独运行）：名称、进程号
     pub helpers: Vec<(String, u32)>,
+    /// Codex app-server 里加载着几段对话
+    pub codex_loaded: Option<usize>,
+    /// Codex 对话起的后台命令
+    pub codex_bg: Vec<BgRoot>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BgRoot {
+    /// 终端 id
+    pub session: String,
+    /// app-server 里的进程号（停止时用）
+    pub process_id: String,
+    pub command: String,
+    /// 系统进程号：它和它的子孙都算这条命令的
+    pub pid: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -103,6 +122,25 @@ pub struct SessionUse {
     pub top: Option<String>,
 }
 
+/// 辅助进程里同名的一组
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Group {
+    pub name: String,
+    #[serde(flatten)]
+    pub usage: Usage,
+}
+
+/// Codex 对话的一条后台命令
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct BgUse {
+    pub session: String,
+    pub process_id: String,
+    pub command: String,
+    pub pid: Option<u32>,
+    #[serde(flatten)]
+    pub usage: Usage,
+}
+
 /// 看看自己（客户端和它管着的进程）的占用，按模块分
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Looklook {
@@ -118,7 +156,12 @@ pub struct Looklook {
     pub mux: Option<Usage>,
     /// 其余辅助进程（Codex app-server、主进程起的其他程序）
     pub helpers: Usage,
-    pub helper_top: Vec<Proc>,
+    /// 辅助进程按程序名合并，按内存从多到少，最多 [`HELPER_GROUPS`] 组
+    pub helper_groups: Vec<Group>,
+    /// Codex app-server 里加载着几段对话（没起 app-server 时为 None）
+    pub codex_loaded: Option<usize>,
+    /// Codex 对话的后台命令（也算在各自的终端里）
+    pub background: Vec<BgUse>,
     /// 所有终端（停止的也在，按内存从多到少）
     pub sessions: Vec<SessionUse>,
 }
@@ -137,6 +180,8 @@ enum Owner {
     Mux,
     Helper,
     Session(usize),
+    /// Codex 后台命令（第几条，所在的终端）
+    Bg(usize, usize),
 }
 
 /// 按进程树把进程分给各个模块。`me`：客户端自己的进程号（客户端可能是在某个终端里启动的，那样它和它的子孙也不算那个终端的）。
@@ -168,6 +213,16 @@ fn breakdown(procs: &HashMap<u32, &Process>, roots: &Roots, me: u32, cores: f32)
             walk(&mut owner, r, Owner::Session(i));
         }
     }
+    // Codex 后台命令挂在 app-server 下面：先于辅助进程分给各自的终端
+    let mut bgs: Vec<BgUse> = vec![];
+    for b in &roots.codex_bg {
+        let (Some(pid), Some(i)) = (b.pid, roots.sessions.iter().position(|s| s.id == b.session)) else { continue };
+        if owner.contains_key(&pid) {
+            continue;
+        }
+        walk(&mut owner, pid, Owner::Bg(bgs.len(), i));
+        bgs.push(BgUse { session: b.session.clone(), process_id: b.process_id.clone(), command: b.command.clone(), pid: Some(pid), usage: Usage::default() });
+    }
     for &(_, pid) in &roots.helpers {
         walk(&mut owner, pid, Owner::Helper);
     }
@@ -178,10 +233,10 @@ fn breakdown(procs: &HashMap<u32, &Process>, roots: &Roots, me: u32, cores: f32)
     for &c in roots.mux.and_then(|m| children.get(&m)).into_iter().flatten() {
         walk(&mut owner, c, Owner::Mux);
     }
-    let mut out = Looklook { main_pid: me, ..Default::default() };
+    let mut out = Looklook { main_pid: me, codex_loaded: roots.codex_loaded, ..Default::default() };
     let mut sessions: Vec<(Usage, Option<(u64, String)>)> = vec![Default::default(); roots.sessions.len()];
     let mut mux = roots.mux.filter(|m| procs.contains_key(m)).map(|_| Usage::default());
-    let mut helpers = vec![];
+    let mut groups: Vec<Group> = vec![];
     for (&pid, &o) in &owner {
         let Some(p) = procs.get(&pid) else { continue };
         let (cpu, mem) = (p.cpu_usage() / cores, p.memory());
@@ -195,10 +250,28 @@ fn breakdown(procs: &HashMap<u32, &Process>, roots: &Roots, me: u32, cores: f32)
             Owner::Mux => mux.get_or_insert_with(Usage::default).add(cpu, mem),
             Owner::Helper => {
                 out.helpers.add(cpu, mem);
-                let name = roots.helpers.iter().find(|h| h.1 == pid).map(|h| h.0.clone()).unwrap_or_else(|| p.name().to_string_lossy().into_owned());
-                helpers.push(Proc { pid, name, cpu, mem });
+                // npm 装的 codex：app-server 的进程号是 node 外壳，下面那个真的 codex 也算同一组
+                let own = p.name().to_string_lossy().into_owned();
+                let parent = p.parent().map(|pp| pp.as_u32());
+                let name = roots
+                    .helpers
+                    .iter()
+                    .find(|h| h.1 == pid || (Some(h.1) == parent && own.to_ascii_lowercase().starts_with("codex")))
+                    .map(|h| h.0.clone())
+                    .unwrap_or(own);
+                match groups.iter_mut().find(|g| g.name == name) {
+                    Some(g) => g.usage.add(cpu, mem),
+                    None => {
+                        let mut g = Group { name, usage: Usage::default() };
+                        g.usage.add(cpu, mem);
+                        groups.push(g);
+                    }
+                }
             }
-            Owner::Session(i) => {
+            Owner::Session(i) | Owner::Bg(_, i) => {
+                if let Owner::Bg(k, _) = o {
+                    bgs[k].usage.add(cpu, mem);
+                }
                 let (u, top) = &mut sessions[i];
                 u.add(cpu, mem);
                 if top.as_ref().is_none_or(|(m, _)| mem > *m) {
@@ -208,9 +281,13 @@ fn breakdown(procs: &HashMap<u32, &Process>, roots: &Roots, me: u32, cores: f32)
         }
     }
     out.mux = mux;
-    helpers.sort_by(|a, b| b.mem.cmp(&a.mem));
-    helpers.truncate(TOP_PROCESSES);
-    out.helper_top = helpers;
+    groups.sort_by_key(|g| std::cmp::Reverse(g.usage.mem));
+    groups.truncate(HELPER_GROUPS);
+    out.helper_groups = groups;
+    // 已经结束的（进程表里没有）不列
+    bgs.retain(|b| b.usage.procs > 0);
+    bgs.sort_by_key(|b| std::cmp::Reverse(b.usage.mem));
+    out.background = bgs;
     out.sessions = roots
         .sessions
         .iter()
@@ -475,13 +552,15 @@ impl Metrics {
 /// 看看的进程从哪几个开始算：终端（加上对话模式另起的 Claude Code）、tmux 服务进程、Codex app-server
 async fn own_roots(instances: &crate::instances::Instances, chat: &crate::chat::Chat) -> Roots {
     let mut roots = instances.process_roots().await;
-    let (sdk, codex) = chat.process_roots().await;
-    for (id, pid) in sdk {
+    let chat_roots = chat.process_roots().await;
+    for (id, pid) in chat_roots.sdk {
         if let Some(s) = roots.sessions.iter_mut().find(|s| s.id == id) {
             s.roots.push(pid);
         }
     }
-    roots.helpers.extend(codex.map(|p| ("Codex app-server".to_string(), p)));
+    roots.helpers.extend(chat_roots.codex.map(|p| ("Codex app-server".to_string(), p)));
+    roots.codex_loaded = chat_roots.codex_loaded;
+    roots.codex_bg = chat_roots.codex_bg.into_iter().map(|b| BgRoot { session: b.session, process_id: b.process_id, command: b.command, pid: b.pid }).collect();
     roots
 }
 
@@ -534,14 +613,25 @@ mod tests {
     #[test]
     fn breakdown_by_process_tree() {
         // 用真的进程表：起一个子进程（客户端的子进程 → 辅助进程），再把它当成一个终端的起点
-        let mut child = std::process::Command::new(if cfg!(windows) { "cmd" } else { "sleep" }).args(if cfg!(windows) { vec!["/C", "ping -n 5 127.0.0.1 >NUL"] } else { vec!["5"] }).spawn().unwrap();
+        // 非 Windows 上用一个改了名的 sleep：辅助进程按程序名合并，别的测试同时起的 sleep 不会混进来
+        let tmp = tempfile::tempdir().unwrap();
+        let program = if cfg!(windows) {
+            std::path::PathBuf::from("cmd")
+        } else {
+            let p = tmp.path().join(format!("llmet{}", std::process::id() % 100_000));
+            std::fs::copy(which_sleep(), &p).unwrap();
+            p
+        };
+        let mut child = std::process::Command::new(&program).args(if cfg!(windows) { vec!["/C", "ping -n 5 127.0.0.1 >NUL"] } else { vec!["5"] }).spawn().unwrap();
         let mut sys = System::new();
         sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing().with_cpu().with_memory());
         let procs: HashMap<u32, &Process> = sys.processes().iter().filter(|(_, p)| p.thread_kind().is_none()).map(|(pid, p)| (pid.as_u32(), p)).collect();
         let me = std::process::id();
         let l = breakdown(&procs, &Roots::default(), me, 1.0);
         assert_eq!(l.main.procs, 1);
-        assert!(l.helpers.procs >= 1 && l.helper_top.iter().any(|p| p.pid == child.id()));
+        let child_name = procs[&child.id()].name().to_string_lossy().into_owned();
+        let unique = !cfg!(windows);
+        assert!(l.helpers.procs >= 1 && l.helper_groups.iter().any(|g| g.name == child_name));
         let roots = Roots {
             sessions: vec![
                 SessionRoots { id: "a".into(), name: "A".into(), launch: "shell".into(), roots: vec![child.id()] },
@@ -555,10 +645,30 @@ mod tests {
         assert_eq!(l.sessions[0].id, "a");
         assert!(l.sessions[0].running && l.sessions[0].usage.procs >= 1 && l.sessions[0].top.is_some());
         assert!(l.sessions.iter().all(|s| s.id == "a" || !s.running), "没进程的、根是客户端自己的都不算在跑");
-        assert!(!l.helper_top.iter().any(|p| p.pid == child.id()), "算进终端的不再算辅助进程");
+        assert!(!unique || !l.helper_groups.iter().any(|g| g.name == child_name), "算进终端的不再算辅助进程");
+        // Codex 后台命令：算进它的终端，也单独列出
+        let bg = Roots {
+            sessions: vec![SessionRoots { id: "b".into(), name: "B".into(), launch: "codex".into(), roots: vec![] }],
+            codex_bg: vec![BgRoot { session: "b".into(), process_id: "7".into(), command: "npm start".into(), pid: Some(child.id()) }],
+            ..Default::default()
+        };
+        let l = breakdown(&procs, &bg, me, 1.0);
+        assert!(l.sessions[0].running && l.sessions[0].usage.procs >= 1);
+        assert_eq!(l.background.len(), 1);
+        assert_eq!((l.background[0].process_id.as_str(), l.background[0].usage.procs), ("7", l.sessions[0].usage.procs));
+        assert!(!unique || !l.helper_groups.iter().any(|g| g.name == child_name), "后台命令不算辅助进程");
         assert_eq!(l.total.procs, l.main.procs + l.helpers.procs + l.sessions.iter().map(|s| s.usage.procs).sum::<u32>());
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    #[cfg(not(windows))]
+    fn which_sleep() -> std::path::PathBuf {
+        ["/bin/sleep", "/usr/bin/sleep"].into_iter().map(std::path::PathBuf::from).find(|p| p.is_file()).expect("sleep")
+    }
+    #[cfg(windows)]
+    fn which_sleep() -> std::path::PathBuf {
+        unreachable!()
     }
 
     #[test]

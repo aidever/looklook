@@ -1,6 +1,6 @@
 // 对话页里的复制、查找、目录（docs/UI_REDESIGN_2026-10.md §4、§5）：
 // 手机上长按一条消息弹出的菜单和“选择文字”、用户消息的操作、Ctrl/⌘ F 查找、Alt+↑/↓ 在自己的消息间跳、右侧“目录”栏。
-import { ArrowDown, ArrowUp, ClipboardCopy, Copy, Download, PencilLine, RotateCcw, TextSelect, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, ClipboardCopy, Copy, Download, PencilLine, RotateCcw, TextQuote, TextSelect, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
@@ -57,7 +57,7 @@ export function useLongPress(onLong) {
 }
 
 /** 长按后从底部弹出：复制全文、选择文字、填回输入框、编辑重发（后两个只有用户消息有） */
-export function MessageSheet({ text, onFill, onEdit, onClose }) {
+export function MessageSheet({ text, onFill, onEdit, onQuote = null, onClose }) {
   const { t } = useTranslation();
   const toast = useToast();
   const [select, setSelect] = useState(false);
@@ -66,7 +66,7 @@ export function MessageSheet({ text, onFill, onEdit, onClose }) {
     window.addEventListener('keydown', esc);
     return () => window.removeEventListener('keydown', esc);
   }, [onClose]);
-  if (select) return <SelectText text={text} onClose={onClose} />;
+  if (select) return <SelectText text={text} onQuote={onQuote} onClose={onClose} />;
   const copy = async () => {
     if (await copyText(text)) {
       toast(t('action.copied'));
@@ -123,9 +123,16 @@ export function MessageSheet({ text, onFill, onEdit, onClose }) {
 }
 
 /** “选择文字”：整条消息的纯文字放在一个全屏面板里，系统的选择手柄可以随便拖，也可以一键全选 */
-export function SelectText({ text, onClose }) {
+export function SelectText({ text, onQuote = null, onClose }) {
   const { t } = useTranslation();
   const box = useRef(null);
+  // 引用到输入框（划词评论）：选中的那段；什么都没选就是整条
+  const quote = () => {
+    const sel = window.getSelection();
+    const picked = sel && !sel.isCollapsed && box.current?.contains(sel.anchorNode) ? sel.toString().trim() : '';
+    onQuote(picked || text);
+    onClose();
+  };
   const all = () => {
     const sel = window.getSelection();
     const r = document.createRange();
@@ -142,6 +149,12 @@ export function SelectText({ text, onClose }) {
         <button type="button" className="btn btn-ghost" onClick={all}>
           {t('chat.select_all')}
         </button>
+        {onQuote && (
+          <button type="button" className="btn btn-ghost" onMouseDown={(e) => e.preventDefault()} onClick={quote}>
+            <TextQuote size={16} aria-hidden="true" />
+            {t('chat.sel_quote')}
+          </button>
+        )}
         <CopyButton text={text} variant="primary" />
         <button type="button" className="btn btn-ghost" onClick={onClose}>
           {t('action.close')}

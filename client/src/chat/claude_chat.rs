@@ -160,6 +160,11 @@ impl Chat {
         if let Some(m) = mode {
             args.extend(["--permission-mode".into(), m]);
         }
+        // 对话里发的附件（图片以外的文件只给路径）放在附件目录，不在项目里：加进可访问的目录，读的时候不用一个个确认
+        let attach = self.paths.attach_dir(id);
+        if std::fs::create_dir_all(&attach).is_ok() {
+            args.extend(["--add-dir".into(), attach.display().to_string()]);
+        }
         let mut env = vec![];
         // root 下 claude 不肯带全部权限运行，要说明是在沙箱里（和终端里的启动命令一样）
         if crate::platform::is_root() {

@@ -258,6 +258,18 @@ impl Reader {
     }
 }
 
+/// 资源看板要的对话模式进程（见 [`Chat::process_roots`]）
+#[derive(Debug, Default)]
+pub struct ProcessRoots {
+    /// 终端 id → stream-json Claude Code 的进程号
+    pub sdk: Vec<(String, u32)>,
+    /// Codex app-server 的进程号
+    pub codex: Option<u32>,
+    /// app-server 里加载着几段对话
+    pub codex_loaded: Option<usize>,
+    pub codex_bg: Vec<codex_chat::BgTerm>,
+}
+
 pub struct Inst {
     id: String,
     /// 这个终端运行的 AI 工具
@@ -452,6 +464,12 @@ impl Chat {
         // 编辑重发（[`Chat::edit`]）
         if inst.sdk.load(Ordering::Relaxed) || inst.agent.launch() == "codex" {
             caps["edit"] = json!(true);
+            // 运行中也能换模型、思考强度（stream-json 随时发控制请求；Codex 下一轮 turn/start 带上）
+            caps["live_settings"] = json!(true);
+        }
+        // Codex 的提问工具没有多选字段（答案是数组）：界面上每道题可以自己打开多选
+        if inst.agent.launch() == "codex" {
+            caps["q_multi_toggle"] = json!(true);
         }
         json!({
             "agent": inst.agent.launch(),
@@ -1246,11 +1264,14 @@ impl Chat {
     }
 
     /// 资源看板（metrics.rs）：对话模式另起的进程。每个终端的 stream-json Claude Code（算进那个终端），
-    /// 和所有 Codex 对话共用的 app-server（单独运行，不是客户端的子进程）。
-    pub async fn process_roots(&self) -> (Vec<(String, u32)>, Option<u32>) {
+    /// 和所有 Codex 对话共用的 app-server（单独运行，不是客户端的子进程）：它的进程号、加载着几段对话、各对话的后台命令。
+    pub async fn process_roots(&self) -> ProcessRoots {
         let sdk = lock(&self.insts).iter().filter_map(|(id, inst)| Some((id.clone(), lock(&inst.st).sdk.proc.as_ref().filter(|p| p.alive())?.pid?))).collect();
-        let codex = self.codex.server.lock().await.as_ref().filter(|s| s.alive()).and_then(|s| s.pid());
-        (sdk, codex)
+        let (codex, codex_loaded, codex_bg) = match self.codex_usage_roots().await {
+            Some((pid, n, bg)) => (Some(pid), Some(n), bg),
+            None => (None, None, vec![]),
+        };
+        ProcessRoots { sdk, codex, codex_loaded, codex_bg }
     }
 
     /// 带对话界面的会话（通知按它们逐个检查）
@@ -1296,6 +1317,9 @@ impl Chat {
                 let sdk = inst.sdk.load(Ordering::Relaxed);
                 if sdk {
                     self.sdk_reap(&inst);
+                }
+                if tick.is_multiple_of(20) && inst.agent.launch() == "codex" {
+                    self.codex_reap(&inst).await;
                 }
                 let claude = !matches!(inst.agent.launch(), "codex" | "dsh") && !sdk;
                 let phase = lock(&inst.st).phase;
@@ -2190,7 +2214,7 @@ impl Chat {
                 let mut ctx = models::Ctx { config_dir: models::config_dir(), state_file: models::state_file(), workdir: &home, env: HashMap::new() };
                 models::merge_settings_env(&mut ctx);
                 let options = tokio::task::block_in_place(|| models::options(&ctx));
-                Ok(json!({ "installed": true, "options": options }))
+                Ok(json!({ "installed": true, "options": options, "effort_setting": models::settings_effort(&ctx) }))
             }
             "codex" => {
                 if found.codex.is_none() {
@@ -2236,9 +2260,10 @@ impl Chat {
             }
             provider = json!({ "name": ours.map(|p| p.name.clone()) });
         }
+        let effort_setting = models::settings_effort(&ctx);
         let inst = self.inst(id);
         let st = lock(&inst.st);
-        Ok(json!({ "options": options, "provider": provider, "model": st.model, "actual_model": st.actual_model, "effort": st.effort }))
+        Ok(json!({ "options": options, "provider": provider, "model": st.model, "actual_model": st.actual_model, "effort": st.effort, "effort_setting": effort_setting }))
     }
 
     /// 用量：上下文、这个会话累计的 token、订阅的 5 小时 / 7 天用量
@@ -2732,6 +2757,13 @@ impl Chat {
     pub async fn stop_task(&self, id: &str, tool: &str, command: Option<&str>) -> Result<(), LocalError> {
         self.require(id)?;
         let inst = self.inst(id);
+        // Codex：`tool` 是 app-server 列出来的后台命令（资源看板上停的）
+        if self.is_codex(id) {
+            if tool.is_empty() {
+                return Err(LocalError::not_found());
+            }
+            return self.codex_stop_bg(id, tool).await;
+        }
         if inst.sdk.load(Ordering::Relaxed) {
             if tool.is_empty() {
                 return Err(LocalError::not_found());

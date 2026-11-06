@@ -1130,6 +1130,10 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: 0; paddin
 @media (max-width: 560px) { .own-table .own-share, .own-table .own-share-h { display: none; } }
 .own-sess { display: inline-flex !important; align-items: center; gap: 6px; max-width: 260px; color: inherit; text-decoration: none; font-weight: 500; }
 .own-sess:hover { color: var(--brand); }
+.own-table .own-sub td:first-child { padding-left: 28px; }
+.own-table .own-sub td { font-size: 13px; }
+.own-bg { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.own-bg .mono { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; word-break: normal; }
 .nav-meta { margin-left: auto; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 
 /* 多设备（远程打开、多台电脑）：顶栏的电脑切换、终端页按电脑分组、登录上限列表 */
@@ -1831,6 +1835,8 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: 0; paddin
 .chat-chip:disabled { opacity: .5; }
 .chat-chip-sub { color: var(--muted); opacity: .8; }
 .chat-chip-sub::before { content: "· "; }
+.chat-chip-sub[data-default] { opacity: .6; }
+.chat-seg button[data-default] { font-style: italic; }
 .chat-chip-mode[data-mode="acceptEdits"] { color: var(--ok); }
 .chat-chip-mode[data-mode="plan"] { color: var(--brand); }
 .chat-chip-mode[data-mode="auto"] { color: var(--warn); }
@@ -1983,7 +1989,8 @@ button.chat-task-head.chat-task-main { flex-direction: row; align-items: center;
   .chat-bubble { max-width: 90%; }
   .chat-to-bottom { right: 12px; }
 }
-@media (max-width: 560px) { .chat-chip > .ellipsis { max-width: 7em; } .chat-chip-mode > .ellipsis, .chat-chip-sub { display: none; } }
+/* 手机上也显示思考强度（模型名短一点让位置） */
+@media (max-width: 560px) { .chat-chip > .ellipsis { max-width: 7em; } .chat-chip:has(.chat-chip-sub) > .ellipsis { max-width: 5.5em; } .chat-chip-mode > .ellipsis { display: none; } }
 
 /* ---------- 电脑标识与品牌图标（shared/brands.jsx） ---------- */
 :root {
@@ -3502,3 +3509,121 @@ button.link-badge:hover { filter: brightness(1.15); }
 .pet-dev-list li .ellipsis { min-width: 0; }
 .pet-dev-list li .grow { flex: 1; }
 @media (max-width: 560px) { .pet-dev-list li .mono { display: none; } }
+
+/* ---------- 对话 1106：多选提问、划词评论、文件附件（docs/CHAT_UX_2026-11-06.md） ---------- */
+.chat-q legend { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.chat-q-tag { font-size: 11.5px; font-weight: 500; color: var(--brand); background: var(--brand-soft); border-radius: 999px; padding: 1px 8px; }
+.chat-q-multi { align-self: flex-start; display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); cursor: pointer; margin: -2px 0 2px; }
+.chat-q-multi input { margin: 0; accent-color: var(--brand); }
+
+.chat-sel-bar { position: fixed; z-index: 60; display: flex; gap: 2px; padding: 4px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow-lg); animation: fade .12s; }
+.chat-sel-bar button { display: inline-flex; align-items: center; gap: 6px; border: 0; background: none; color: var(--text); font: 13px/1 var(--font); padding: 8px 10px; border-radius: 8px; cursor: pointer; white-space: nowrap; }
+.chat-sel-bar button:hover { background: var(--panel-2); color: var(--brand); }
+.chat-quote-pop { position: fixed; z-index: 61; width: min(340px, calc(100vw - 16px)); display: flex; flex-direction: column; gap: 8px; padding: 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow-lg); animation: fade .12s; }
+.chat-quote-pop textarea { width: 100%; box-sizing: border-box; resize: vertical; min-height: 64px; font: 14px/1.5 var(--font); padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--text); }
+.chat-quote-pop textarea:focus { outline: 2px solid color-mix(in srgb, var(--brand) 45%, transparent); border-color: var(--brand); }
+.chat-quote-acts { display: flex; align-items: center; gap: 6px; }
+.chat-quote-acts .btn { min-height: 32px; padding: 0 12px; }
+.chat-quote-q { margin: 0; padding: 2px 0 2px 10px; border-left: 3px solid color-mix(in srgb, var(--brand) 55%, transparent); color: var(--muted); font-size: 13px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.chat-quotes { display: flex; flex-direction: column; gap: 6px; }
+.chat-quote-chip { display: flex; align-items: flex-start; gap: 8px; padding: 8px 6px 8px 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+.chat-quote-chip > svg { flex: none; margin-top: 3px; color: var(--brand); }
+.chat-quote-chip .chat-quote-q { -webkit-line-clamp: 2; }
+.chat-quote-n { margin: 4px 0 0; font-size: 13.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-quote-chip .btn-icon { flex: none; width: 28px; min-height: 28px; }
+
+.chat-bubble-quote { display: block; margin: 2px 0 6px; padding-left: 10px; border-left: 3px solid rgba(255, 255, 255, .55); opacity: .85; font-size: .93em; }
+.chat-bubble-text { display: block; }
+.chat-bubble-text + .chat-bubble-quote { margin-top: 10px; }
+.chat-bubble-files { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.chat-bubble-file { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 5px 10px; border: 0; border-radius: 9px; background: rgba(255, 255, 255, .18); color: inherit; font: 13px/1.3 var(--font); cursor: pointer; }
+.chat-bubble-file:hover:not(:disabled) { background: rgba(255, 255, 255, .28); }
+.chat-bubble-file:disabled { cursor: default; }
+.chat-bubble-file > svg { flex: none; }
+
+.chat-file-doc { width: auto; min-width: 140px; max-width: 220px; justify-content: flex-start; gap: 8px; padding: 0 28px 0 10px; background: var(--panel); }
+.chat-file-doc > svg { flex: none; color: var(--muted); }
+.chat-file-doc-text { min-width: 0; display: flex; flex-direction: column; line-height: 1.3; text-align: left; }
+.chat-file-doc-text b { font-size: 12.5px; font-weight: 600; }
+.chat-file-doc-text small { font-size: 11.5px; color: var(--muted); }
+.chat-file-doc[data-state="err"] small { color: var(--danger); }
+.chat-file-doc button { top: 50%; transform: translateY(-50%); background: var(--panel-2); color: var(--muted); }
+.chat-composer[data-dropping] { outline: 2px dashed var(--brand); outline-offset: 4px; border-radius: 16px; }
+
+/* ---------- 文件标签改版 1106（docs/CHAT_UX_2026-11-06.md §6）：表格列表、类型图标、勾选、可调宽的预览 ---------- */
+.fb-list { container: fblist / inline-size; padding-top: 0; outline: none; }
+.fb { --fb-acts: 112px; }
+.fb-with-insert { --fb-acts: 148px; }
+.fb-head, .fb-list .fb-row { display: grid; grid-template-columns: 34px minmax(0, 1fr) 118px 78px var(--fb-acts); align-items: center; gap: 0 6px; padding: 0 6px 0 4px; }
+.fb-head { position: sticky; top: 0; z-index: 2; min-height: 34px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.fb-th { display: inline-flex; align-items: center; gap: 4px; border: 0; background: none; color: var(--muted); font: 12.5px/1 var(--font); font-weight: 600; padding: 8px 6px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+.fb-th:hover { color: var(--text); background: var(--panel-2); }
+.fb-th[aria-sort] { color: var(--text); }
+.fb-th-idle { opacity: 0; }
+.fb-th:hover .fb-th-idle { opacity: .6; }
+.fb-th.fb-c-name { justify-self: start; padding-left: 8px; }
+.fb-th.fb-c-time, .fb-th.fb-c-size { justify-self: end; }
+.fb-c-check { display: inline-flex; justify-content: center; }
+.fb-c-check input { width: 16px; height: 16px; margin: 0; accent-color: var(--brand); cursor: pointer; }
+.fb-c-time, .fb-c-size { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.fb-c-acts { display: inline-flex; justify-content: flex-end; min-width: 36px; }
+/* 勾选框：电脑上悬停或已有勾选时出现；手机上一直有 */
+.fb-row .fb-c-check input { opacity: 0; transition: opacity .12s; }
+.fb-row:hover .fb-c-check input, .fb-row.picked .fb-c-check input, .fb-picking .fb-row .fb-c-check input, .fb-c-check input:focus-visible { opacity: 1; }
+@media (hover: none) { .fb-row .fb-c-check input { opacity: 1; } }
+.fb-list .fb-row.picked { background: color-mix(in srgb, var(--brand) 9%, transparent); }
+.fb-list .fb-row.cursor { box-shadow: inset 2px 0 0 var(--brand); }
+.fb-list:focus-visible .fb-row.cursor { background: var(--panel-2); }
+.fb-list .fb-name { min-height: 44px; padding: 6px 8px; align-items: center; }
+.fb-name-text { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+/* 名字最多两行，长的从中间折，不再一行省略看不全 */
+.fb-name-main { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; word-break: break-word; line-height: 1.35; }
+.fb-link { vertical-align: -1px; margin-left: 4px; }
+.fb-sub { display: none; font-size: 12px; font-variant-numeric: tabular-nums; }
+.fb-ico { flex: none; }
+.fb-ico-dir { color: var(--brand); }
+.fb-ico-image { color: #a855f7; }
+.fb-ico-md { color: #0ea5e9; }
+.fb-ico-sheet { color: #16a34a; }
+.fb-ico-doc { color: #ef4444; }
+.fb-ico-text { color: var(--muted); }
+.fb-ico-archive { color: #d97706; }
+.fb-ico-video { color: #db2777; }
+.fb-ico-audio { color: #7c3aed; }
+.fb-ico-code { color: #0891b2; }
+.fb-ico-file { color: var(--muted); }
+/* 列表窄了（开着预览、手机）：时间和大小挪到名字下面，不丢 */
+@container fblist (max-width: 520px) {
+  .fb-head, .fb-list .fb-row { grid-template-columns: 34px minmax(0, 1fr) var(--fb-acts); }
+  .fb-c-time, .fb-c-size { display: none; }
+  .fb-sub { display: block; }
+  .fb-th.fb-c-name { grid-column: 2; }
+}
+/* 很窄时（手机）：悬停才出现的按钮收起，只留下载 */
+@container fblist (max-width: 380px) {
+  .fb-acts .fb-more { display: none; }
+  .fb-head, .fb-list .fb-row { --fb-acts: 40px; }
+}
+.fb-search { flex: none; display: flex; align-items: center; gap: 8px; padding: 4px 12px; border-bottom: 1px solid var(--line); background: var(--panel); }
+.fb-search input { flex: 1; min-width: 0; border: 0; outline: none; background: none; color: var(--text); font: 14px/1.4 var(--font); padding: 6px 0; }
+.fb-pickbar { flex: none; display: flex; align-items: center; gap: 2px; padding: 3px 8px 3px 4px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--brand) 8%, var(--panel)); container-type: inline-size; }
+.fb-pickbar .fb-act-label { display: none; }
+@container (min-width: 460px) { .fb-pickbar .fb-act-label { display: inline; } }
+/* 预览：宽度可以拖（--fb-pw） */
+.fb-preview-wrap { flex: none; width: min(var(--fb-pw, 460px), calc(100% - 260px)); min-width: 280px; display: flex; min-height: 0; }
+.fb-preview-wrap > .fb-preview { flex: 1; }
+.fb-split { flex: none; width: 6px; margin: 0 -3px; z-index: 3; cursor: col-resize; position: relative; touch-action: none; }
+.fb-split::after { content: ""; position: absolute; inset: 0 2px; border-radius: 2px; transition: background .12s; }
+.fb-split:hover::after, .fb-split:focus-visible::after { background: color-mix(in srgb, var(--brand) 45%, transparent); }
+@media (max-width: 719px) {
+  .fb-split { display: none; }
+  .fb-preview-wrap { width: 100%; min-width: 0; }
+}
+/* 右对齐的两列：排序箭头放在字前面，表头的字和下面的值右边对齐 */
+.fb-th.fb-c-time > svg, .fb-th.fb-c-size > svg { order: -1; }
+.fb-c-time, .fb-c-size { padding-right: 6px; }
+@media (max-width: 560px) {
+  .fb-bar .btn-icon, .fb-bar .fb-act { width: 38px; min-width: 38px; padding: 0; justify-content: center; }
+  .fb-bar-sep { display: none; }
+  .fb-preview-head > .muted.small { display: none; }
+}

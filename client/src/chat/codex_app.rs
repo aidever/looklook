@@ -388,6 +388,8 @@ In Default mode, strongly prefer making reasonable assumptions and executing the
 Whenever you do ask the user something that has a few possible answers (a choice, a confirmation, or a decision you need before you can continue), \
 call the `request_user_input` tool (1-3 short questions, 2-3 options each, recommended option first) and wait for the answer. \
 Never write such a question or its options as plain text in your reply: the user's app only shows a choice dialog for the tool.
+When more than one option may be picked for a question, end that question's text with \"(multi-select)\": the app then lets the user tick several options, \
+and the answer lists every picked option.
 
 If `request_user_input` returns no answers, continue with best judgment instead of asking again or treating the turn as blocked.
 

@@ -3,13 +3,14 @@
 // ⋯ 里是名字、Shell、开机自动启动、Docker；AI 工具旁边有常用任务模板（PromptTemplates.jsx）。终端、DSH 点了马上开，不用草稿。
 // 发出去后会话马上打开：Claude Code、Codex 的第一句（连同图片）等对话起来了再发（shared/firstSend.js），
 // 其他的交给电脑在启动时带上（prompt）。没写完的字按项目存在浏览器里。
-import { ArrowLeft, ArrowUp, AtSign, Brain, Container, FolderOpen, Folder, FolderPlus, ImagePlus, MoreHorizontal, Search, ShieldCheck, Sparkles, TerminalSquare, X } from 'lucide-react';
+import { ArrowLeft, ArrowUp, AtSign, Brain, Container, FolderOpen, Folder, FileText, FolderPlus, MoreHorizontal, Paperclip, Search, ShieldCheck, Sparkles, TerminalSquare, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { SafetyNote, useStatus } from '../App.jsx';
 import { deviceApi, rememberTerminals, terminalDevice } from '../shared/api.js';
-import { CHAT_LAUNCHES, isDshWeb } from '../shared/chat.js';
+import { ATTACH_FILE_MAX, ATTACH_MAX, CHAT_LAUNCHES, CODEX_EFFORTS, EFFORTS, isDshWeb } from '../shared/chat.js';
+import { formatBytes } from '../shared/xfer.js';
 import { DeviceAvatar, deviceColor, LaunchIcon } from '../shared/brands.jsx';
 import { deviceName, osLabel, useDevices } from '../shared/devices.jsx';
 import { clearDraftBack, draftBack, queueFirst } from '../shared/firstSend.js';
@@ -36,7 +37,6 @@ const DRAFT_LAUNCHES = ['claude', 'codex', 'opencode', 'dsh'];
 const PROMPT_LAUNCHES = ['claude', 'codex', 'opencode', 'shell'];
 const DRAFTS_KEY = 'looklook.new-drafts';
 const RECENT_N = 3;
-const MAX_IMAGES = 10;
 
 function readDrafts() {
   try {
@@ -250,7 +250,7 @@ function DraftForm() {
     setTermMode(term);
   };
   const [text, setText] = useState(() => want.text || readDrafts()[draftKey] || '');
-  const [files, setFiles] = useState(() => (want.files ?? []).map((file, k) => ({ key: k, file, url: URL.createObjectURL(file) })));
+  const [files, setFiles] = useState(() => (want.files ?? []).map((file, k) => ({ key: k, file, url: file.type.startsWith('image/') ? URL.createObjectURL(file) : null })));
   // Claude Code 用哪个账号 / 接口：null 用那台电脑上的默认
   // Claude Code 账号 / Codex 配置（null 用默认）；换了助手就回到默认
   const [profile, setProfile] = useState(null);
@@ -356,16 +356,23 @@ function DraftForm() {
   const [models] = useLoad(() => (pickModel ? client.get(`/draft/models?agent=${launch}`).catch(() => null) : Promise.resolve(null)), [pickModel, launch, device]);
   const modelOpts = (models?.options ?? []).filter((o) => o.value && o.value !== 'default');
   const curModel = modelOpts.find((o) => o.value === model);
-  const efforts = (curModel ?? modelOpts.find((o) => o.default) ?? (launch === 'claude' ? modelOpts[0] : null))?.efforts ?? [];
+  const baseOpt = curModel ?? modelOpts.find((o) => o.default) ?? (launch === 'claude' ? modelOpts[0] : null);
+  // 本机的模型目录里没写强度时（Claude 常见）也给选：Claude 用通用的五档，Codex 用它常见的四档
+  const efforts = baseOpt?.efforts?.length ? baseOpt.efforts : pickModel ? (launch === 'codex' ? CODEX_EFFORTS : EFFORTS) : [];
+  // 不选时用的强度：Claude 的 settings 里存的 > 模型自己的默认
+  const defEffort = (launch === 'claude' ? models?.effort_setting : null) ?? baseOpt?.default_effort ?? null;
+  const effortName = (x) => t(`pet.effort.${x}`, { defaultValue: x });
+  // 思考强度放在最上面：模型列表很长，放在后面要滚到底才看得到
   const modelItems = [
+    efforts.length > 0 && { head: t('pet.gen_effort') },
+    efforts.length > 0 && { label: defEffort ? t('draft.effort_default_is', { name: effortName(defEffort) }) : t('pet.gen_effort_default'), checked: !effort, onClick: () => setEffort('') },
+    ...efforts.map((x) => ({ label: effortName(x), checked: effort === x, onClick: () => setEffort(x) })),
     { head: t('chat.model') },
     { label: t('draft.model_default'), checked: !model, onClick: () => setModel('') },
     ...modelOpts.map((o) => ({ label: o.label, hint: o.description || undefined, checked: model === o.value, onClick: () => setModel(o.value) })),
-    efforts.length > 0 && { head: t('pet.gen_effort') },
-    efforts.length > 0 && { label: t('pet.gen_effort_default'), checked: !effort, onClick: () => setEffort('') },
-    ...efforts.map((x) => ({ label: t(`pet.effort.${x}`, { defaultValue: x }), checked: effort === x, onClick: () => setEffort(x) })),
   ];
-  const modelText = [curModel?.label, effort && t(`pet.effort.${effort}`, { defaultValue: effort })].filter(Boolean).join(' · ') || t('draft.model_default');
+  // 按钮上始终是“模型 · 强度”
+  const modelText = [curModel?.label ?? t('draft.model_default'), efforts.length > 0 && (effort ? effortName(effort) : defEffort ? effortName(defEffort) : t('draft.effort_default'))].filter(Boolean).join(' · ');
   // @ 文件、/ 和 $ 技能的提示（和对话页输入框一样）：按要开的工具、项目目录取
   const assist = useComposeAssist({ client, agent: !container && launch !== 'custom' ? launch : null, workdir: container ? '' : workdir, text, setText, area: input });
   // 没装的工具：点开始就先在后台装（npm），装好后自动接着开始
@@ -456,7 +463,7 @@ function DraftForm() {
       if (!container) s.touchProject(device, r.workdir ?? workdir, { launch, shell: shell.trim(), auto_start: autoStart, ...(canFull ? { full_access: fullAccess } : {}) });
       latest.current.sent = true;
       writeDraft(draftKey, '');
-      files.forEach((f) => URL.revokeObjectURL(f.url));
+      files.forEach((f) => f.url && URL.revokeObjectURL(f.url));
       s.reload();
       s.reloadFolders();
       ui.openSession(r.id);
@@ -465,17 +472,21 @@ function DraftForm() {
       setBusy(false);
     }
   };
-  // 图片：等会话起来了再传（上传要会话号），这里先留着
+  // 附件（图片和其他文件）：等会话起来了再传（上传要会话号），这里先留着
   const addFiles = (list) => {
-    const imgs = [...list].filter((f) => f.type.startsWith('image/'));
-    if (!imgs.length) return false;
-    setFiles((cur) => [...cur, ...imgs.map((file, k) => ({ key: `${Date.now()}-${k}`, file, url: URL.createObjectURL(file) }))].slice(0, MAX_IMAGES));
+    const all = [...(list ?? [])];
+    if (!all.length) return false;
+    const big = all.filter((f) => f.size > ATTACH_FILE_MAX);
+    if (big.length) toast(t('chat.attach_too_big', { name: big[0].name, size: formatBytes(ATTACH_FILE_MAX) }), 'error');
+    const ok = all.filter((f) => f.size <= ATTACH_FILE_MAX);
+    if (files.length + ok.length > ATTACH_MAX) toast(t('chat.attach_too_many', { n: ATTACH_MAX }), 'error');
+    setFiles((cur) => [...cur, ...ok.map((file, k) => ({ key: `${Date.now()}-${k}`, file, url: file.type.startsWith('image/') ? URL.createObjectURL(file) : null }))].slice(0, ATTACH_MAX));
     return true;
   };
   const removeFile = (key) =>
     setFiles((cur) => {
       const x = cur.find((f) => f.key === key);
-      if (x) URL.revokeObjectURL(x.url);
+      if (x?.url) URL.revokeObjectURL(x.url);
       return cur.filter((f) => f.key !== key);
     });
   const projName = container ? container.name : project?.name || baseName(workdir) || workdir || '…';
@@ -610,9 +621,19 @@ function DraftForm() {
           {files.length > 0 && (
             <div className="chat-files">
               {files.map((f) => (
-                <span key={f.key} className="chat-file">
-                  <img src={f.url} alt={f.file.name} />
-                  <button type="button" onClick={() => removeFile(f.key)} aria-label={t('chat.remove_image')}>
+                <span key={f.key} className={f.url ? 'chat-file' : 'chat-file chat-file-doc'} title={f.file.name}>
+                  {f.url ? (
+                    <img src={f.url} alt={f.file.name} />
+                  ) : (
+                    <>
+                      <FileText size={16} aria-hidden="true" />
+                      <span className="chat-file-doc-text">
+                        <b className="ellipsis">{f.file.name}</b>
+                        <small>{formatBytes(f.file.size)}</small>
+                      </span>
+                    </>
+                  )}
+                  <button type="button" onClick={() => removeFile(f.key)} aria-label={t(f.url ? 'chat.remove_image' : 'chat.remove_file')}>
                     <X size={12} />
                   </button>
                 </span>
@@ -688,11 +709,10 @@ function DraftForm() {
             )}
             {willChat && (
               <label className="btn btn-plain btn-icon draft-attach" title={t('draft.attach')}>
-                <ImagePlus size={17} aria-hidden="true" />
+                <Paperclip size={17} aria-hidden="true" />
                 <span className="sr-only">{t('draft.attach')}</span>
                 <input
                   type="file"
-                  accept="image/*"
                   multiple
                   hidden
                   onChange={(e) => {

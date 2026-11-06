@@ -292,13 +292,14 @@ export function knownDialog(d) {
   return { kind, path: kind === 'trust' ? d.body.slice(0, end < 0 ? 1 : end).join('') : '' };
 }
 
-export function questionAnswers(questions, picked) {
+export function questionAnswers(questions, picked, { arrays = false } = {}) {
   const out = {};
   (questions ?? []).forEach((q, n) => {
     const p = picked[n] ?? {};
     const labels = [...(p.labels ?? [])];
     if (p.other?.trim()) labels.push(p.other.trim());
-    if (labels.length) out[q.question] = labels.join(', ');
+    // Claude Code 要逗号连起来的一句；Codex、DSH 收数组（选项里带逗号也不会被拆开）
+    if (labels.length) out[q.question] = arrays ? labels : labels.join(', ');
   });
   return out;
 }
@@ -497,6 +498,19 @@ export function tokens(n) {
 }
 
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+/** Codex 模型目录里没写强度时的几档 */
+export const CODEX_EFFORTS = ['low', 'medium', 'high', 'xhigh'];
+
+/**
+ * 要显示的思考强度：会话里设过（或 Codex 报了）就是它；没有时用当前模型的默认强度，标成默认。
+ * 返回 `{ value, isDefault }`，都不知道时 value 为 null。
+ */
+export function effortShown(status, option, setting = null) {
+  if (status?.effort) return { value: status.effort, isDefault: false };
+  // Claude Code：settings 里存的 effortLevel 盖过模型自带的默认
+  const d = setting ?? option?.default_effort ?? null;
+  return { value: d, isDefault: Boolean(d) };
+}
 /** Shift+Tab 能轮换到的权限模式（自动模式、全部权限要启动时开启才有） */
 export const MODE_CHOICES = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions'];
 /** Codex 的权限（和 TUI 的 `/permissions` 一样三档），Shift+Tab 在这三个里轮换 */
@@ -653,4 +667,70 @@ export function conversationAgents(items, live) {
     }
   }
   return [...out.values()];
+}
+
+// ---------------- 划词评论、文件附件（docs/CHAT_UX_2026-11-06.md §1 §2） ----------------
+
+/** 一次最多带几个附件、单个文件多大 */
+export const ATTACH_MAX = 10;
+export const ATTACH_FILE_MAX = 100 * 1024 * 1024;
+/** 引用的一段最多这么多字（多了截断） */
+export const QUOTE_MAX = 2000;
+const ATTACH_LINE = /^\[Attached file: (.+)\]$/;
+
+/** 引用 + 评论 → `> 引用` 若干行，下面一行评论；多段之间空一行 */
+export function quoteText(quotes) {
+  return (quotes ?? [])
+    .map(({ quote, note }) => {
+      let q = String(quote ?? '').trim();
+      if (q.length > QUOTE_MAX) q = `${q.slice(0, QUOTE_MAX)}…`;
+      const lines = q.split('\n').map((l) => (l.trim() ? `> ${l}` : '>'));
+      const n = String(note ?? '').trim();
+      return n ? `${lines.join('\n')}\n${n}` : lines.join('\n');
+    })
+    .join('\n\n');
+}
+
+/** 发出去的正文：引用在前，用户写的在中间，附件（非图片文件）一行一个在最后 */
+export function composeMessage(text, quotes = [], files = []) {
+  const parts = [quoteText(quotes), String(text ?? '').trim()].filter(Boolean);
+  const att = files.map((p) => `[Attached file: ${p}]`).join('\n');
+  if (att) parts.push(att);
+  return parts.join('\n\n');
+}
+
+/** 附件目录里的文件名去掉上传时加的时间前缀（`20261106-101530-a.pdf` → `a.pdf`） */
+export function attachName(path) {
+  const name = String(path ?? '').split(/[\\/]/).pop();
+  return name.replace(/^\d{8}-\d{6}-/, '') || name;
+}
+
+/**
+ * 用户消息拆开显示：末尾的附件行收成文件列表，`> ` 开头的连续几行是引用。
+ * 返回 `{ parts: [{ k: 'quote' | 'text', text }], files: [路径] }`。
+ */
+export function parseUserText(text) {
+  const lines = String(text ?? '').split('\n');
+  const files = [];
+  let end = lines.length;
+  while (end > 0) {
+    const l = lines[end - 1].trim();
+    const m = ATTACH_LINE.exec(l);
+    if (m) files.unshift(m[1]);
+    else if (l) break;
+    end -= 1;
+  }
+  // 没有附件行时，末尾的空行照原样留着
+  const body = files.length ? lines.slice(0, end) : lines;
+  const parts = [];
+  for (const l of body) {
+    const quote = l === '>' || l.startsWith('> ');
+    const k = quote ? 'quote' : 'text';
+    const s = quote ? l.replace(/^> ?/, '') : l;
+    const last = parts[parts.length - 1];
+    if (last && last.k === k) last.text += `\n${s}`;
+    else parts.push({ k, text: s });
+  }
+  // 引用和后面的评论之间不留空行；文字段去掉首尾空行
+  return { parts: parts.map((p) => (p.k === 'text' ? { ...p, text: p.text.replace(/^\n+|\n+$/g, '') } : p)).filter((p) => p.k === 'quote' || p.text), files };
 }

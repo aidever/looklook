@@ -37,6 +37,11 @@ const TITLE_DELAY: Duration = Duration::from_secs(3);
 const TITLE_WAIT: Duration = Duration::from_secs(30);
 /// 和 Codex TUI 起的名字一样长
 const TITLE_MAX: usize = 36;
+/// 空闲、没人看、终端里没有接着的 TUI、没有后台命令超过这么久的对话：退订，app-server 随后卸载它
+/// （连同它起的 MCP 等进程），用到时再 `thread/resume`。和 Claude Code 的 `IDLE_REAP` 一样长
+const IDLE_UNLOAD: Duration = Duration::from_secs(30 * 60);
+/// 资源看板问后台命令时每个对话最多等多久
+const BG_LIST_WAIT: Duration = Duration::from_secs(2);
 
 /// 这个终端的对话已经有记录文件（聊过至少一轮）：TUI 能接、app-server 能 resume
 fn has_rollout(st: &super::State) -> bool {
@@ -159,6 +164,19 @@ pub struct CodexSt {
     sending: u32,
     /// 对话页发过消息的那段对话：它还没写出记录文件时也不是“还没聊过”，终端里 TUI 自己开的空对话不能把它顶掉
     prompted: Option<String>,
+    /// 最近一次用到（加载、发消息、收到这段对话的通知）：空闲卸载按它算（见 [`Chat::codex_reap`]）
+    used_at: Option<Instant>,
+}
+
+/// Codex 对话起的后台命令（app-server 的 `thread/backgroundTerminals/list`），资源看板用
+#[derive(Debug, Clone)]
+pub struct BgTerm {
+    /// 终端 id
+    pub session: String,
+    /// app-server 里的进程号（停止时用），不是系统进程号
+    pub process_id: String,
+    pub command: String,
+    pub pid: Option<u32>,
 }
 
 /// `codex_input` 期间标着“正在发”，返回（包括出错）时去掉
@@ -166,7 +184,11 @@ struct Sending(Arc<Inst>);
 
 impl Sending {
     fn new(inst: Arc<Inst>) -> Self {
-        lock(&inst.st).codex.sending += 1;
+        {
+            let mut st = lock(&inst.st);
+            st.codex.sending += 1;
+            st.codex.used_at = Some(Instant::now());
+        }
         Self(inst)
     }
 }
@@ -315,7 +337,7 @@ fn questions_view(params: &Value) -> Value {
                         "id": q["id"],
                         "header": q["header"],
                         "question": q["question"],
-                        "multiSelect": false,
+                        "multiSelect": multi_hint(q),
                         "options": q["options"].as_array().cloned().unwrap_or_default(),
                         "secret": q["isSecret"],
                     })
@@ -324,6 +346,13 @@ fn questions_view(params: &Value) -> Value {
         })
         .unwrap_or_default();
     json!({ "questions": qs })
+}
+
+/// 题干、标题里写了可以多选（Codex 的提问工具没有多选字段；默认模式说明里让模型写 `(multi-select)`）
+fn multi_hint(q: &Value) -> bool {
+    const HINTS: [&str; 12] = ["multi-select", "multiselect", "multiple choice", "select all that apply", "choose all that apply", "one or more", "select multiple", "choose multiple", "多选", "可多选", "选多个", "可以选多个"];
+    let text = format!("{} {}", q["header"].as_str().unwrap_or(""), q["question"].as_str().unwrap_or("")).to_lowercase();
+    HINTS.iter().any(|h| text.contains(h))
 }
 
 /// 界面的回答（问题原文 → 选的答案）→ app-server 的 `{ answers: { <问题 id>: { answers: [..] } } }`
@@ -501,7 +530,8 @@ impl Chat {
         let gen = self.codex.generation.load(Ordering::SeqCst);
         let inst = self.inst(id);
         let (thread, loaded) = {
-            let st = lock(&inst.st);
+            let mut st = lock(&inst.st);
+            st.codex.used_at = Some(Instant::now());
             (st.binding.as_ref().map(|b| b.session_id.clone()), st.codex.generation == gen)
         };
         if loaded {
@@ -557,6 +587,7 @@ impl Chat {
             st.binding = Some(b);
         }
         st.codex.generation = gen;
+        st.codex.used_at = Some(Instant::now());
         if st.model_set_at.is_none() {
             st.model = r["model"].as_str().map(String::from);
             st.effort = r["reasoningEffort"].as_str().map(String::from);
@@ -732,6 +763,7 @@ impl Chat {
         {
             let mut st = lock(&inst.st);
             st.active_at = crate::util::system_ms();
+            st.codex.used_at = Some(Instant::now());
             match method {
                 "turn/started" => {
                     // 终端里直接打字开始的一轮也拍检查点（界面发的在 codex_input 里已经先拍了，一样的不会重复）
@@ -2103,6 +2135,89 @@ impl Chat {
         super::guess_conversation(&self.store, id, &row.workdir, "codex", started_ms).await
     }
 
+    // ---------------- 空闲卸载、后台命令（资源看板） ----------------
+
+    /// 后台（每分钟）：空闲很久、没人看的对话退订，app-server 过一会儿（默认 60 秒）卸载它，它起的 MCP、
+    /// code mode 等进程跟着退出；再打开、发消息时 `codex_attach` 重新加载。这些情况不动：
+    /// - 终端里有接着 app-server 的 TUI：它也订阅着，卸不掉，看看退订了反而收不到它开的一轮；
+    /// - 还有后台命令（dev server 之类）：卸载可能把它们一起结束；问不到（老版本 Codex）也当成有。
+    pub(super) async fn codex_reap(&self, inst: &Inst) {
+        let gen = self.codex.generation.load(Ordering::SeqCst);
+        let idle = |st: &super::State| {
+            gen != 0
+                && st.codex.generation == gen
+                && st.phase == Phase::Idle
+                && st.codex.turn.is_none()
+                && st.codex.sending == 0
+                && st.codex.later.is_empty()
+                && st.codex.used_at.is_some_and(|t| t.elapsed() >= IDLE_UNLOAD)
+                && inst.viewers.load(Ordering::SeqCst) == 0
+        };
+        let tid = {
+            let st = lock(&inst.st);
+            match st.binding.as_ref() {
+                Some(b) if idle(&st) => b.session_id.clone(),
+                _ => return,
+            }
+        };
+        if lock(&self.codex.threads).get(&tid) != Some(&inst.id) || matches!(self.codex_terminal_kind(&inst.id).await, TermCodex::Remote) {
+            return;
+        }
+        let Some(server) = self.codex.server.lock().await.clone() else { return };
+        match tokio::time::timeout(BG_LIST_WAIT, server.call("thread/backgroundTerminals/list", json!({ "threadId": tid, "limit": 1 }))).await {
+            Ok(Ok(r)) if r["data"].as_array().is_some_and(Vec::is_empty) => {}
+            _ => return,
+        }
+        // 先标成没加载（这期间要是有人发消息，codex_attach 会重新 resume），再退订
+        {
+            let mut st = lock(&inst.st);
+            if !idle(&st) || st.binding.as_ref().map(|b| b.session_id.as_str()) != Some(tid.as_str()) {
+                return;
+            }
+            st.codex.generation = 0;
+        }
+        lock(&self.codex.threads).remove(&tid);
+        tracing::info!(id = %inst.id, thread = %tid, "Codex 对话空闲很久了，先卸载，用到时再接着");
+        if let Err(e) = server.call("thread/unsubscribe", json!({ "threadId": tid })).await {
+            tracing::debug!(thread = %tid, error = ?e, "退订 Codex 对话失败");
+        }
+    }
+
+    /// 资源看板：app-server 的进程号、加载着的对话数、各对话的后台命令
+    pub(super) async fn codex_usage_roots(&self) -> Option<(u32, usize, Vec<BgTerm>)> {
+        let server = self.codex.server.lock().await.as_ref().filter(|s| s.alive()).cloned()?;
+        let pid = server.pid()?;
+        let threads: Vec<(String, String)> = lock(&self.codex.threads).iter().map(|(t, id)| (t.clone(), id.clone())).collect();
+        let mut bg = vec![];
+        for (t, id) in &threads {
+            let Ok(Ok(r)) = tokio::time::timeout(BG_LIST_WAIT, server.call("thread/backgroundTerminals/list", json!({ "threadId": t }))).await else { continue };
+            for b in r["data"].as_array().into_iter().flatten() {
+                let Some(process_id) = b["processId"].as_str() else { continue };
+                bg.push(BgTerm {
+                    session: id.clone(),
+                    process_id: process_id.to_string(),
+                    command: b["command"].as_str().unwrap_or("").chars().take(300).collect(),
+                    pid: b["osPid"].as_u64().and_then(|p| u32::try_from(p).ok()),
+                });
+            }
+        }
+        Some((pid, threads.len(), bg))
+    }
+
+    /// 停止这个对话的一个后台命令（`process_id` 是 app-server 列出来的）
+    pub(super) async fn codex_stop_bg(&self, id: &str, process_id: &str) -> Result<(), LocalError> {
+        let tid = lock(&self.inst(id).st).binding.as_ref().map(|b| b.session_id.clone()).ok_or_else(LocalError::not_found)?;
+        if lock(&self.codex.threads).get(&tid).map(String::as_str) != Some(id) {
+            return Err(LocalError::not_found());
+        }
+        let server = self.codex.server.lock().await.clone().ok_or_else(LocalError::not_found)?;
+        let r = server.call("thread/backgroundTerminals/terminate", json!({ "threadId": tid, "processId": process_id })).await?;
+        if r["terminated"] == false {
+            return Err(LocalError::not_found());
+        }
+        Ok(())
+    }
+
     // ---------------- 不是看看打开的 Codex ----------------
 
     /// 终端里跑的是哪种 Codex：看看开的、接在 app-server 上的（`--remote`）；app-server 用不了时看看开的
@@ -2319,6 +2434,46 @@ mod tests {
         assert_eq!(bound().as_deref(), Some("tui-3"));
     }
 
+    /// 真的 codex app-server（没装 codex 时跳过）：空闲很久、没人看的对话退订；有人看、刚用过的不动；资源看板能拿到 app-server 和加载数
+    #[tokio::test(flavor = "multi_thread")]
+    async fn idle_thread_unloads() {
+        if std::process::Command::new("codex").arg("--version").output().is_err() {
+            return;
+        }
+        let home = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path().display().to_string();
+        let paths = crate::paths::Paths::discover(Some(home.path().to_path_buf())).unwrap();
+        let store = Arc::new(crate::store::Store::memory().unwrap());
+        let instances = crate::instances::Instances::new(store.clone(), paths.clone());
+        let input = crate::instances::Input { name: Some("c".into()), workdir: Some(workdir.clone()), launch: Some("codex".into()), chat_ui: Some(true), ..Default::default() };
+        let id = instances.create(input).await.unwrap().row.id;
+        let chat = Chat::new(store.clone(), paths.clone(), instances.clone());
+        let inst = chat.inst(&id);
+        let server = chat.codex_server().await.expect("起 app-server");
+        let tid = chat.codex_new_thread(&server, &inst).await.unwrap();
+        assert_eq!(lock(&chat.codex.threads).get(&tid), Some(&id));
+        let (pid, loaded, bg) = chat.codex_usage_roots().await.unwrap();
+        assert!(pid > 0 && loaded == 1 && bg.is_empty());
+
+        // 刚用过：不动
+        chat.codex_reap(&inst).await;
+        assert!(lock(&chat.codex.threads).contains_key(&tid));
+        // 很久没用，但有人在看：不动（先等新对话启动时的通知都到了，它们也算用到）
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        lock(&inst.st).codex.used_at = Some(Instant::now() - IDLE_UNLOAD);
+        inst.viewers.fetch_add(1, Ordering::SeqCst);
+        chat.codex_reap(&inst).await;
+        assert!(lock(&chat.codex.threads).contains_key(&tid));
+        inst.viewers.fetch_sub(1, Ordering::SeqCst);
+        // 没人看了：退订、标成没加载
+        chat.codex_reap(&inst).await;
+        assert!(!lock(&chat.codex.threads).contains_key(&tid));
+        assert_eq!(lock(&inst.st).codex.generation, 0);
+        assert_eq!(chat.codex_usage_roots().await.unwrap().1, 0);
+        server.kill();
+    }
+
     #[test]
     fn perms_round_trip() {
         for p in PERMS {
@@ -2435,6 +2590,10 @@ mod tests {
         assert_eq!(decision("apply_patch", "permission", &Value::Null, &ans("deny", None)).unwrap(), json!({ "decision": "decline" }));
         assert!(decision("Bash", "permission", &Value::Null, &ans("allow_dirs", None)).is_err());
         let input = questions_view(&json!({ "questions": [{ "id": "q1", "header": "H", "question": "选哪个？", "isOther": false, "isSecret": false, "options": [{ "label": "A", "description": "" }] }] }));
+        assert_eq!(input["questions"][0]["multiSelect"], false);
+        let multi = questions_view(&json!({ "questions": [{ "id": "q2", "header": "H", "question": "Which ones? (multi-select)", "options": [] }, { "id": "q3", "header": "功能", "question": "要哪些（可多选）？", "options": [] }] }));
+        assert_eq!(multi["questions"][0]["multiSelect"], true);
+        assert_eq!(multi["questions"][1]["multiSelect"], true);
         let r = decision("AskUserQuestion", "question", &input, &ans("answer", Some(json!({ "选哪个？": "A" })))).unwrap();
         assert_eq!(r, json!({ "answers": { "q1": { "answers": ["A"] } } }));
     }

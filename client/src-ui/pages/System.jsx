@@ -1,8 +1,9 @@
 // 系统：这台电脑的 CPU、内存、网络、磁盘与占用最多的程序。数据由客户端每 5 秒采样一次（src/metrics.rs），
 // 只保存在内存里：最近 1 小时逐点、最近 24 小时逐分钟；客户端重启后从头开始。
 // “看看占用”：看看自己按模块分的占用（主进程、tmux、各个会话、辅助进程），按进程树归属，只在有人看这一页时统计。
+// 辅助进程按程序名分组列出；Codex 对话起的后台命令列在各自的会话下面，可以直接停止。
 import { AlertTriangle } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { LaunchIcon } from '../shared/brands.jsx';
@@ -10,8 +11,9 @@ import { PageHead } from '../shared/page.jsx';
 import { Link } from '../shared/router.jsx';
 
 import { api } from '../shared/api.js';
+import { errorText } from '../shared/i18n.js';
 import { spanText } from '../shared/time.js';
-import { Card, ErrorNote, Skeleton } from '../shared/ui.jsx';
+import { Button, Card, ErrorNote, Skeleton, useConfirm, useToast } from '../shared/ui.jsx';
 import { Seg } from './Settings.jsx';
 
 const RANGES = ['5m', '1h', '24h'];
@@ -175,6 +177,47 @@ function Share({ pct, label }) {
   );
 }
 
+/** Codex 对话的一条后台命令：算在会话里，单独一行，能停止（停之前确认） */
+function BgRow({ b, share }) {
+  const { t } = useTranslation();
+  const confirm = useConfirm();
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  const stop = async () => {
+    const ok = await confirm({ title: t('chat.task_stop_title'), body: b.command, confirm: t('chat.task_stop_confirm'), danger: true });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      await api.post(`/instances/${b.session}/chat/task/stop`, { tool: b.process_id });
+      toast(t('system.own_bg_stopped'));
+    } catch (e) {
+      toast(errorText(t, e), 'error');
+      setBusy(false);
+    }
+  };
+  return (
+    <tr className="own-sub">
+      <td>
+        <span className="own-bg">
+          <span className="cell-name small mono" title={b.command}>
+            {b.command || t('system.own_bg')}
+          </span>
+          <Button variant="plain" className="btn-sm" busy={busy} onClick={stop}>
+            {t('system.own_bg_stop')}
+          </Button>
+        </span>
+        <span className="cell-name small muted">{t('system.own_bg_sub', { pid: b.pid })}</span>
+      </td>
+      <td className="num">{b.procs}</td>
+      <td className="num">{fmtPct(b.cpu)}</td>
+      <td className="num">{fmtBytes(b.mem)}</td>
+      <td className="own-share">
+        <Share pct={share(b.mem)} label={`${b.command} ${fmtPct(share(b.mem))}`} />
+      </td>
+    </tr>
+  );
+}
+
 /**
  * 看看占用：看看自己（客户端主进程、tmux、每个会话、辅助进程）的 CPU 和内存。
  * 卡片：合计、主进程、会话数、最大 / 最小 / 平均会话、tmux、辅助进程；曲线：看看合计；表格：按模块，内存占比。
@@ -201,11 +244,13 @@ function OwnUsage({ now, own, sec }) {
   const share = (m) => (m / total) * 100;
   const usage = (u) => `${fmtBytes(u.mem)} · CPU ${fmtPct(u.cpu)}`;
   const sessName = (s) => s.name || s.id;
-  const helperNames = l.helper_top.map((p) => p.name).filter((n, i, a) => a.indexOf(n) === i);
+  const groups = l.helper_groups ?? [];
+  const bgOf = (id) => (l.background ?? []).filter((b) => b.session === id);
+  const helperSub = l.codex_loaded != null ? t('system.own_codex_loaded', { n: l.codex_loaded }) : groups.map((g) => g.name).join(', ');
   const rows = [
     { key: 'main', label: t('system.own_main'), sub: `PID ${l.main_pid}${l.main_threads != null ? ` · ${t('system.own_threads', { n: l.main_threads })}` : ''}`, u: l.main },
     l.mux && { key: 'mux', label: t('system.own_mux'), sub: 'tmux', u: l.mux },
-    l.helpers.procs > 0 && { key: 'helpers', label: t('system.own_helpers'), sub: helperNames.join(', '), u: l.helpers },
+    l.helpers.procs > 0 && { key: 'helpers', label: t('system.own_helpers'), sub: helperSub, u: l.helpers, groups },
   ].filter(Boolean);
   const ownSummary = (key, f) => {
     const s = stats(own, key);
@@ -243,50 +288,73 @@ function OwnUsage({ now, own, sec }) {
           </thead>
           <tbody>
             {rows.map((r) => (
-              <tr key={r.key}>
-                <td>
-                  <span className="cell-name">{r.label}</span>
-                  {r.sub && (
-                    <span className="cell-name small muted" title={r.sub}>
-                      {r.sub}
-                    </span>
-                  )}
-                </td>
-                <td className="num">{r.u.procs}</td>
-                <td className="num">{fmtPct(r.u.cpu)}</td>
-                <td className="num">{fmtBytes(r.u.mem)}</td>
-                <td className="own-share">
-                  <Share pct={share(r.u.mem)} label={`${r.label} ${fmtPct(share(r.u.mem))}`} />
-                </td>
-              </tr>
+              <Fragment key={r.key}>
+                <tr>
+                  <td>
+                    <span className="cell-name">{r.label}</span>
+                    {r.sub && (
+                      <span className="cell-name small muted" title={r.sub}>
+                        {r.sub}
+                      </span>
+                    )}
+                  </td>
+                  <td className="num">{r.u.procs}</td>
+                  <td className="num">{fmtPct(r.u.cpu)}</td>
+                  <td className="num">{fmtBytes(r.u.mem)}</td>
+                  <td className="own-share">
+                    <Share pct={share(r.u.mem)} label={`${r.label} ${fmtPct(share(r.u.mem))}`} />
+                  </td>
+                </tr>
+                {r.groups?.length > 1 &&
+                  r.groups.map((g) => (
+                    <tr key={g.name} className="own-sub">
+                      <td>
+                        <span className="cell-name small" title={g.name}>
+                          {g.procs > 1 ? t('system.own_group', { name: g.name, n: g.procs }) : g.name}
+                        </span>
+                      </td>
+                      <td className="num">{g.procs}</td>
+                      <td className="num">{fmtPct(g.cpu)}</td>
+                      <td className="num">{fmtBytes(g.mem)}</td>
+                      <td className="own-share">
+                        <Share pct={share(g.mem)} label={`${g.name} ${fmtPct(share(g.mem))}`} />
+                      </td>
+                    </tr>
+                  ))}
+              </Fragment>
             ))}
             {running.map((s) => (
-              <tr key={s.id}>
-                <td>
-                  <Link to={`/t/${s.id}`} className="own-sess cell-name" title={sessName(s)}>
-                    <LaunchIcon launch={s.launch} size={14} />
-                    <span className="ellipsis">{sessName(s)}</span>
-                  </Link>
-                  {s.top && (
-                    <span className="cell-name small muted" title={s.top}>
-                      {t('system.own_top_proc', { name: s.top })}
-                    </span>
-                  )}
-                </td>
-                <td className="num">{s.procs}</td>
-                <td className="num">{fmtPct(s.cpu)}</td>
-                <td className="num">{fmtBytes(s.mem)}</td>
-                <td className="own-share">
-                  <Share pct={share(s.mem)} label={`${sessName(s)} ${fmtPct(share(s.mem))}`} />
-                </td>
-              </tr>
+              <Fragment key={s.id}>
+                <tr>
+                  <td>
+                    <Link to={`/t/${s.id}`} className="own-sess cell-name" title={sessName(s)}>
+                      <LaunchIcon launch={s.launch} size={14} />
+                      <span className="ellipsis">{sessName(s)}</span>
+                    </Link>
+                    {s.top && (
+                      <span className="cell-name small muted" title={s.top}>
+                        {t('system.own_top_proc', { name: s.top })}
+                      </span>
+                    )}
+                  </td>
+                  <td className="num">{s.procs}</td>
+                  <td className="num">{fmtPct(s.cpu)}</td>
+                  <td className="num">{fmtBytes(s.mem)}</td>
+                  <td className="own-share">
+                    <Share pct={share(s.mem)} label={`${sessName(s)} ${fmtPct(share(s.mem))}`} />
+                  </td>
+                </tr>
+                {bgOf(s.id).map((b) => (
+                  <BgRow key={b.process_id} b={b} share={share} />
+                ))}
+              </Fragment>
             ))}
           </tbody>
         </table>
       </div>
       <p className="small muted" style={{ margin: '8px 0 0' }}>
         {stopped > 0 && `${t('system.own_stopped', { n: stopped })} `}
-        {t('system.own_rss_note')}
+        {t('system.own_rss_note')} {l.codex_loaded != null && t('system.own_codex_note')}
       </p>
     </Card>
   );

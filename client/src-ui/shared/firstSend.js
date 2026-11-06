@@ -5,6 +5,7 @@
 import { useSyncExternalStore } from 'react';
 
 import { api, terminalDevice } from './api.js';
+import { composeMessage } from './chat.js';
 import { runUpload } from './uploader.js';
 
 // 多久还没起来算失败（在等用户选择框时不算）
@@ -37,8 +38,10 @@ export function useFirstSend(id) {
 }
 
 /** 排上第一句（files 是 File），马上开始等会话起来。`set`：草稿页选的模型、思考强度（{ model, effort }），先设好再发 */
+/** 图片给小图地址；其他文件（附件）只记名字，发出时把路径写进正文 */
+const isImage = (file) => (file?.type ?? '').startsWith('image/');
 export function queueFirst(id, text, files = [], set = null) {
-  items.set(id, { text, files: files.map((file) => ({ file, url: URL.createObjectURL(file) })), set, state: 'waiting', fail: null });
+  items.set(id, { text, files: files.map((file) => ({ file, image: isImage(file), url: isImage(file) ? URL.createObjectURL(file) : null })), set, state: 'waiting', fail: null });
   emit();
   deliver(id);
 }
@@ -48,7 +51,7 @@ export function dropFirst(id) {
   const x = items.get(id);
   items.delete(id);
   emit();
-  x?.files.forEach((f) => URL.revokeObjectURL(f.url));
+  x?.files.forEach((f) => f.url && URL.revokeObjectURL(f.url));
   return x;
 }
 
@@ -110,8 +113,9 @@ async function deliver(id) {
   }
   try {
     const images = [];
-    for (const f of x.files) images.push(await runUpload({ file: f.file, dest: 'attach' }, { instanceId: id }));
-    const r = await api.post(`/instances/${id}/chat/input`, { text: x.text, images });
+    const docs = [];
+    for (const f of x.files) (f.image ? images : docs).push(await runUpload({ file: f.file, dest: 'attach' }, { instanceId: id }));
+    const r = await api.post(`/instances/${id}/chat/input`, { text: docs.length ? composeMessage(x.text, [], docs) : x.text, images });
     if (r?.delivered === false) throw new Error('not_delivered');
     set(id, { state: 'sent' });
     setTimeout(() => items.get(id)?.state === 'sent' && dropFirst(id), KEEP_SENT_MS);

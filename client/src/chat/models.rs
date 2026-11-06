@@ -97,6 +97,11 @@ fn settings(ctx: &Ctx) -> Vec<Value> {
     [ctx.config_dir.join("settings.json"), proj.join("settings.json"), proj.join("settings.local.json")].iter().filter_map(|p| read_json(p)).collect()
 }
 
+/// settings 里的 `effortLevel`（用户在 /effort 里存下的默认思考强度，后面的覆盖前面的）
+pub fn settings_effort(ctx: &Ctx) -> Option<String> {
+    settings(ctx).iter().rev().find_map(|s| s["effortLevel"].as_str().map(String::from))
+}
+
 /// settings 里 `env` 的值合进来（进程自己的环境优先：Claude Code 也是进程环境优先）
 pub fn merge_settings_env(ctx: &mut Ctx) {
     for s in settings(ctx) {

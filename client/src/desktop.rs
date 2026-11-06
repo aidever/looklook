@@ -33,8 +33,20 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 const MAIN: &str = "main";
-/// 桌面宠物窗口（`desk_pet`）：铺满主屏工作区、透明、置顶，只有宠物身上能点
+/// 桌面宠物窗口（`desk_pet`）：每块屏幕一个（`pet-0`、`pet-1`……），铺满那块屏幕的工作区、透明、置顶，
+/// 只有宠物身上能点；宠物在哪块屏幕由 `desk_pet` 的 `owner` 定，走过、拖过屏幕边就换一个窗口显示
 const PET: &str = "pet";
+
+fn pet_label(i: usize) -> String {
+    format!("{PET}-{i}")
+}
+
+fn pet_windows(app: &AppHandle) -> Vec<(usize, tauri::WebviewWindow)> {
+    let mut v: Vec<(usize, tauri::WebviewWindow)> =
+        app.webview_windows().into_iter().filter_map(|(k, w)| k.strip_prefix("pet-").and_then(|n| n.parse().ok()).map(|i| (i, w))).collect();
+    v.sort_by_key(|(i, _)| *i);
+    v
+}
 
 /// 托盘菜单、窗口标题是原生控件，走不了网页那套 i18n：`src-ui/shared/i18n.js` 选的语言只存在浏览器的
 /// `localStorage`（键 `ll_locale`）里，主进程完全拿不到。这里退而求其次，用系统语言猜一下，
@@ -194,17 +206,27 @@ async fn wait_url(app: &AppHandle) -> Option<String> {
     None
 }
 
+/// 点了桌面宠物的提醒气泡：把主窗口叫出来（打开哪个会话由主窗口自己看 `/desktop/pet` 的 `open`）
+async fn pet_open_watch(app: AppHandle) {
+    let mut rx = crate::desk_pet::open_requests();
+    while rx.changed().await.is_ok() {
+        let h = app.clone();
+        let _ = app.run_on_main_thread(move || show_main(&h));
+    }
+}
+
 /// 桌面宠物：设置里开着就开窗口，关了就关；窗口在时按鼠标位置切换“鼠标穿透”。
 async fn pet_supervisor(app: AppHandle) {
+    tauri::async_runtime::spawn(pet_open_watch(app.clone()));
     let mut rx = crate::desk_pet::wanted();
     let mut poll: Option<CancellationToken> = None;
     loop {
         let on = *rx.borrow_and_update();
-        if on && app.get_webview_window(PET).is_none() {
+        if on && pet_windows(&app).is_empty() {
             if let Some(url) = wait_url(&app).await.and_then(|u| u.parse::<Url>().ok()).and_then(|u| u.join("/pet-desk").ok()) {
                 let h = app.clone();
                 let _ = app.run_on_main_thread(move || {
-                    if let Err(e) = pet_window(&h, url) {
+                    if let Err(e) = pet_windows_open(&h, url) {
                         tracing::warn!(error = %e, "桌面宠物窗口没开起来");
                     }
                 });
@@ -217,7 +239,7 @@ async fn pet_supervisor(app: AppHandle) {
             if let Some(stop) = poll.take() {
                 stop.cancel();
             }
-            if let Some(w) = app.get_webview_window(PET) {
+            for (_, w) in pet_windows(&app) {
                 let _ = w.close();
             }
             crate::desk_pet::set_running(false);
@@ -228,53 +250,83 @@ async fn pet_supervisor(app: AppHandle) {
     }
 }
 
-fn pet_window(app: &AppHandle, url: Url) -> tauri::Result<()> {
-    let w = WebviewWindowBuilder::new(app, PET, WebviewUrl::External(url))
-        .initialization_script("window.__LOOKLOOK_DESKTOP__ = true; window.__LOOKLOOK_PET_DESK__ = true;")
-        .title(tr("看看宠物", "Looklook pet"))
-        .transparent(true)
-        .decorations(false)
-        .shadow(false)
-        .resizable(false)
-        .always_on_top(true)
-        .visible_on_all_workspaces(true)
-        .skip_taskbar(true)
-        .focused(false)
-        .accept_first_mouse(true)
-        .visible(false)
-        .build()?;
-    // 铺满主屏的工作区（不盖任务栏 / 程序坞）
-    if let Some(m) = w.primary_monitor()?.or(w.current_monitor()?) {
+/// 每块屏幕开一个宠物窗口；屏幕的位置、大小、缩放记进 `desk_pet`（宠物换屏幕时换算坐标用）
+fn pet_windows_open(app: &AppHandle, url: Url) -> tauri::Result<()> {
+    let mut monitors = app.available_monitors().unwrap_or_default();
+    if monitors.is_empty() {
+        monitors.extend(app.primary_monitor().ok().flatten());
+    }
+    // 主屏排第一（宠物第一次出现在主屏上）
+    if let Ok(Some(p)) = app.primary_monitor() {
+        if let Some(i) = monitors.iter().position(|m| m.position() == p.position()) {
+            monitors.swap(0, i);
+        }
+    }
+    let screens: Vec<crate::desk_pet::Screen> = monitors
+        .iter()
+        .map(|m| {
+            let a = m.work_area();
+            crate::desk_pet::Screen { x: a.position.x as f64, y: a.position.y as f64, w: a.size.width as f64, h: a.size.height as f64, scale: m.scale_factor() }
+        })
+        .collect();
+    let n = screens.len();
+    crate::desk_pet::update(|s| {
+        s.screens = screens;
+        if s.owner >= n {
+            s.owner = 0;
+            s.entry = None;
+        }
+    });
+    for (i, m) in monitors.iter().enumerate() {
+        let mut u = url.clone();
+        u.set_query(Some(&format!("screen={i}")));
+        let w = WebviewWindowBuilder::new(app, pet_label(i), WebviewUrl::External(u))
+            .initialization_script("window.__LOOKLOOK_DESKTOP__ = true; window.__LOOKLOOK_PET_DESK__ = true;")
+            .title(tr("看看宠物", "Looklook pet"))
+            .transparent(true)
+            .decorations(false)
+            .shadow(false)
+            .resizable(false)
+            .always_on_top(true)
+            .visible_on_all_workspaces(true)
+            .skip_taskbar(true)
+            .focused(false)
+            .accept_first_mouse(true)
+            .visible(false)
+            .build()?;
+        // 铺满这块屏幕的工作区（不盖任务栏 / 程序坞）
         let a = m.work_area();
         w.set_position(a.position)?;
         w.set_size(a.size)?;
+        w.set_ignore_cursor_events(true)?;
+        w.show()?;
     }
-    w.set_ignore_cursor_events(true)?;
-    w.show()?;
     Ok(())
 }
 
-/// 每 40 ms 看一次鼠标在不在宠物身上：在就让窗口接鼠标，不在就穿透到下面的窗口
+/// 每 40 ms 看一次鼠标在不在宠物身上：在就让宠物所在的窗口接鼠标，不在就穿透到下面的窗口；别的屏幕上的宠物窗口一直穿透
 async fn pet_hover(app: AppHandle, stop: CancellationToken) {
-    let mut through = true;
+    let mut through: std::collections::HashMap<usize, bool> = std::collections::HashMap::new();
     loop {
         tokio::select! {
             _ = stop.cancelled() => return,
             _ = tokio::time::sleep(Duration::from_millis(40)) => {}
         }
-        let Some(w) = app.get_webview_window(PET) else { continue };
         let st = crate::desk_pet::get();
-        let inside = st.grab
-            || match (st.hit, app.cursor_position(), w.outer_position(), w.scale_factor()) {
-                (Some([x, y, wd, ht]), Ok(c), Ok(o), Ok(k)) if k > 0.0 => {
-                    let (cx, cy) = ((c.x - o.x as f64) / k, (c.y - o.y as f64) / k);
-                    cx >= x && cx <= x + wd && cy >= y && cy <= y + ht
-                }
-                _ => false,
-            };
-        if inside == through {
-            through = !inside;
-            let _ = w.set_ignore_cursor_events(through);
+        for (i, w) in pet_windows(&app) {
+            let inside = i == st.owner
+                && (st.grab
+                    || match (st.hit, app.cursor_position(), w.outer_position(), w.scale_factor()) {
+                        (Some([x, y, wd, ht]), Ok(c), Ok(o), Ok(k)) if k > 0.0 => {
+                            let (cx, cy) = ((c.x - o.x as f64) / k, (c.y - o.y as f64) / k);
+                            cx >= x && cx <= x + wd && cy >= y && cy <= y + ht
+                        }
+                        _ => false,
+                    });
+            if through.get(&i).copied() != Some(!inside) {
+                through.insert(i, !inside);
+                let _ = w.set_ignore_cursor_events(!inside);
+            }
         }
     }
 }
@@ -384,7 +436,7 @@ fn next_label() -> String {
 fn dock(app: &AppHandle, visible: bool) {
     #[cfg(target_os = "macos")]
     {
-        let visible = visible || app.webview_windows().iter().any(|(l, w)| l != MAIN && l != PET && w.is_visible().unwrap_or(false));
+        let visible = visible || app.webview_windows().iter().any(|(l, w)| l != MAIN && !l.starts_with("pet-") && w.is_visible().unwrap_or(false));
         let policy = if visible { tauri::ActivationPolicy::Regular } else { tauri::ActivationPolicy::Accessory };
         let _ = app.set_activation_policy(policy);
     }

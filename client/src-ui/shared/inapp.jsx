@@ -6,6 +6,7 @@ import { useTranslation } from 'react-i18next';
 
 import { deviceApi } from './api.js';
 import { boardState } from './board.js';
+import { petNotify, useDeskNotify } from './ChatPet.jsx';
 import { useSessions } from './sessions.jsx';
 
 const PING_MS = 20000;
@@ -66,6 +67,10 @@ export function InAppAlerts({ activeId, open }) {
   const [list, setList] = useState([]);
   const [hover, setHover] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const openRef = useRef(open);
+  openRef.current = open;
+  // 开着宠物、开了“宠物来报信”：交给宠物说（页面里的或桌面宠物），不弹卡片
+  useDeskNotify((id) => openRef.current?.(id));
 
   useEffect(() => {
     const items = sessions?.items;
@@ -102,6 +107,10 @@ export function InAppAlerts({ activeId, open }) {
     }
     seen.current = next;
     if (told.current.size > 500) told.current = new Set([...told.current].slice(-200));
+    // 宠物说了的不再弹卡片
+    const rest = add.filter((a) => !petNotify(a, (id) => openRef.current?.(id)));
+    add.length = 0;
+    add.push(...rest);
     // 同一个会话只留最新的一条
     if (add.length) setList((xs) => [...add, ...xs.filter((x) => !add.some((a) => a.id === x.id))]);
   }, [sessions?.items]);

@@ -29,7 +29,7 @@ import { useTips } from '../shared/tips.jsx';
 import { SyncCard, SyncLabel } from '../shared/SettingsSync.jsx';
 
 // 开源仓库（客户端 AGPL-3.0-or-later）
-const SOURCE_URL = 'https://github.com/imythu/looklook';
+const SOURCE_URL = 'https://github.com/aidever/looklook';
 
 const SYSTEM_CJK = '"PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans Mono CJK SC", "Noto Sans CJK SC", monospace';
 
@@ -300,7 +300,7 @@ export default function Settings() {
               <dd className="mono">{status.account.server}</dd>
               <dt>{t('settings.source')}</dt>
               <dd>
-                <a href={SOURCE_URL} target="_blank" rel="noopener noreferrer">github.com/imythu/looklook</a> · AGPL-3.0
+                <a href={SOURCE_URL} target="_blank" rel="noopener noreferrer">github.com/aidever/looklook</a> · AGPL-3.0
               </dd>
             </dl>
           </More>

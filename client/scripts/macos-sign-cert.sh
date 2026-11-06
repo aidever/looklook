@@ -7,7 +7,7 @@
 # 系统把升级后的看看当成另一个程序，每次升级都会重新询问。每个版本都用同一张证书签，授权就一直有效。
 # 自签名证书不能让 Gatekeeper 放行（第一次打开仍要在“隐私与安全性”里允许，和 ad-hoc 一样），只解决重复询问。
 #
-# 生成后把输出的两项加到公开仓库（imythu/looklook）的 Actions secrets：
+# 生成后把输出的两项加到公开仓库（aidever/looklook）的 Actions secrets：
 #   MACOS_SIGN_P12           looklook-sign.p12.b64 的内容（base64）
 #   MACOS_SIGN_P12_PASSWORD  脚本打印的密码
 # client-release 工作流的 macOS 任务会导入它，打包时经 LOOKLOOK_MACOS_SIGN_IDENTITY 交给 scripts/package.sh。

@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use axum::body::Body;
-use axum::http::header;
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use serde::Serialize;
@@ -692,7 +692,7 @@ fn attachment_path(paths: &Paths, instance: &str, name: &str) -> R<PathBuf> {
 }
 
 /// `GET /api/instances/{instance}/attachments/{name}`（放在终端路径下，远程多设备时按终端转给它所在的电脑）：整个文件，图片按类型内联显示（缩略图、大图预览），其他当下载。
-pub async fn serve_attachment(paths: &Paths, instance: &str, name: &str) -> R<Response> {
+pub async fn serve_attachment(paths: &Paths, instance: &str, name: &str, req: &axum::http::HeaderMap) -> R<Response> {
     let p = attachment_path(paths, instance, name)?;
     let m = match tokio::fs::metadata(&p).await {
         Ok(m) if m.is_file() => m,
@@ -701,7 +701,7 @@ pub async fn serve_attachment(paths: &Paths, instance: &str, name: &str) -> R<Re
         Err(e) => return Err(e.into()),
     };
     if !is_image(name) {
-        return download(&p.display().to_string()).await;
+        return download(&p.display().to_string(), req).await;
     }
     let f = tokio::fs::File::open(&p).await?;
     let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
@@ -744,8 +744,36 @@ pub fn clear_attachments(paths: &Paths, instance: Option<&str>) -> usize {
 
 // ---------------- 下载 ----------------
 
+/// `Range: bytes=a-b` / `a-` / `-n`（只认一段）→ 闭区间 [start, end]；超出文件 → Err(())（416）；不认识的 → None（整个文件）
+fn parse_range(v: &str, len: u64) -> Option<Result<(u64, u64), ()>> {
+    let spec = v.trim().strip_prefix("bytes=")?;
+    if spec.contains(',') {
+        return None;
+    }
+    let (a, b) = spec.split_once('-')?;
+    let (a, b) = (a.trim(), b.trim());
+    let r = if a.is_empty() {
+        let n: u64 = b.parse().ok()?;
+        if n == 0 || len == 0 {
+            return Some(Err(()));
+        }
+        (len.saturating_sub(n), len - 1)
+    } else {
+        let start: u64 = a.parse().ok()?;
+        let end = if b.is_empty() { len.saturating_sub(1) } else { b.parse::<u64>().ok()?.min(len.saturating_sub(1)) };
+        if start >= len || end < start {
+            return Some(Err(()));
+        }
+        (start, end)
+    };
+    Some(Ok(r))
+}
+
 /// `GET /api/instances/{id}/download?path=`：流式返回一个普通文件。
-pub async fn download(path: &str) -> R<Response> {
+/// 支持断点续传：`Range`（一段）+ `If-Range`（ETag 或修改时间对得上才续，文件变了给整个文件），
+/// 浏览器自己的“继续下载”和远程（WebRTC，sw.js）断了接着下都靠它。
+pub async fn download(path: &str, req: &axum::http::HeaderMap) -> R<Response> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
     let p = PathBuf::from(path);
     if !p.is_absolute() {
         return Err(LocalError::invalid("path", "absolute"));
@@ -765,15 +793,64 @@ pub async fn download(path: &str) -> R<Response> {
         Err(e) => return Err(e.into()),
     };
     let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "download".into());
-    Ok((
-        [
-            (header::CONTENT_TYPE, "application/octet-stream".to_string()),
-            (header::CONTENT_LENGTH, m.len().to_string()),
-            (header::CONTENT_DISPOSITION, content_disposition(&name)),
-        ],
-        Body::from_stream(tokio_util::io::ReaderStream::with_capacity(f, 64 * 1024)),
-    )
-        .into_response())
+    let len = m.len();
+    let mtime = m.modified().ok();
+    let secs = mtime.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| (d.as_secs(), d.subsec_nanos())).unwrap_or((0, 0));
+    let etag = format!("\"{len:x}-{:x}-{:x}\"", secs.0, secs.1);
+    let modified = mtime.and_then(|t| {
+        let f = time::macros::format_description!("[weekday repr:short], [day] [month repr:short] [year] [hour]:[minute]:[second] GMT");
+        time::OffsetDateTime::from(t).format(&f).ok()
+    });
+    let hv = |n: header::HeaderName| req.get(n).and_then(|v| v.to_str().ok()).map(str::to_string);
+    // If-Range：ETag 或修改时间对得上才按 Range 给，不然（文件变了）给整个文件
+    let fresh = match hv(header::IF_RANGE) {
+        None => true,
+        Some(v) if v.starts_with('"') || v.starts_with("W/") => v == etag,
+        Some(v) => modified.as_deref() == Some(v.as_str()),
+    };
+    let range = hv(header::RANGE).filter(|_| fresh).and_then(|v| parse_range(&v, len));
+    let mut f = f;
+    let mut head = vec![
+        (header::CONTENT_TYPE, "application/octet-stream".to_string()),
+        (header::CONTENT_DISPOSITION, content_disposition(&name)),
+        (header::ACCEPT_RANGES, "bytes".into()),
+        (header::ETAG, etag),
+    ];
+    if let Some(m) = modified {
+        head.push((header::LAST_MODIFIED, m));
+    }
+    let (status, start, end) = match range {
+        Some(Err(())) => {
+            head.push((header::CONTENT_RANGE, format!("bytes */{len}")));
+            let mut res = (head_map(head), Body::empty()).into_response();
+            *res.status_mut() = StatusCode::RANGE_NOT_SATISFIABLE;
+            return Ok(res);
+        }
+        Some(Ok((a, b))) => {
+            head.push((header::CONTENT_RANGE, format!("bytes {a}-{b}/{len}")));
+            (StatusCode::PARTIAL_CONTENT, a, b)
+        }
+        None => (StatusCode::OK, 0, len.saturating_sub(1)),
+    };
+    let n = if len == 0 { 0 } else { end - start + 1 };
+    head.push((header::CONTENT_LENGTH, n.to_string()));
+    if start > 0 {
+        f.seek(std::io::SeekFrom::Start(start)).await?;
+    }
+    let body = Body::from_stream(tokio_util::io::ReaderStream::with_capacity(f.take(n), 64 * 1024));
+    let mut res = (head_map(head), body).into_response();
+    *res.status_mut() = status;
+    Ok(res)
+}
+
+fn head_map(h: Vec<(header::HeaderName, String)>) -> axum::http::HeaderMap {
+    let mut m = axum::http::HeaderMap::new();
+    for (k, v) in h {
+        if let Ok(v) = header::HeaderValue::from_str(&v) {
+            m.insert(k, v);
+        }
+    }
+    m
 }
 
 /// 预览最多读这么多字节；更大的文件界面提示下载。
@@ -850,6 +927,17 @@ pub fn content_disposition(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ranges() {
+        assert_eq!(parse_range("bytes=0-99", 1000), Some(Ok((0, 99))));
+        assert_eq!(parse_range("bytes=500-", 1000), Some(Ok((500, 999))));
+        assert_eq!(parse_range("bytes=-100", 1000), Some(Ok((900, 999))));
+        assert_eq!(parse_range("bytes=900-5000", 1000), Some(Ok((900, 999))));
+        assert_eq!(parse_range("bytes=1000-", 1000), Some(Err(())));
+        assert_eq!(parse_range("bytes=0-1,5-6", 1000), None);
+        assert_eq!(parse_range("items=0-1", 1000), None);
+    }
 
     #[test]
     fn preview_types_never_execute() {
@@ -1142,11 +1230,22 @@ mod tests {
         assert_eq!((t.kind, t.local), ("sz", true));
         let files = t.files.unwrap();
         assert_eq!(files.iter().map(|f| (f.name.as_str(), f.size)).collect::<Vec<_>>(), [("one.txt", 5), ("two.txt", 6)]);
-        let r = download(&files[1].path).await.unwrap();
+        let none = axum::http::HeaderMap::new();
+        let r = download(&files[1].path, &none).await.unwrap();
         assert_eq!(r.headers()[header::CONTENT_DISPOSITION], "attachment; filename=\"two.txt\"; filename*=UTF-8''two.txt");
+        let etag = r.headers()[header::ETAG].clone();
         let body = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
         assert_eq!(&body[..], b"world!");
-        assert_eq!(download(work.to_str().unwrap()).await.unwrap_err().code, "NOT_A_FILE");
+        // 断点续传：从第 2 个字节接着下；ETag 对不上（文件变了）给整个文件
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(header::RANGE, "bytes=2-".parse().unwrap());
+        h.insert(header::IF_RANGE, etag);
+        let r = download(&files[1].path, &h).await.unwrap();
+        assert_eq!((r.status(), r.headers()[header::CONTENT_RANGE].to_str().unwrap()), (StatusCode::PARTIAL_CONTENT, "bytes 2-5/6"));
+        assert_eq!(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap()[..], b"rld!");
+        h.insert(header::IF_RANGE, "\"other\"".parse().unwrap());
+        assert_eq!(download(&files[1].path, &h).await.unwrap().status(), StatusCode::OK);
+        assert_eq!(download(work.to_str().unwrap(), &none).await.unwrap_err().code, "NOT_A_FILE");
         end_transfer(&inst, &id).await.unwrap();
         tokio::time::sleep(Duration::from_millis(2500)).await;
         assert_eq!(files_info(&inst, &paths, &id).await.unwrap().transfer.map(|t| t.kind), Some("unknown"), "sz 应该已经结束");

@@ -1,10 +1,13 @@
 // 系统：这台电脑的 CPU、内存、网络、磁盘与占用最多的程序。数据由客户端每 5 秒采样一次（src/metrics.rs），
 // 只保存在内存里：最近 1 小时逐点、最近 24 小时逐分钟；客户端重启后从头开始。
+// “看看占用”：看看自己按模块分的占用（主进程、tmux、各个会话、辅助进程），按进程树归属，只在有人看这一页时统计。
 import { AlertTriangle } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { LaunchIcon } from '../shared/brands.jsx';
 import { PageHead } from '../shared/page.jsx';
+import { Link } from '../shared/router.jsx';
 
 import { api } from '../shared/api.js';
 import { spanText } from '../shared/time.js';
@@ -163,6 +166,132 @@ function stats(samples, key) {
   return { min: Math.min(...v), max: Math.max(...v), avg: v.reduce((a, b) => a + b, 0) / v.length };
 }
 
+/** 占比条（不是用量：不标警告色） */
+function Share({ pct, label }) {
+  return (
+    <div className="meter" role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(pct)} aria-label={label}>
+      <span style={{ width: `${Math.min(100, Math.max(pct > 0 ? 1 : 0, pct))}%` }} />
+    </div>
+  );
+}
+
+/**
+ * 看看占用：看看自己（客户端主进程、tmux、每个会话、辅助进程）的 CPU 和内存。
+ * 卡片：合计、主进程、会话数、最大 / 最小 / 平均会话、tmux、辅助进程；曲线：看看合计；表格：按模块，内存占比。
+ */
+function OwnUsage({ now, own, sec }) {
+  const { t } = useTranslation();
+  const l = now.looklook;
+  if (!l) {
+    return (
+      <Card title={t('system.own_title')}>
+        <p className="muted small">{t('system.top_loading')}</p>
+      </Card>
+    );
+  }
+  const running = l.sessions.filter((s) => s.running);
+  const stopped = l.sessions.length - running.length;
+  const byMem = [...running].sort((a, b) => b.mem - a.mem);
+  const largest = byMem[0];
+  const smallest = byMem.length > 1 ? byMem[byMem.length - 1] : null;
+  const sessMem = running.reduce((a, s) => a + s.mem, 0);
+  const sessCpu = running.reduce((a, s) => a + s.cpu, 0);
+  const sessProcs = running.reduce((a, s) => a + s.procs, 0);
+  const total = l.total.mem || 1;
+  const share = (m) => (m / total) * 100;
+  const usage = (u) => `${fmtBytes(u.mem)} · CPU ${fmtPct(u.cpu)}`;
+  const sessName = (s) => s.name || s.id;
+  const helperNames = l.helper_top.map((p) => p.name).filter((n, i, a) => a.indexOf(n) === i);
+  const rows = [
+    { key: 'main', label: t('system.own_main'), sub: `PID ${l.main_pid}${l.main_threads != null ? ` · ${t('system.own_threads', { n: l.main_threads })}` : ''}`, u: l.main },
+    l.mux && { key: 'mux', label: t('system.own_mux'), sub: 'tmux', u: l.mux },
+    l.helpers.procs > 0 && { key: 'helpers', label: t('system.own_helpers'), sub: helperNames.join(', '), u: l.helpers },
+  ].filter(Boolean);
+  const ownSummary = (key, f) => {
+    const s = stats(own, key);
+    return s ? t('system.summary', { name: t('system.own_title'), min: f(s.min), avg: f(s.avg), max: f(s.max) }) : t('system.own_title');
+  };
+  return (
+    <Card title={t('system.own_title')} actions={<span className="small muted">{t('system.process_count', { n: l.total.procs })}</span>}>
+      <div className="tiles sys-tiles">
+        <Tile label={t('system.own_total')} value={fmtBytes(l.total.mem)} sub={now.mem_total ? t('system.own_of_machine', { p: fmtPct((l.total.mem / now.mem_total) * 100) }) : null} />
+        <Tile label={t('system.own_main')} value={fmtBytes(l.main.mem)} sub={t('system.own_up', { when: fmtUptime(t, l.main_uptime) })} />
+        <Tile label={t('system.own_sessions')} value={t('system.own_sessions_value', { run: running.length, all: l.sessions.length })} sub={running.length ? `${fmtBytes(sessMem)} · ${t('system.own_procs', { n: sessProcs })}` : t('system.own_no_running')} />
+        <Tile label={t('system.own_largest')} value={largest ? fmtBytes(largest.mem) : '–'} sub={largest ? sessName(largest) : t('system.own_no_running')} />
+        <Tile label={t('system.own_smallest')} value={smallest ? fmtBytes(smallest.mem) : '–'} sub={smallest ? sessName(smallest) : t('system.own_need_two')} />
+        <Tile label={t('system.own_avg')} value={running.length ? fmtBytes(sessMem / running.length) : '–'} sub={running.length ? `CPU ${fmtPct(sessCpu / running.length)}` : null} />
+        {l.mux && <Tile label={t('system.own_mux')} value={fmtBytes(l.mux.mem)} sub={`CPU ${fmtPct(l.mux.cpu)}`} />}
+        <Tile label={t('system.own_helpers')} value={fmtBytes(l.helpers.mem)} sub={l.helpers.procs ? `${t('system.own_procs', { n: l.helpers.procs })} · CPU ${fmtPct(l.helpers.cpu)}` : t('system.none')} />
+      </div>
+      <div className="viz-grid-2">
+        <LineChart title={t('system.own_cpu_chart')} samples={own} series={[{ key: 'cpu', label: 'CPU', cls: 'viz-s1' }]} format={fmtPct} withSeconds={sec} summary={ownSummary('cpu', fmtPct)} />
+        <LineChart title={t('system.own_mem_chart')} samples={own} series={[{ key: 'mem', label: t('system.memory'), cls: 'viz-s2' }]} format={(v) => fmtBytes(v, 0)} withSeconds={sec} summary={ownSummary('mem', fmtBytes)} />
+      </div>
+      <p className="small muted" style={{ margin: '0 0 12px' }}>
+        {t('system.own_since')}
+      </p>
+      <div className="table-wrap">
+        <table className="table own-table">
+          <thead>
+            <tr>
+              <th>{t('system.own_module')}</th>
+              <th className="num">{t('system.own_procs_h')}</th>
+              <th className="num">{t('system.cpu')}</th>
+              <th className="num">{t('system.memory')}</th>
+              <th className="own-share-h">{t('system.own_share')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.key}>
+                <td>
+                  <span className="cell-name">{r.label}</span>
+                  {r.sub && (
+                    <span className="cell-name small muted" title={r.sub}>
+                      {r.sub}
+                    </span>
+                  )}
+                </td>
+                <td className="num">{r.u.procs}</td>
+                <td className="num">{fmtPct(r.u.cpu)}</td>
+                <td className="num">{fmtBytes(r.u.mem)}</td>
+                <td className="own-share">
+                  <Share pct={share(r.u.mem)} label={`${r.label} ${fmtPct(share(r.u.mem))}`} />
+                </td>
+              </tr>
+            ))}
+            {running.map((s) => (
+              <tr key={s.id}>
+                <td>
+                  <Link to={`/t/${s.id}`} className="own-sess cell-name" title={sessName(s)}>
+                    <LaunchIcon launch={s.launch} size={14} />
+                    <span className="ellipsis">{sessName(s)}</span>
+                  </Link>
+                  {s.top && (
+                    <span className="cell-name small muted" title={s.top}>
+                      {t('system.own_top_proc', { name: s.top })}
+                    </span>
+                  )}
+                </td>
+                <td className="num">{s.procs}</td>
+                <td className="num">{fmtPct(s.cpu)}</td>
+                <td className="num">{fmtBytes(s.mem)}</td>
+                <td className="own-share">
+                  <Share pct={share(s.mem)} label={`${sessName(s)} ${fmtPct(share(s.mem))}`} />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="small muted" style={{ margin: '8px 0 0' }}>
+        {stopped > 0 && `${t('system.own_stopped', { n: stopped })} `}
+        {t('system.own_rss_note')}
+      </p>
+    </Card>
+  );
+}
+
 export default function System() {
   const { t } = useTranslation();
   const [range, setRange] = useState(() => {
@@ -252,6 +381,7 @@ export default function System() {
         />
         {data.step >= 60 && <p className="small muted" style={{ margin: '8px 0 0' }}>{t('system.averaged')}</p>}
       </Card>
+      <OwnUsage now={now} own={data.own ?? []} sec={data.step < 60 || range !== '24h'} />
       <Card title={t('system.per_core')}>
         <div className="cores">
           {now.cores.map((c, i) => (

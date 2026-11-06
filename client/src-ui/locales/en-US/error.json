@@ -237,6 +237,10 @@
   "SSH_TRANSFER_REJECTED": "The import was rejected on that computer.",
   "SSH_TRANSFER_CANCELED": "Import canceled.",
   "CHAT_UNAVAILABLE": "The chat view isn't turned on for this terminal",
+  "CLAUDE_NOT_FOUND": "Couldn't find claude (Claude Code) on this computer",
+  "CLAUDE_SDK_START": "Claude Code couldn't start: {{detail}}",
+  "CLAUDE_SDK_ERROR": "Claude Code returned an error: {{detail}}",
+  "CLAUDE_SDK_TIMEOUT": "Claude Code didn't respond ({{detail}})",
   "CHAT_NOT_RUNNING": "Claude Code isn't running",
   "CHAT_BUSY": "Claude Code is waiting for your choice; finish that first",
   "CHAT_SCREEN_OTHER": "A screen that can't be shown here is open in the terminal. Handle it there or close it, then send again",
@@ -294,5 +298,7 @@
   "PET_GEN_NONE": "No model available: Claude Code / Codex not found on this computer and no API is set for generating lines",
   "PET_GEN_FAIL": "Generating lines failed: {{detail}}",
   "PET_PEER_OLD": "Looklook on that computer is too old to share pets. Update it first.",
-  "PET_GEN_BAD": "Couldn't read the model's answer, please try again"
+  "PET_GEN_BAD": "Couldn't read the model's answer, please try again",
+  "CHAT_EDIT_UNAVAILABLE": "Edit & resend isn't available for this session (chat-mode Claude Code and Codex only)",
+  "CHAT_EDIT_STALE": "That message is no longer in this conversation. Refresh and try again"
 }

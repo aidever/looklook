@@ -9,6 +9,7 @@ import { useStatus, webUrl } from '../App.jsx';
 import { platform } from '../shared/platform.js';
 import { formatTime, relativeTime } from '../shared/time.js';
 import { Button, Card, CopyButton, ErrorNote, Field, Modal, Note, PasswordInput, useAction, useConfirm, useLoad, useToast } from '../shared/ui.jsx';
+import Select from '../shared/Select.jsx';
 
 const HOURS = [1, 24, 168];
 const MAX_ACTIVE = 20;
@@ -63,22 +64,22 @@ function CreateModal({ onClose, onDone }) {
       <form onSubmit={submit}>
         <p className="muted">{t('ikey.create_explain')}</p>
         <Field label={t('ikey.valid_for')}>
-          <select value={hours} onChange={(e) => setHours(Number(e.target.value))}>
+          <Select value={hours} onChange={(e) => setHours(Number(e.target.value))}>
             {HOURS.map((h) => (
               <option key={h} value={h}>
                 {t(`ikey.hours_${h}`)}
               </option>
             ))}
-          </select>
+          </Select>
         </Field>
         <Field label={t('ikey.uses')} hint={t('ikey.uses_hint')}>
-          <select value={uses} onChange={(e) => setUses(Number(e.target.value))}>
+          <Select value={uses} onChange={(e) => setUses(Number(e.target.value))}>
             {[1, 2, 3, 4, 5, 6, 7].map((n) => (
               <option key={n} value={n}>
                 {n}
               </option>
             ))}
-          </select>
+          </Select>
         </Field>
         <Field label={t('ikey.note')}>
           <input value={note} maxLength={60} onChange={(e) => setNote(e.target.value)} placeholder={t('ikey.note_placeholder')} />

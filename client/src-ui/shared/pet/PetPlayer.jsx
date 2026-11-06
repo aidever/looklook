@@ -9,14 +9,16 @@ import { lineFor } from './lines.js';
 import { loadBlob, measureBox, videoFormat } from './media.js';
 
 const DEFAULT_BOX = [0.3, 0.15, 0.4, 0.7];
-const PAD = 6;
+const PAD_DEFAULT = 6;
 /** 甩出去后的阻力（每秒速度衰减到 e^-k） */
 const DRAG_K = 2.6;
 /** 这些台词不管刚说过没，照说 */
 const LOUD = new Set(['done', 'error', 'waiting', 'terminal', 'testPass', 'testFail', 'fixed', 'commit', 'push', 'danger', 'levelUp', 'hello', 'morning', 'evening', 'lateNight', 'longSession', 'recapQuick', 'recapLong', 'recapBusy', 'annoyed', 'petted', 'click', 'wake', 'sleepEnd', 'sleepStart']);
 /** 特效（头顶飘起来的小符号） */
-const FX = { heart: '❤', anger: '💢', sparkle: '✨', note: '♪', zzz: 'z', bang: '!', sweat: '💦', star: '⭐' };
-const FX_OF = { petted: 'heart', annoyed: 'anger', testPass: 'sparkle', fixed: 'sparkle', commit: 'star', push: 'star', levelUp: 'heart', waiting: 'bang', danger: 'bang', testFail: 'sweat', errorStreak: 'sweat', error: 'sweat', sleepStart: 'zzz', longThink: 'note', hello: 'heart' };
+const FX = { heart: '❤', anger: '💢', sparkle: '✨', note: '♪', zzz: 'z', bang: '!', sweat: '💦', star: '⭐', question: '?', flower: '🌸', music: '♫' };
+/** 闲着时自己冒的小表情 */
+const IDLE_FX = ['note', 'music', 'sparkle', 'heart', 'question', 'flower', 'star'];
+const FX_OF = { notifyDone: 'star', notifyWait: 'bang', notifyError: 'sweat', peerHello: 'heart', peerChat: 'note', petted: 'heart', annoyed: 'anger', testPass: 'sparkle', fixed: 'sparkle', commit: 'star', push: 'star', levelUp: 'heart', waiting: 'bang', danger: 'bang', testFail: 'sweat', errorStreak: 'sweat', error: 'sweat', sleepStart: 'zzz', longThink: 'note', hello: 'heart' };
 
 const reducedMotion = () => {
   try {
@@ -48,7 +50,7 @@ function readPos(key) {
  * onHit(rect, grab)：人物占的框变了（桌面宠物窗口据此决定哪里能点）。
  */
 const PetPlayer = forwardRef(function PetPlayer(
-  { manifest: m, fileUrl, agent, height = 130, lines = true, gen, lang = 'zh-CN', label, storeKey, page = false, home, onInteract, onHit, onState, children },
+  { manifest: m, fileUrl, agent, height = 130, lines = true, gen, lang = 'zh-CN', label, storeKey, page = false, home, onInteract, onHit, onState, pad: PAD = PAD_DEFAULT, roam = false, idleTalk = true, edges, onExit, children },
   ref,
 ) {
   const layer = useRef(null);
@@ -75,7 +77,7 @@ const PetPlayer = forwardRef(function PetPlayer(
   // 这个浏览器能不能动：视频要有对应格式的文件
   const canMove = !still && (isSprite || (fmt && Object.values(m.clips).some((c) => c[fmt])));
   const cb = useRef({});
-  cb.current = { onInteract, onHit, home };
+  cb.current = { onInteract, onHit, home, onExit, edges };
 
   const b = box ?? DEFAULT_BOX;
   const stageW = m.stage?.width || 640;
@@ -84,7 +86,8 @@ const PetPlayer = forwardRef(function PetPlayer(
   const H = Math.round(Math.min(560, Math.max(60, height / Math.max(0.1, b[3]))));
   const W = Math.round((H * stageW) / stageH);
   const scale = H / stageH;
-  const ground = m.stage?.ground ?? 0.85;
+  // 脚底线：清单写了用它，否则按量出来的人物框底边（默认 0.85 常常比脚低，人就悬在边上）
+  const ground = m.stage?.ground ?? (box ? Math.min(1, box[1] + box[3]) : 0.85);
   const charW = b[2] * W;
 
   // ---------------- 位置 ----------------
@@ -92,17 +95,29 @@ const PetPlayer = forwardRef(function PetPlayer(
     const cw = layer.current?.clientWidth ?? 0;
     const ch = layer.current?.clientHeight ?? 0;
     // y 是脚离底边多高：头顶（脚底往上 (ground - 框顶) × H）不出容器
-    return { minX: charW / 2 + PAD, maxX: Math.max(charW / 2 + PAD, cw - charW / 2 - PAD), maxY: Math.max(0, ch - PAD * 2 - (ground - b[1]) * H) };
+    // 那边还有屏幕（桌面宠物、多显示器）：可以走出去，走过边就交给那块屏幕的窗口
+    const e = cb.current.edges;
+    return {
+      minX: e?.left ? -charW : charW / 2 + PAD,
+      maxX: e?.right ? cw + charW : Math.max(charW / 2 + PAD, cw - charW / 2 - PAD),
+      maxY: Math.max(0, ch - PAD * 2 - (ground - b[1]) * H),
+      cw,
+    };
   }, [charW, H, b, ground]);
 
   const lastHit = useRef('');
+  const exited = useRef(false);
+  const tapBubble = useRef(false);
   const reportHit = useCallback(
     (grab = Boolean(motion.current?.drag)) => {
       const f = cb.current.onHit;
       if (!f || pos.current.x == null) return;
       const ch = layer.current?.clientHeight ?? 0;
       const top = ch - PAD - pos.current.y - (ground - b[1]) * H;
-      const r = [Math.round(pos.current.x - charW / 2), Math.round(top - 30), Math.round(charW), Math.round(b[3] * H + 30)];
+      // 头顶留出气泡的地方（能点的气泡更高、更宽）
+      const up = tapBubble.current ? 90 : 30;
+      const wide = tapBubble.current ? Math.max(charW, 240) : charW;
+      const r = [Math.round(pos.current.x - wide / 2), Math.round(top - up), Math.round(wide), Math.round(b[3] * H + up)];
       const k = `${r.join(',')}|${grab}`;
       if (k === lastHit.current) return;
       lastHit.current = k;
@@ -122,12 +137,20 @@ const PetPlayer = forwardRef(function PetPlayer(
     const cx = b[0] + b[2] / 2;
     el.style.transform = `translate(${Math.round(p.x - cx * W)}px, ${Math.round(-(PAD + p.y) + (1 - ground) * H)}px)`;
     reportHit();
+    // 人物中心过了屏幕边：交出去（只报一次，由外面换窗口）
+    const f = cb.current.onExit;
+    const cw = layer.current?.clientWidth ?? 0;
+    if (f && cw && !exited.current && !motion.current?.drag && (p.x < 0 || p.x > cw)) {
+      exited.current = true;
+      f({ x: p.x, y: p.y, side: p.x < 0 ? 'left' : 'right' });
+    }
   }, [bounds, b, W, H, ground, reportHit]);
 
   const room = useCallback(() => {
     const { minX, maxX } = bounds();
     const x = pos.current.x ?? maxX;
-    return { left: Math.max(0, (x - minX) / scale), right: Math.max(0, (maxX - x) / scale) };
+    const e = cb.current.edges;
+    return { left: e?.left ? 4000 : Math.max(0, (x - minX) / scale), right: e?.right ? 4000 : Math.max(0, (maxX - x) / scale) };
   }, [bounds, scale]);
 
   const savePos = useCallback(() => {
@@ -176,7 +199,7 @@ const PetPlayer = forwardRef(function PetPlayer(
 
   /** 说一句：`quiet` 的（改文件、搜索）只在好久没说话时偶尔说；普通的 5 秒内不连着说；LOUD 的照说 */
   const speak = useCallback(
-    (key, vars, { quiet = false, force = false } = {}) => {
+    (key, vars, { quiet = false, force = false, onClick = null } = {}) => {
       if (FX_OF[key]) sparkle(FX_OF[key]);
       if (!lines || !key) return;
       const now = Date.now();
@@ -189,10 +212,20 @@ const PetPlayer = forwardRef(function PetPlayer(
       if (!text) return;
       talk.current = { at: now, last: text };
       clearTimeout(timers.current.bubble);
-      setBubble({ text, n: now });
-      timers.current.bubble = setTimeout(() => setBubble(null), Math.min(6000, 2600 + text.length * 70));
+      // 能点的气泡（会话通知：点了打开那个会话）留久一点，桌面宠物窗口要把气泡也算进能点的框
+      setBubble({ text, n: now, onClick });
+      tapBubble.current = Boolean(onClick);
+      reportHit();
+      timers.current.bubble = setTimeout(
+        () => {
+          setBubble(null);
+          tapBubble.current = false;
+          reportHit();
+        },
+        onClick ? 10000 : Math.min(6000, 2600 + text.length * 70),
+      );
     },
-    [lines, m, gen, lang, sparkle],
+    [lines, m, gen, lang, sparkle, reportHit],
   );
 
   const stopMotion = () => {
@@ -349,7 +382,7 @@ const PetPlayer = forwardRef(function PetPlayer(
 
   // 大脑：清单变了就换一个
   useEffect(() => {
-    const br = createBrain(m, { now: now() });
+    const br = createBrain(m, { now: now(), roam });
     brainRef.current = br;
     token.current++;
     setFaded(false);
@@ -362,7 +395,27 @@ const PetPlayer = forwardRef(function PetPlayer(
       stopMotion();
       token.current++;
     };
-  }, [mKey]);
+  }, [mKey, roam]);
+
+  // 闲着时自己冒个小表情、偶尔自言自语（隔 15~45 秒一次；在忙、睡着、被拎着时不冒）
+  useEffect(() => {
+    if (still) return undefined;
+    let wait = 15000 + Math.random() * 30000;
+    let since = Date.now();
+    const id = setInterval(() => {
+      const br = brainRef.current;
+      if (!br || document.hidden || drag.current || br.sleeping || br.state.agent !== 'idle') {
+        since = Date.now();
+        return;
+      }
+      if (Date.now() - since < wait) return;
+      since = Date.now();
+      wait = 15000 + Math.random() * 30000;
+      sparkle(IDLE_FX[Math.floor(Math.random() * IDLE_FX.length)]);
+      if (idleTalk && Math.random() < 0.35) speak(br.state.walked || motion.current ? 'roam' : 'idleChat');
+    }, 2000);
+    return () => clearInterval(id);
+  }, [still, idleTalk, sparkle, speak]);
 
   // agent 信号：状态变了换动作；同时认出来的事件（测试过了、提交了……）插播动作、说一句
   useEffect(() => {
@@ -397,26 +450,75 @@ const PetPlayer = forwardRef(function PetPlayer(
       return undefined;
     }
     let dead = false;
-    // 精灵图量第一格（待机的第一帧）；视频量封面，没有封面就量第一段的第一帧
+    // 精灵图量第一格（待机的第一帧）；视频量封面，没有封面就量待机段（用这个浏览器实际播的格式：macOS / iOS 解不出 webm 的透明，
+    // 量出来是整幅画面，人物框就比人大一圈，贴不到屏幕边上）
     const sheet = isSprite ? m.sprite?.image : null;
-    const src = sheet ?? m.preview ?? Object.values(m.clips).find((c) => c.webm)?.webm;
+    const idleClip = m.clips[m.states?.idle?.[0]?.clip] ?? m.clips[m.states?.idle?.[0]] ?? null;
+    const vf = fmt && fmt !== 'sprite' ? fmt : 'webm';
+    const clipSrc = (idleClip && idleClip[vf]) ?? Object.values(m.clips).find((c) => c[vf])?.[vf];
+    const src = sheet ?? m.preview ?? clipSrc;
     if (!src) return undefined;
+    const cacheKey = `ll-pet-box:${mKey.length}:${src}`;
+    try {
+      const hit = JSON.parse(localStorage.getItem(cacheKey) ?? 'null');
+      if (Array.isArray(hit) && hit.length === 4) {
+        setBox(hit);
+        return undefined;
+      }
+    } catch {
+      // 读不了：现量
+    }
     const idleRow = isSprite ? m.clips[m.states?.idle?.[0]?.clip]?.row ?? 0 : 0;
+    const keep = (r) => {
+      // 几乎整幅画面：这个浏览器没解出透明，量的不算
+      if (dead || !r || (r[2] > 0.95 && r[3] > 0.95)) return;
+      setBox(r);
+      try {
+        localStorage.setItem(cacheKey, JSON.stringify(r.map((v) => Math.round(v * 1000) / 1000)));
+      } catch {
+        // 存不了：下次再量
+      }
+    };
     loadBlob(fileUrl(src))
       .then((url) => {
         if (dead) return;
         const isImg = src === m.preview || src === sheet;
-        const el = isImg ? new Image() : document.createElement('video');
-        const done = () => {
-          const [cw, ch] = m.sprite?.cell ?? [192, 208];
-          const r = measureBox(el, sheet ? [0, idleRow * ch, cw, ch] : undefined);
-          if (!dead && r) setBox(r);
-        };
-        if (isImg) el.onload = done;
-        else {
-          el.muted = true;
-          el.onloadeddata = done;
+        if (isImg) {
+          const el = new Image();
+          el.onload = () => {
+            const [cw, ch] = m.sprite?.cell ?? [192, 208];
+            keep(measureBox(el, sheet ? [0, idleRow * ch, cw, ch] : undefined));
+          };
+          el.src = url;
+          return;
         }
+        // 视频：量开头和中间两帧取并集（呼吸、摆手时人会大一点）
+        const el = document.createElement('video');
+        el.muted = true;
+        el.playsInline = true;
+        el.preload = 'auto';
+        let acc = null;
+        const marks = [0.04, 0.5];
+        let i = 0;
+        const union = (a, b) => {
+          if (!a) return b;
+          if (!b) return a;
+          const x0 = Math.min(a[0], b[0]);
+          const y0 = Math.min(a[1], b[1]);
+          return [x0, y0, Math.max(a[0] + a[2], b[0] + b[2]) - x0, Math.max(a[1] + a[3], b[1] + b[3]) - y0];
+        };
+        const next = () => {
+          if (dead) return;
+          if (i >= marks.length) return keep(acc);
+          const tt = i === 0 ? marks[0] : (el.duration || 1) * marks[i];
+          i += 1;
+          el.currentTime = tt;
+        };
+        el.onseeked = () => {
+          acc = union(acc, measureBox(el));
+          next();
+        };
+        el.onloadeddata = next;
         el.src = url;
       })
       .catch(() => {});
@@ -579,6 +681,16 @@ const PetPlayer = forwardRef(function PetPlayer(
       clicked(e.clientX);
       return;
     }
+    // 拖到窗口外面松手（桌面宠物拖到另一块屏幕上）：交给那块屏幕的窗口
+    const cw0 = layer.current?.clientWidth ?? 0;
+    const ch0 = layer.current?.clientHeight ?? 0;
+    if (cb.current.onExit && cw0 && (e.clientX < 0 || e.clientX > cw0 || e.clientY < 0 || e.clientY > ch0)) {
+      motion.current = null;
+      exited.current = true;
+      reportHit(false);
+      cb.current.onExit({ x: e.clientX, y: pos.current.y, drop: true, clientY: e.clientY });
+      return;
+    }
     // 松手：按松手前 100 ms 里的速度甩出去；停住了再松手就放在这儿
     const tUp = now();
     d.samples.push({ x: e.clientX, y: e.clientY, t: tUp });
@@ -663,6 +775,30 @@ const PetPlayer = forwardRef(function PetPlayer(
       else if (kind === 'annoyed') p = br.annoyed(now());
       if (p) show(p, { line: kind === 'event' ? null : p.line });
     },
+    /** 放到 (x, 离底边 y)；`walkIn`：从边上进来时往里走一段 */
+    moveTo(x, y, { walkIn } = {}) {
+      stopMotion();
+      exited.current = false;
+      pos.current.x = x;
+      pos.current.y = Math.max(0, y ?? 0);
+      place();
+      savePos();
+      const br = brainRef.current;
+      if (walkIn && br) {
+        const p = br.walkTo?.(walkIn, now(), room());
+        if (p) show(p, { line: null });
+      }
+    },
+    /** 头顶冒个小表情 */
+    fx(kind) {
+      sparkle(kind);
+    },
+    /** 转过去看一边（`left` / `right`） */
+    look(dir) {
+      const br = brainRef.current;
+      const p = br && dir !== br.facing ? br.face(dir, now()) : null;
+      if (p) show(p, { line: null });
+    },
     /** 说一句（带数据）：`opts.state` 有的话顺便插播那个动作 */
     say(key, vars, opts = {}) {
       const br = brainRef.current;
@@ -721,7 +857,24 @@ const PetPlayer = forwardRef(function PetPlayer(
           </span>
         ))}
         {bubble && (
-          <div key={bubble.n} className="pet-bubble" style={{ left: `${cx * 100}%`, bottom: H - headTop + 6 }}>
+          <div
+            key={bubble.n}
+            className={`pet-bubble${bubble.onClick ? ' pet-bubble-link' : ''}`}
+            style={{ left: `${cx * 100}%`, bottom: H - headTop + 6 }}
+            role={bubble.onClick ? 'button' : undefined}
+            tabIndex={bubble.onClick ? 0 : undefined}
+            onClick={
+              bubble.onClick
+                ? () => {
+                    const f = bubble.onClick;
+                    setBubble(null);
+                    tapBubble.current = false;
+                    reportHit();
+                    f();
+                  }
+                : undefined
+            }
+          >
             {bubble.text}
           </div>
         )}

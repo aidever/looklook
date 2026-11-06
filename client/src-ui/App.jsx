@@ -114,7 +114,7 @@ const DRAWER_PAGES = { '/settings': 'nav.settings', '/devices': 'acct.computers'
 const isDrawer = (p) => Object.hasOwn(DRAWER_PAGES, p);
 const PAGES = ['/', '/new', '/tasks', '/history', '/project', ...ACCOUNT_PAGES, ...TOOLS.map((x) => x.to)];
 // 开源仓库（客户端 AGPL-3.0-or-later）
-export const SOURCE_URL = 'https://github.com/imythu/looklook';
+export const SOURCE_URL = 'https://github.com/aidever/looklook';
 const isKnown = (p) => PAGES.includes(p) || TERM.test(p) || SESS.test(p);
 // 会话相关的页面铺满主区域（不限宽度）
 const isWide = (p) => p === '/' || p === '/new' || p === '/tasks' || p === '/history' || SESS.test(p);

@@ -29,6 +29,125 @@ function readHidden() {
   }
 }
 
+// 宠物相关的东西变了（设置、装 / 删、生成了台词，可能是在别的标签页、桌面宠物窗口、远程打开的页面里改的）：
+// 客户端有个版本号，长轮询它，变了就发 PETS_CHANGED，各处重新取。整页共用一个轮询。
+const live = { n: 0, ver: null, run: false };
+function liveLoop() {
+  if (!live.n) {
+    live.run = false;
+    return;
+  }
+  api.get(`/pets/version${live.ver == null ? '' : `?since=${live.ver}`}`).then(
+    (r) => {
+      if (live.ver != null && r?.ver !== live.ver) window.dispatchEvent(new Event(PETS_CHANGED));
+      live.ver = r?.ver ?? live.ver;
+      setTimeout(liveLoop, 200);
+    },
+    // 连不上（客户端旧、断网）：过一会儿再试
+    () => setTimeout(liveLoop, 10000),
+  );
+}
+export function usePetsLive() {
+  useEffect(() => {
+    live.n += 1;
+    if (!live.run) {
+      live.run = true;
+      liveLoop();
+    }
+    return () => {
+      live.n -= 1;
+    };
+  }, []);
+}
+
+// ---------------- 宠物来报信 ----------------
+// 开着宠物、设置里“会话提醒由宠物来说”开着时，别的会话做完 / 出错 / 等你处理，不弹右上角的卡片，
+// 改由宠物说一句（点气泡打开那个会话）。页面里有宠物的话页面里的说；桌面应用开着桌面宠物时桌面宠物说。
+const NOTE_KEY = { done: 'notifyDone', failed: 'notifyError', attn: 'notifyWait' };
+const sinks = new Set();
+const desk = { on: false, open: null };
+
+/** 交给宠物说：`x` = { id, kind, title }；说了返回 true（调用方就不再弹卡片） */
+export function petNotify(x, open) {
+  const key = NOTE_KEY[x.kind];
+  if (!key) return false;
+  for (const f of sinks) if (f(key, x, open)) return true;
+  if (desk.on) {
+    api.put('/desktop/pet', { note: { kind: x.kind, title: x.title ?? '', id: x.id } }).catch(() => {});
+    return true;
+  }
+  return false;
+}
+
+/**
+ * 桌面应用的主窗口：桌面宠物开着、设置里开了“宠物来报信”时，提醒转给它（petNotify）；
+ * 点了桌面宠物的提醒气泡，主窗口打开那个会话（`open(id)`）。
+ */
+export function useDeskNotify(open) {
+  const on = inDesktopMain();
+  const openRef = useRef(open);
+  openRef.current = open;
+  usePetsLive();
+  useEffect(() => {
+    if (!on) return undefined;
+    let dead = false;
+    let cfg = null;
+    let st = null;
+    let seen = null;
+    const apply = () => {
+      desk.on = Boolean(st?.running && cfg?.pet && cfg.desktop !== false && cfg.notify !== false && cfg.lines !== false);
+    };
+    const loadCfg = () =>
+      api.get('/pets/current').then(
+        (r) => {
+          cfg = r;
+          apply();
+        },
+        () => {},
+      );
+    const loop = async () => {
+      while (!dead) {
+        try {
+          const r = await api.get(`/desktop/pet${st?.seq != null ? `?since=${st.seq}` : ''}`);
+          if (dead) return;
+          st = r;
+          apply();
+          const o = r?.open;
+          if (o?.seq != null && o.seq !== seen) {
+            // 刚开起来时只认最近几秒的（点了气泡、主窗口是那时才开的）
+            if (seen != null || Date.now() - (o.at ?? 0) < 10000) openRef.current?.(o.id);
+            seen = o.seq;
+          } else if (seen == null) seen = o?.seq ?? 0;
+        } catch {
+          await new Promise((ok) => setTimeout(ok, 10000));
+        }
+      }
+    };
+    loadCfg();
+    loop();
+    window.addEventListener(PETS_CHANGED, loadCfg);
+    return () => {
+      dead = true;
+      desk.on = false;
+      window.removeEventListener(PETS_CHANGED, loadCfg);
+    };
+  }, [on]);
+}
+
+/** 页面里的宠物报提醒：活着、开着台词和“宠物来报信”时登记 */
+function usePetSink(player, on) {
+  useEffect(() => {
+    if (!on) return undefined;
+    const f = (key, x, open) => {
+      if (!player.current) return false;
+      player.current.say(key, { name: x.title || '' }, { force: true, state: x.kind === 'failed' ? 'error' : x.kind === 'attn' ? 'waiting' : 'done', onClick: () => open?.(x.id) });
+      return true;
+    };
+    sinks.add(f);
+    return () => sinks.delete(f);
+  }, [on]);
+}
+
 /** 一个对话用的宠物：`{ pet: { key, source, id, manifest } | null, size, lines, chatter, desktop, gen }` */
 export function useInstancePet(id, active) {
   const [cfg, setCfg] = useState(null);
@@ -75,6 +194,7 @@ function useDeskPet(id, active) {
 
 export default function ChatPet({ id, active, status, items, touch }) {
   const { t } = useTranslation();
+  usePetsLive();
   const cfg = useInstancePet(id, active);
   const desk = useDeskPet(id, active);
   const [hidden, setHidden] = useState(readHidden);
@@ -89,6 +209,11 @@ export default function ChatPet({ id, active, status, items, touch }) {
   };
   const pet = cfg?.pet;
   const fileUrl = useMemo(() => (pet ? (key) => `/instances/${id}/pet/file/${enc(pet.source)}/${enc(pet.id)}/${key}` : null), [id, pet?.key]);
+  const player = useRef(null);
+  const shown = Boolean(active && pet && !(desk && cfg.desktop !== false) && !hidden);
+  // 网页（不是桌面应用的主窗口）：这台电脑上的桌面宠物也开着时，两只互动
+  usePeerWeb(player, shown && !inDesktopMain() && cfg?.lines !== false, pet ? textOf(pet.manifest?.name, 'zh-CN') : '');
+  usePetSink(player, shown && cfg?.lines !== false && cfg?.notify !== false);
   if (!active || !pet) return null;
   if (desk && cfg.desktop !== false) return null;
   if (hidden) {
@@ -100,7 +225,7 @@ export default function ChatPet({ id, active, status, items, touch }) {
   }
   // 嵌在终端页里的对话标签总是传 touch=false，按设备再认一次（手机上人物小一点）
   return (
-    <LivePet key={pet.key} pet={pet} cfg={cfg} status={status} items={items} fileUrl={fileUrl} height={(touch || isTouch() ? 96 : 130) * (cfg.size || 1)} page storeKey="ll-chat-pet-pos" home={chatHome}>
+    <LivePet key={pet.key} pet={pet} cfg={cfg} status={status} items={items} fileUrl={fileUrl} height={(touch || isTouch() ? 96 : 130) * (cfg.size || 1)} page storeKey="ll-chat-pet-pos" home={chatHome} playerRef={player}>
       <button type="button" className="pet-hide" onClick={() => toggle(true)} title={t('pet.hide')} aria-label={t('pet.hide')}>
         <X size={11} />
       </button>
@@ -128,9 +253,10 @@ const XP = { clicks: 1, pets: 3, turns: 2, tests: 1, fixes: 3, commits: 2, hello
  * 一只活的宠物：跟着对话状态和条目走、记好感度、碎碎念。对话页和桌面宠物窗口共用。
  * `home`：没记住位置时放在哪；`onHit`：桌面窗口用。
  */
-export function LivePet({ pet, cfg, status, items, fileUrl, height, page, storeKey, home, onHit, children }) {
+export function LivePet({ pet, cfg, status, items, fileUrl, height, page, storeKey, home, onHit, playerRef, roam = true, pad, edges, onExit, children }) {
   const { t, i18n } = useTranslation();
-  const player = useRef(null);
+  const own = useRef(null);
+  const player = playerRef ?? own;
   const chatter = cfg.chatter !== false;
   const gen = cfg.gen && typeof cfg.gen === 'object' ? cfg.gen : null;
   const name = textOf(pet.manifest.name, i18n.language);
@@ -263,8 +389,124 @@ export function LivePet({ pet, cfg, status, items, fileUrl, height, page, storeK
       home={home}
       onInteract={onInteract}
       onHit={onHit}
+      roam={roam}
+      idleTalk={chatter && cfg.lines !== false}
+      pad={pad}
+      edges={edges}
+      onExit={onExit}
     >
       {children}
     </PetPlayer>
   );
+}
+
+/**
+ * 两只宠物说话（桌面的和网页里的，同一台电脑上）：对方刚说了一句、还不是在接话，就过一会儿接一句。
+ * `me` = 'desk' / 'web'。返回 `say(key)`：自己先开口（对方会接）。
+ */
+export function usePeerChat(player, st, me) {
+  const seen = useRef(null);
+  useEffect(() => {
+    const c = st?.chat;
+    if (!c || c.seq === seen.current) return undefined;
+    const first = seen.current == null;
+    seen.current = c.seq;
+    // 刚打开时看到的是以前的
+    if (first || c.from === me) return undefined;
+    // 对方先开口：转过去看它、接一句；对方是在接话就只做个表情
+    const id = setTimeout(
+      () => {
+        const dir = peerDir(st, me);
+        if (dir) player.current?.look(dir);
+        if (c.reply) return player.current?.fx('heart');
+        player.current?.say(c.key === 'peerHello' ? 'peerHello' : 'peerChat', null, { force: true });
+        api.put('/desktop/pet', { chat: { from: me, key: 'peerChat', reply: true } }).catch(() => {});
+      },
+      1200 + Math.random() * 800,
+    );
+    return () => clearTimeout(id);
+  }, [st?.chat?.seq]);
+  // 对方在的时候，隔一两分钟自己找它聊一句
+  const present = Boolean(st?.peer && st?.pos && st?.running);
+  useEffect(() => {
+    if (!present) return undefined;
+    const id = setInterval(() => {
+      if (document.hidden || Math.random() > 0.35) return;
+      const dir = peerDir(stRef.current, me);
+      if (dir) player.current?.look(dir);
+      player.current?.say('peerChat', null, { force: true });
+      api.put('/desktop/pet', { chat: { from: me, key: 'peerChat' } }).catch(() => {});
+    }, 60000);
+    return () => clearInterval(id);
+  }, [present]);
+  const stRef = useRef(st);
+  stRef.current = st;
+}
+
+/** 对方在自己的哪一边（屏幕上的物理像素比较） */
+export function peerDir(st, me) {
+  if (!st?.peer || !st?.pos) return null;
+  const a = me === 'desk' ? st.pos.x : st.peer.x;
+  const b = me === 'desk' ? st.peer.x : st.pos.x;
+  if (Math.abs(a - b) < 40) return null;
+  return b < a ? 'left' : 'right';
+}
+
+/**
+ * 网页里的宠物（同一台电脑上开着桌面宠物时）：页面在前台就隔几秒报一下自己在屏幕上的位置，
+ * 刚切到前台时转向桌面宠物打个招呼，对方说话时接一句（usePeerChat）。
+ */
+function usePeerWeb(player, on, name) {
+  const [st, setSt] = useState(null);
+  const was = useRef({ active: false, hello: 0 });
+  useEffect(() => {
+    if (!on) return undefined;
+    let dead = false;
+    const tick = async () => {
+      const active = document.visibilityState === 'visible' && document.hasFocus();
+      if (!active) {
+        was.current.active = false;
+        return;
+      }
+      let r;
+      try {
+        r = await api.get('/desktop/pet');
+      } catch {
+        return;
+      }
+      if (dead) return;
+      // 桌面宠物没开、不是这台电脑上打开的、桌面宠物没显示
+      if (!r?.running || !r?.here || !r?.pos) {
+        setSt(null);
+        was.current.active = false;
+        return;
+      }
+      const rect = document.querySelector('.pet-page .pet-hit')?.getBoundingClientRect();
+      if (!rect?.width) return;
+      // 估一下自己在屏幕上的位置（物理像素）：浏览器窗口位置 + 标题栏 + 页面里的位置
+      const k = window.devicePixelRatio || 1;
+      const x = (window.screenX + rect.left + rect.width / 2) * k;
+      const y = (window.screenY + Math.max(0, window.outerHeight - window.innerHeight) + rect.top + rect.height / 2) * k;
+      const r2 = await api.put('/desktop/pet', { peer: { x, y, name } }).catch(() => null);
+      if (dead) return;
+      setSt(r2 ?? r);
+      if (!was.current.active && Date.now() - was.current.hello > 120000) {
+        was.current.hello = Date.now();
+        player.current?.look(r.pos.x < x ? 'left' : 'right');
+        player.current?.say('peerHello', null, { force: true });
+        api.put('/desktop/pet', { chat: { from: 'web', key: 'peerHello' } }).catch(() => {});
+      }
+      was.current.active = true;
+    };
+    const first = setTimeout(tick, 1500);
+    const id = setInterval(tick, 3000);
+    window.addEventListener('focus', tick);
+    return () => {
+      dead = true;
+      clearTimeout(first);
+      clearInterval(id);
+      window.removeEventListener('focus', tick);
+    };
+  }, [on]);
+  usePeerChat(player, st, 'web');
 }

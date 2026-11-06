@@ -6,6 +6,7 @@ import { useTranslation } from 'react-i18next';
 import { api } from '../shared/api.js';
 import { More, Row } from '../shared/page.jsx';
 import { Button, Card, ErrorNote, Switch, useAction, useLoad } from '../shared/ui.jsx';
+import Select from '../shared/Select.jsx';
 
 export default function GuardCard() {
   const { t } = useTranslation();
@@ -25,10 +26,10 @@ export default function GuardCard() {
     </Row>
   );
   const actionSelect = (value, onChange, label) => (
-    <select value={value} disabled={busy} onChange={(e) => onChange(e.target.value)} aria-label={label} style={{ width: 'auto', flexShrink: 0 }}>
+    <Select value={value} disabled={busy} onChange={(e) => onChange(e.target.value)} aria-label={label} style={{ width: 'auto', flexShrink: 0 }}>
       <option value="confirm">{t('guard.confirm')}</option>
       <option value="deny">{t('guard.deny')}</option>
-    </select>
+    </Select>
   );
   // 两个开关各一行；“危险命令”具体拦哪些、自己的规则、限制都收在下面
   return (

@@ -697,7 +697,7 @@ async fn run(home: Option<PathBuf>, listen: Option<SocketAddr>, server: Option<S
         tokio::spawn(instances.clone().supervise()),
         tokio::spawn(updater.clone().run()),
         tokio::spawn(updater.clone().keep_versions()),
-        tokio::spawn(metrics.run()),
+        tokio::spawn(metrics.run(instances.clone(), chat.clone())),
         tokio::spawn(relay_watch.run(shutdown.clone())),
         tokio::spawn(transfers.run(store.clone())),
         tokio::spawn(app.rtc.clone().watch(account.clone())),

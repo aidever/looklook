@@ -109,6 +109,28 @@ async fn fetch(app: &App, key: &str, device: &str, pet: &str) -> Result<pets::Pa
     download(link, &app.paths.home, key, device, pet).await
 }
 
+/// 另一台电脑装了哪些宠物（它的 `GET /api/pets`）：经这台电脑到它的连接去问
+pub async fn remote_list(app: &App, device: &str) -> Result<Value, LocalError> {
+    let own = app.account.session().ok_or_else(|| LocalError::new("NOT_LOGGED_IN"))?.device_id;
+    if device == own || device.is_empty() || device.len() > 64 {
+        return Err(LocalError::invalid("device", "invalid"));
+    }
+    let link = app.outbound.link(&app.account, device).await.map_err(|e| e.local())?;
+    let path = "/api/pets".to_string();
+    let req = Request::builder().method("GET").uri(&path).header(crate::gateway::CLIENT_HEADER, "1").body(Body::empty()).map_err(anyhow::Error::from)?;
+    let resp = crate::rtc::outbound::http(link, req, path).await;
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 4 << 20).await.map_err(|_| LocalError::new("RTC_FAILED"))?;
+    let v: Value = serde_json::from_slice(&bytes).map_err(|_| LocalError::new("RTC_FAILED"))?;
+    if !status.is_success() {
+        return Err(match v["error"]["code"].as_str() {
+            Some(c) => LocalError { status, code: c.to_string(), params: Default::default() },
+            None => LocalError::new("RTC_FAILED"),
+        });
+    }
+    Ok(v)
+}
+
 /// 经连接取包、存成临时文件、装好
 pub(crate) async fn download(link: Arc<crate::rtc::outbound::Link>, home: &Path, key: &str, device: &str, pet: &str) -> Result<pets::Pack, LocalError> {
     let path = format!("/api/pets/local/{pet}/export");

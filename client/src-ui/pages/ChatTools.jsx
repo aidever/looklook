@@ -1,6 +1,6 @@
 // 对话页里的复制、查找、目录（docs/UI_REDESIGN_2026-10.md §4、§5）：
 // 手机上长按一条消息弹出的菜单和“选择文字”、用户消息的操作、Ctrl/⌘ F 查找、Alt+↑/↓ 在自己的消息间跳、右侧“目录”栏。
-import { ArrowDown, ArrowUp, ClipboardCopy, Copy, Download, PencilLine, TextSelect, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, ClipboardCopy, Copy, Download, PencilLine, RotateCcw, TextSelect, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
@@ -56,8 +56,8 @@ export function useLongPress(onLong) {
   };
 }
 
-/** 长按后从底部弹出：复制全文、选择文字、填回输入框（只有用户消息有） */
-export function MessageSheet({ text, onFill, onClose }) {
+/** 长按后从底部弹出：复制全文、选择文字、填回输入框、编辑重发（后两个只有用户消息有） */
+export function MessageSheet({ text, onFill, onEdit, onClose }) {
   const { t } = useTranslation();
   const toast = useToast();
   const [select, setSelect] = useState(false);
@@ -100,6 +100,19 @@ export function MessageSheet({ text, onFill, onClose }) {
             {t('chat.fill_back')}
           </button>
         )}
+        {onEdit && (
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              onEdit();
+              onClose();
+            }}
+          >
+            <RotateCcw size={18} aria-hidden="true" />
+            {t('chat.edit_resend')}
+          </button>
+        )}
         <button type="button" className="chat-sheet-cancel" onClick={onClose}>
           {t('action.cancel')}
         </button>
@@ -138,15 +151,25 @@ export function SelectText({ text, onClose }) {
   );
 }
 
-/** 用户消息下面悬停出现的操作：复制、填回输入框（改一改再发） */
-export function UserActs({ id, text }) {
+/**
+ * 用户消息下面悬停出现的操作：复制、填回输入框（改一改作为新的一句发）、编辑重发（`onEdit`：就地改这句，丢掉之后的对话重新来）。
+ * editBusy：这一轮还在跑，编辑重发先不能用。
+ */
+export function UserActs({ id, text, onEdit, editBusy }) {
   const { t } = useTranslation();
   return (
     <div className="chat-user-acts">
-      <CopyButton text={text} label={false} variant="plain" />
-      <button type="button" className="btn btn-plain btn-icon" onClick={() => fillInput(id, text)} aria-label={t('chat.fill_back')} title={t('chat.fill_back')}>
-        <PencilLine size={15} />
-      </button>
+      {text && <CopyButton text={text} label={false} variant="plain" />}
+      {text && (
+        <button type="button" className="btn btn-plain btn-icon" onClick={() => fillInput(id, text)} aria-label={t('chat.fill_back')} title={t('chat.fill_back')}>
+          <PencilLine size={15} />
+        </button>
+      )}
+      {onEdit && (
+        <button type="button" className="btn btn-plain btn-icon" onClick={onEdit} disabled={editBusy} aria-label={t('chat.edit_resend')} title={editBusy ? t('chat.edit_busy') : t('chat.edit_resend')}>
+          <RotateCcw size={15} />
+        </button>
+      )}
     </div>
   );
 }

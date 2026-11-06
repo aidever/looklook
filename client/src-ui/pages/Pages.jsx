@@ -13,6 +13,7 @@ import { Button, Card, CopyButton, Empty, ErrorNote, Field, Modal, Note, Skeleto
 import { PageHead } from '../shared/page.jsx';
 import PopMenu from '../shared/PopMenu.jsx';
 import { RemoteUpsell, remoteAllowed } from '../shared/Remote.jsx';
+import Select from '../shared/Select.jsx';
 
 // 分享有效期可选项（小时），服务端上限 7 天
 const SHARE_HOURS = [1, 24, 72, 168];
@@ -110,13 +111,13 @@ function ShareDialog({ page, onClose }) {
             <input value={username} onChange={(e) => setUsername(e.target.value)} maxLength={32} autoComplete="off" spellCheck={false} required />
           </Field>
           <Field label={t('pages.share.hours')}>
-            <select value={hours} onChange={(e) => setHours(Number(e.target.value))}>
+            <Select value={hours} onChange={(e) => setHours(Number(e.target.value))}>
               {SHARE_HOURS.map((h) => (
                 <option key={h} value={h}>
                   {t(`pages.share.hours_${h}`)}
                 </option>
               ))}
-            </select>
+            </Select>
           </Field>
           <label className="row" style={{ alignItems: 'flex-start', gap: 8, cursor: 'pointer', marginBottom: 12 }}>
             <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} style={{ marginTop: 3 }} />

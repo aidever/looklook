@@ -70,6 +70,7 @@ import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 
 import { api, deviceApi, fetchRaw, plainLinksWork, terminalDevice } from '../shared/api.js';
+import { isTouch } from '../shared/KeyBar.jsx';
 import { chatEventsMode, onChatEventsMode, subscribeChat } from '../shared/chatEvents.js';
 import { spinnerText } from '../shared/spinner.js';
 import {
@@ -151,6 +152,12 @@ const ArtifactCtx = createContext({ list: [], links: null, fileUrl: null });
 
 /** 在右侧面板里打开一个子代理的步骤：`openAgent({ id, tool_use_id, … })`（ChatView 提供；对话里的子代理卡片、运行中的子代理条用） */
 const SideCtx = createContext({ openAgent: null });
+
+/**
+ * 编辑重发（ChatView 提供）：`{ busy, run(key, text, keepImages, images) }`。只有主对话里的用户消息能改（子代理的步骤里没有）。
+ * busy：这一轮还在跑（等做完再改）。
+ */
+const EditCtx = createContext(null);
 
 /** 产出的文件的地址：图片、PDF、音视频、文本直接在浏览器里看，其余下载 */
 const artifactUrl = (id, path, download) => `/api/instances/${id}/chat/artifact?path=${encodeURIComponent(path)}${download ? '&download=1' : ''}`;
@@ -1008,7 +1015,7 @@ function Rows({ id, items, live, limit = 0, trace = false, attention = false }) 
       default:
         // 跟在回复后面的用时已经画在回复的结尾，跟在处理过程后面的画在处理过程的标题上
         if (r.item.k === 'turn' && (rows[n - 1]?.k === 'text' || traced.has(n))) return null;
-        return <Item key={r.key} id={id} item={r.item} />;
+        return <Item key={r.key} id={id} item={r.item} editable={trace} />;
     }
   };
   if (!parts) return [more, ...rows.map(render)];
@@ -1056,16 +1063,20 @@ function ReplyEnd({ text, all, turn }) {
 const LONG_CHARS = 800;
 const LONG_LINES = 12;
 
-function UserItem({ id, item, thumbs }) {
+function UserItem({ id, item, thumbs, editable = false }) {
   const { t } = useT();
+  const edit = useContext(EditCtx);
   const [sheet, setSheet] = useState(false);
+  const [editing, setEditing] = useState(false);
   const text = item.text.trim();
-  const press = useLongPress(() => text && setSheet(true));
+  const press = useLongPress(() => text && !editing && setSheet(true));
   // 很长的（贴进来的日志、文档）先收起，只露开头几行，点了再展开
   const long = text.length > LONG_CHARS || text.split('\n').length > LONG_LINES;
   const [expanded, setExpanded] = useState(false);
+  const canEdit = editable && !!edit;
+  const startEdit = canEdit ? () => setEditing(true) : null;
   return (
-    <div className="chat-user" data-mid={item.mid ? '' : undefined} data-key={item.key}>
+    <div className="chat-user" data-mid={item.mid ? '' : undefined} data-key={item.key} data-editing={editing ? '' : undefined}>
       {/* Claude 在忙时发的：这一步做完就并进了这一轮 */}
       {item.mid && (
         <span className="chat-mid-tag">
@@ -1075,20 +1086,97 @@ function UserItem({ id, item, thumbs }) {
       )}
       {/* 图片小图：从记录里取（Claude 的 transcript、Codex 的 rollout 里都有图片本身） */}
       {thumbs && <UserImages id={id} itemKey={item.key} n={item.images} />}
-      {(text || (item.images > 0 && !thumbs)) && (
-        <div className="chat-bubble" data-clip={long && !expanded ? '' : undefined} {...press}>
-          {item.text}
-          {item.images > 0 && !thumbs && <span className="chat-note">{t('chat.images', { n: item.images })}</span>}
-        </div>
+      {editing ? (
+        <EditUser id={id} item={item} text={item.text} onDone={() => setEditing(false)} />
+      ) : (
+        <>
+          {(text || (item.images > 0 && !thumbs)) && (
+            <div className="chat-bubble" data-clip={long && !expanded ? '' : undefined} {...press}>
+              {item.text}
+              {item.images > 0 && !thumbs && <span className="chat-note">{t('chat.images', { n: item.images })}</span>}
+            </div>
+          )}
+          {long && (
+            <button type="button" className="chat-more chat-user-more" onClick={() => setExpanded(!expanded)} aria-expanded={expanded}>
+              {expanded ? <ChevronUp size={14} aria-hidden="true" /> : <ChevronDown size={14} aria-hidden="true" />}
+              {expanded ? t('chat.user_collapse') : t('chat.user_expand', { n: text.length.toLocaleString() })}
+            </button>
+          )}
+          {(text || canEdit) && <UserActs id={id} text={text} onEdit={startEdit} editBusy={edit?.busy} />}
+        </>
       )}
-      {long && (
-        <button type="button" className="chat-more chat-user-more" onClick={() => setExpanded(!expanded)} aria-expanded={expanded}>
-          {expanded ? <ChevronUp size={14} aria-hidden="true" /> : <ChevronDown size={14} aria-hidden="true" />}
-          {expanded ? t('chat.user_collapse') : t('chat.user_expand', { n: text.length.toLocaleString() })}
+      {sheet && <MessageSheet text={text} onFill={() => fillInput(id, text)} onEdit={edit?.busy ? null : startEdit} onClose={() => setSheet(false)} />}
+    </div>
+  );
+}
+
+/**
+ * 编辑重发：就地改这句话，发出后丢掉它和之后的对话、从这里重新来（文件改动不撤回）。
+ * Ctrl/⌘+Enter 发送，Esc 取消；原来带图片的可以选要不要一起再发。
+ */
+function EditUser({ id, item, text, onDone }) {
+  const { t } = useT();
+  const toast = useToast();
+  const edit = useContext(EditCtx);
+  const [draft, setDraft] = useState(text);
+  const [keep, setKeep] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const area = useRef(null);
+  useEffect(() => {
+    const el = area.current;
+    if (!el) return;
+    el.focus();
+    el.setSelectionRange(el.value.length, el.value.length);
+  }, []);
+  // 跟着内容长高（最多半屏，再多就滚动）
+  useLayoutEffect(() => {
+    const el = area.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight + 2, Math.round(window.innerHeight * 0.5))}px`;
+  }, [draft]);
+  const images = keep ? item.images : 0;
+  const empty = !draft.trim() && !images;
+  const send = async () => {
+    if (empty || saving || edit?.busy) return;
+    setSaving(true);
+    try {
+      await edit.run(item.key, draft.trimEnd(), images > 0, Array.from({ length: images }, (_, i) => userImageUrl(id, item.key, i)));
+      onDone();
+    } catch (e) {
+      toast(errorText(t, e), 'error');
+      setSaving(false);
+    }
+  };
+  const onKey = (e) => {
+    if (imeComposing(e)) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      onDone();
+    } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      send();
+    }
+  };
+  return (
+    <div className="chat-edit">
+      <textarea ref={area} className="chat-edit-text" value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={onKey} aria-label={t('chat.edit_label')} disabled={saving} rows={2} />
+      {item.images > 0 && (
+        <label className="chat-edit-keep small">
+          <input type="checkbox" checked={keep} onChange={(e) => setKeep(e.target.checked)} disabled={saving} />
+          {t('chat.edit_keep_images', { n: item.images })}
+        </label>
+      )}
+      <p className="chat-edit-note">{t('chat.edit_note')}</p>
+      <div className="chat-edit-acts">
+        <button type="button" className="btn btn-ghost" onClick={onDone} disabled={saving}>
+          {t('action.cancel')}
         </button>
-      )}
-      {text && <UserActs id={id} text={text} />}
-      {sheet && <MessageSheet text={text} onFill={() => fillInput(id, text)} onClose={() => setSheet(false)} />}
+        <button type="button" className="btn btn-primary" onClick={send} disabled={empty || saving || edit?.busy} title={edit?.busy ? t('chat.edit_busy') : undefined}>
+          {saving ? t('chat.edit_sending') : t('chat.edit_send')}
+        </button>
+      </div>
     </div>
   );
 }
@@ -1308,14 +1396,14 @@ function usePreviewLinks() {
 const VIEW_IMAGE = /\.(png|jpe?g|gif|webp|bmp|ico|avif)$/i;
 
 /** 不是 assistant 回复的条目（用户消息、单独的工具结果、分隔线、提示……） */
-function Item({ id, item }) {
+function Item({ id, item, editable = false }) {
   const { t } = useT();
   const { id: agent, caps } = useContext(AgentCtx);
   // 老版本的 Codex 端取不出图片（不带 caps.user_images）：照旧只写几张
   const thumbs = item.images > 0 && (agent === 'claude' || caps?.user_images === true);
   switch (item.k) {
     case 'user':
-      return <UserItem id={id} item={item} thumbs={thumbs} />;
+      return <UserItem id={id} item={item} thumbs={thumbs} editable={editable && caps?.edit === true && !item.mid && !item.truncated} />;
     case 'task':
       return (
         <p className="chat-event" title={item.summary}>
@@ -1937,10 +2025,14 @@ function knownText(t, { kind, path }) {
   };
 }
 
+/** AskUserQuestion 选择框里自己填的那一项（Claude Code 的“Type something.”）：要带着内容提交，空着回车会让这一轮停掉 */
+const isFreeText = (label) => /^(type something|other)[.…]*$/i.test(String(label ?? '').trim());
+
 function TuiDialog({ id, dialog, limit }) {
   const { t } = useT();
   const toast = useToast();
   const [pick, setPick] = useState(dialog?.selected ?? 0);
+  const [freeText, setFreeText] = useState('');
   const [busy, setBusy] = useState(false);
   const box = useRef(null);
   const sig = dialog ? `${dialog.title}|${dialog.options.map((o) => o.label).join('|')}` : '';
@@ -1949,7 +2041,9 @@ function TuiDialog({ id, dialog, limit }) {
   const known = kd ? knownText(t, kd) : null;
   useEffect(() => {
     setPick(dialog?.selected ?? 0);
+    setFreeText('');
   }, [sig]);
+  const free = dialog ? isFreeText(dialog.options[pick]?.label) : false;
   useEffect(() => {
     box.current?.focus();
   }, [sig]);
@@ -1963,7 +2057,10 @@ function TuiDialog({ id, dialog, limit }) {
       setBusy(false);
     }
   };
-  const choose = () => send({ index: pick, title: dialog.title, label: dialog.options[pick]?.label ?? '' });
+  const choose = () => {
+    if (free && !freeText.trim()) return;
+    send({ index: pick, title: dialog.title, label: dialog.options[pick]?.label ?? '', ...(free ? { text: freeText.trim() } : {}) });
+  };
   const cancel = () => send({});
   const onKey = (e) => {
     if (e.key === 'Escape') {
@@ -1993,11 +2090,11 @@ function TuiDialog({ id, dialog, limit }) {
             <div className="chat-dialog-opts" role="radiogroup">
               {dialog.options.map((o, n) => (
                 // eslint-disable-next-line react/no-array-index-key -- 选项按位置对应 TUI 里的顺序
-                <button key={n} type="button" className="chat-opt" role="radio" aria-checked={pick === n} onClick={() => setPick(n)} onDoubleClick={() => send({ index: n, title: dialog.title, label: o.label })}>
+                <button key={n} type="button" className="chat-opt" role="radio" aria-checked={pick === n} onClick={() => setPick(n)} onDoubleClick={() => !isFreeText(o.label) && send({ index: n, title: dialog.title, label: o.label })}>
                   <span className="chat-opt-dot" aria-hidden="true" />
                   <span className="chat-opt-text">
                     <b>
-                      {isLimit ? limitOption(t, o.label) : known ? known.option(o.label) : o.label}
+                      {isLimit ? limitOption(t, o.label) : known ? known.option(o.label) : isFreeText(o.label) ? t('chat.q_other') : o.label}
                       {o.current && <Check size={13} className="chat-opt-cur" aria-label={t('chat.dialog_current')} />}
                     </b>
                     {isLimit && o.label !== limitOption(t, o.label) && <span className="chat-note">{o.label}</span>}
@@ -2006,11 +2103,15 @@ function TuiDialog({ id, dialog, limit }) {
                 </button>
               ))}
             </div>
+            {free && (
+              // eslint-disable-next-line jsx-a11y/no-autofocus -- 选了“自己填”就是要打字
+              <input className="chat-field chat-dialog-free" autoFocus placeholder={t('chat.q_other')} value={freeText} onChange={(e) => setFreeText(e.target.value)} />
+            )}
             <div className="chat-acts chat-dialog-acts">
               <Button variant="ghost" onClick={cancel} disabled={busy}>
                 {t('action.cancel')}
               </Button>
-              <Button onClick={choose} busy={busy}>
+              <Button onClick={choose} busy={busy} disabled={free && !freeText.trim()}>
                 {t('action.confirm')}
               </Button>
             </div>
@@ -2941,6 +3042,7 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
   };
   // 运行中打了字：讲清楚“排队”和“立即发送”
   const twoWays = running && canSend && !disabled;
+  const coarse = isTouch();
   return (
     <div className="chat-composer" data-running={running ? '' : undefined} data-ways={twoWays && canNow ? '' : undefined}>
       {slash.length > 0 && (
@@ -3049,8 +3151,10 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
           </span>
           {canLater && (
             <span>
-              {touch ? (
-                <button type="button" className="btn btn-plain btn-sm chat-later-btn" onClick={() => send(false, true)} disabled={sending || uploading}>
+              {/* 手机、平板（工作台里嵌的对话也是）没有 Tab 键：给按钮。按下时不让输入框失焦——不然软键盘先收起、
+                  输入框整个往下掉，手指抬起时按钮已经不在那儿了，点不中 */}
+              {touch || coarse ? (
+                <button type="button" className="btn btn-plain btn-sm chat-later-btn" onPointerDown={(e) => e.preventDefault()} onMouseDown={(e) => e.preventDefault()} onClick={() => send(false, true)} disabled={sending || uploading}>
                   <ListEnd size={13} aria-hidden="true" />
                   {t('chat.way_later')}
                 </button>
@@ -3206,7 +3310,7 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
           ) : (
             <>
               {twoWays && canNow && (
-                <button type="button" className="btn btn-plain chat-chip chat-now-btn" onClick={() => send(true)} disabled={sending || uploading} title={t('chat.way_now_title')}>
+                <button type="button" className="btn btn-plain chat-chip chat-now-btn" onPointerDown={(e) => e.preventDefault()} onMouseDown={(e) => e.preventDefault()} onClick={() => send(true)} disabled={sending || uploading} title={t('chat.way_now_title')}>
                   <Zap size={14} aria-hidden="true" />
                   {t('chat.way_now')}
                 </button>
@@ -3290,7 +3394,8 @@ function useSentEcho(id, items, phase) {
   const lastRef = useRef(lastUser);
   lastRef.current = lastUser;
   useEffect(() => {
-    const on = (e) => setEcho(e.detail ? { ...e.detail, after: lastRef.current, ran: false } : null);
+    // 编辑重发时 `after` 由发的一方给出（改的那条之前的最后一句），不用现在显示的
+    const on = (e) => setEcho(e.detail ? { ...e.detail, after: e.detail.after !== undefined ? e.detail.after : lastRef.current, ran: false } : null);
     window.addEventListener(`ll-chat-sent:${id}`, on);
     return () => window.removeEventListener(`ll-chat-sent:${id}`, on);
   }, [id]);
@@ -3470,10 +3575,11 @@ function Detached({ id, status }) {
           )}
         </div>
       )}
-      {(reason === 'not_running' || reason === 'ended' || reason === 'app_server' || reason?.startsWith?.('dsh_')) && (
+      {reason === 'claude_sdk' && status?.error && <p className="chat-note chat-sdk-error">{status.error}</p>}
+      {(reason === 'not_running' || reason === 'ended' || reason === 'app_server' || reason === 'claude_sdk' || reason?.startsWith?.('dsh_')) && (
         <div className="chat-acts">
           <Button busy={busy} onClick={relaunch}>
-            {t(reason === 'app_server' || reason?.startsWith?.('dsh_') ? 'chat.relaunch_app_server' : status?.session_id ? 'chat.relaunch_resume' : 'chat.relaunch')}
+            {t(reason === 'app_server' || reason === 'claude_sdk' || reason?.startsWith?.('dsh_') ? 'chat.relaunch_app_server' : status?.session_id ? 'chat.relaunch_resume' : 'chat.relaunch')}
           </Button>
         </div>
       )}
@@ -4477,10 +4583,29 @@ const readSide = () => {
 export default function ChatView({ id, launch, active, touch, offline = false, onTab, onDraftBack }) {
   const router = useRouter();
   const chat = useChat(id, active);
-  const { status, items } = chat;
+  const { status, items: allItems } = chat;
+  const toastTop = useToast();
+  // 编辑重发：发出去就先把改的那条和之后的藏起来（新的那段写进记录之前，旧的不再显示，改过的那句先用“刚发出”显示）；
+  // 记录里出现了一句以前没有的用户消息（新发的那句）就不再藏，最多藏 30 秒
+  const [cut, setCut] = useState(null);
+  const allRef = useRef(allItems);
+  allRef.current = allItems;
+  useEffect(() => {
+    if (cut && allItems.some((x) => x.k === 'user' && !cut.known.has(x.key))) setCut(null);
+  }, [allItems, cut]);
+  useEffect(() => {
+    if (!cut) return undefined;
+    const timer = setTimeout(() => setCut(null), 30000);
+    return () => clearTimeout(timer);
+  }, [cut?.key]); // eslint-disable-line react-hooks/exhaustive-deps
+  const items = useMemo(() => {
+    const i = cut ? allItems.findIndex((x) => x.key === cut.key) : -1;
+    return i < 0 ? allItems : allItems.slice(0, i);
+  }, [allItems, cut]);
   // 草稿页发出的第一句：起来前先显示；发出去、记录里有了之后换成真的那条
   const firstRaw = useFirstSend(id);
-  const first = firstRaw && !(firstRaw.state === 'sent' && items.some((x) => x.k === 'user')) ? firstRaw : null;
+  // 只带了模型设置、没写字的：不显示
+  const first = firstRaw && (firstRaw.text.trim() || firstRaw.files.length) && !(firstRaw.state === 'sent' && items.some((x) => x.k === 'user')) ? firstRaw : null;
   const echo = useSentEcho(id, items, chat.status?.phase ?? 'detached');
   // 状态还没取到（刚切过来、连不上）时按终端的启动类型，不能先显示成 Claude Code
   const agentId = status?.agent ?? (AGENT_NAMES[launch] ? launch : 'claude');
@@ -4489,6 +4614,34 @@ export default function ChatView({ id, launch, active, touch, offline = false, o
   const caps = status?.caps;
   const agentCtx = useMemo(() => ({ id: agentId, name: agentName, caps: caps ?? {} }), [agentId, agentName, caps]);
   const phase = status?.phase ?? 'detached';
+  const editBusy = phase === 'running' || phase === 'approval' || offline;
+  const editCtx = useMemo(
+    () => ({
+      busy: editBusy,
+      run: async (key, text, keepImages, images) => {
+        const all = allRef.current;
+        const at = all.findIndex((x) => x.key === key);
+        let after = null;
+        for (let i = at - 1; i >= 0; i -= 1) {
+          if (all[i].k === 'user') {
+            after = all[i].key;
+            break;
+          }
+        }
+        setCut({ key, known: new Set(all.filter((x) => x.k === 'user').map((x) => x.key)) });
+        window.dispatchEvent(new CustomEvent(`ll-chat-sent:${id}`, { detail: { text, images, after } }));
+        try {
+          const r = await api.post(`/instances/${id}/chat/edit`, { key, text, keep_images: keepImages });
+          if (r?.delivered === false) toastTop(t('chat.not_delivered'), 'error');
+        } catch (e) {
+          setCut(null);
+          window.dispatchEvent(new CustomEvent(`ll-chat-sent:${id}`, { detail: null }));
+          throw e;
+        }
+      },
+    }),
+    [id, editBusy, t, toastTop],
+  );
   const list = useRef(null);
   const inner = useRef(null);
   const todos = useMemo(() => latestTodos(items), [items]);
@@ -4623,7 +4776,9 @@ export default function ChatView({ id, launch, active, touch, offline = false, o
                   <p className="chat-note">{t('chat.beta_note')}</p>
                 </div>
               )}
-              <Rows id={id} items={items} live={live} trace attention={phase === 'approval'} />
+              <EditCtx.Provider value={editCtx}>
+                <Rows id={id} items={items} live={live} trace attention={phase === 'approval'} />
+              </EditCtx.Provider>
               {first && <FirstSend id={id} first={first} onBack={onDraftBack} />}
               {echo && !first && <SentEcho echo={echo} />}
               {phase === 'running' && <Live status={status} items={items} since={since} />}

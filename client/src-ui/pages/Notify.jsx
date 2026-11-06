@@ -13,6 +13,7 @@ import { isTouch } from '../shared/KeyBar.jsx';
 import PopMenu from '../shared/PopMenu.jsx';
 import { useSessions } from '../shared/sessions.jsx';
 import { Button, Card, CopyButton, ErrorNote, Field, More, Note, PasswordInput, QrCode, Row, Switch, useAction, useLoad } from '../shared/ui.jsx';
+import Select from '../shared/Select.jsx';
 
 const CONSOLE = {
   feishu: 'https://open.feishu.cn/app',
@@ -121,10 +122,10 @@ function CredsForm({ data, onSaved, onCancel }) {
   return (
     <form className="stack" style={{ gap: 12 }} onSubmit={save}>
       <Field label={t('notify.domain')}>
-        <select value={domain} onChange={(e) => setDomain(e.target.value)}>
+        <Select value={domain} onChange={(e) => setDomain(e.target.value)}>
           <option value="feishu">{t('notify.domain_feishu')}</option>
           <option value="lark">{t('notify.domain_lark')}</option>
-        </select>
+        </Select>
       </Field>
       <Field label="App ID">
         <input value={appId} onChange={(e) => setAppId(e.target.value)} placeholder="cli_…" autoComplete="off" spellCheck={false} />
@@ -406,13 +407,13 @@ function HookForm({ hook, onSaved, onCancel }) {
   return (
     <form className="stack" style={{ gap: 12 }} onSubmit={save}>
       <Field label={t('notify.hook_kind')}>
-        <select value={kind} onChange={(e) => setKind(e.target.value)}>
+        <Select value={kind} onChange={(e) => setKind(e.target.value)}>
           {Object.keys(KINDS).map((k) => (
             <option key={k} value={k}>
               {t(`notify.hook_${k}`)}
             </option>
           ))}
-        </select>
+        </Select>
       </Field>
       <p className="small muted" style={{ margin: 0 }}>
         {t(`notify.hook_${kind}_how`)}{' '}
@@ -538,6 +539,20 @@ export function HooksCard({ data, reload }) {
 
 const QUIET_DEFAULT = { start: '23:00', end: '08:00' };
 
+/** 这台电脑的会话发不发（只管这台电脑；飞书配置是同步的，默认只有配它的那台发） */
+function HereToggle({ here, reload }) {
+  const { t } = useTranslation();
+  const { busy, run } = useAction();
+  const set = async (on) => {
+    if (await run(() => api.put('/notify/here', { on }))) reload();
+  };
+  return (
+    <Row label={t('notify.here')} hint={t(here.home ? 'notify.here_hint' : 'notify.here_hint_other')}>
+      <Switch checked={Boolean(here.on)} disabled={busy} onChange={set} label={t('notify.here')} />
+    </Row>
+  );
+}
+
 export function RulesCard({ data, reload }) {
   const { t } = useTranslation();
   const sessions = useSessions();
@@ -553,13 +568,13 @@ export function RulesCard({ data, reload }) {
   const name = (d) => d.split(/[\\/]/).filter(Boolean).pop() || d;
   const pick = (k, title, hint, options) => (
     <Row label={title} hint={hint}>
-      <select value={r[k] ?? 0} disabled={busy} onChange={(e) => save({ [k]: Number(e.target.value) })} aria-label={title} style={{ width: 'auto', minWidth: 120 }}>
+      <Select value={r[k] ?? 0} disabled={busy} onChange={(e) => save({ [k]: Number(e.target.value) })} aria-label={title} style={{ width: 'auto', minWidth: 120 }}>
         {options.map(([v, label]) => (
           <option key={v} value={v}>
             {label}
           </option>
         ))}
-      </select>
+      </Select>
     </Row>
   );
   const quiet = r.quiet;
@@ -571,6 +586,7 @@ export function RulesCard({ data, reload }) {
   const calmSet = Boolean(quiet) || r.done_batch > 0 || r.stall_min !== 20 || r.muted.length > 0;
   return (
     <Card title={t('notify.rules_title')} sub={t('notify.rules_lead')}>
+      {data.here && <HereToggle here={data.here} reload={reload} />}
       {toggle('done', t('notify.rule_done'), t('notify.rule_done_hint'))}
       {toggle('failed', t('notify.rule_failed'))}
       {toggle('fg_quiet', t('notify.rule_fg_quiet'), t('notify.rule_fg_quiet_hint'))}
@@ -614,7 +630,7 @@ export function RulesCard({ data, reload }) {
             </div>
           )}
           <div className="nt-actions nt-mute-add">
-            <select value={adding} onChange={(e) => setAdding(e.target.value)} aria-label={t('notify.muted')} style={{ minWidth: 0, flex: 1 }}>
+            <Select value={adding} onChange={(e) => setAdding(e.target.value)} aria-label={t('notify.muted')} style={{ minWidth: 0, flex: 1 }}>
               <option value="">{t('notify.mute_pick')}</option>
               {dirs
                 .filter((d) => !r.muted.includes(d))
@@ -623,7 +639,7 @@ export function RulesCard({ data, reload }) {
                     {name(d)} · {d}
                   </option>
                 ))}
-            </select>
+            </Select>
             <Button
               variant="ghost"
               disabled={!adding || busy}

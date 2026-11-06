@@ -197,6 +197,12 @@ pub struct Footer {
 
 /// 后台任务的种类（`1 shell`、`2 subagents`）：单数形式
 const TASK_KINDS: &[&str] = &["shell", "subagent", "agent", "monitor", "workflow", "teammate", "task", "background task", "mcp task", "cloud session"];
+/// AskUserQuestion 选择框里让用户自己填的那一项（Claude Code 的“Type something.”）
+pub fn is_free_text(label: &str) -> bool {
+    let l = label.trim().trim_end_matches(['.', '…']).trim().to_ascii_lowercase();
+    l == "type something" || l == "other"
+}
+
 pub const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
 /// 普通输入框时的状态信息；不是普通输入框时为 None。
@@ -574,6 +580,14 @@ pub fn dialog_with(capture: &str, cursor: char) -> Option<Dialog> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn free_text_option() {
+        assert!(is_free_text("Type something."));
+        assert!(is_free_text("  type something "));
+        assert!(!is_free_text("红色"));
+        assert!(!is_free_text("Chat about this"));
+    }
 
     const RULE: &str = "────────────────────────────────────────────────────────────";
 

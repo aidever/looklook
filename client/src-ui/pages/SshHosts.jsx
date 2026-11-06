@@ -18,6 +18,7 @@ import PopMenu from '../shared/PopMenu.jsx';
 import { Seg } from './Settings.jsx';
 import { ImportDialog, TransferPanel } from './SshTransfer.jsx';
 import { FolderPicker } from './Terminals.jsx';
+import Select from '../shared/Select.jsx';
 
 const EMPTY = { name: '', host: '', port: 22, user: '', auth: 'agent', key_path: '~/.ssh/id_ed25519', key_stored: false, jump: '', allow_ai: false };
 const EMPTY_JUMP = { name: '', host: '', port: 22, user: '', auth: 'agent', key_path: '~/.ssh/id_ed25519', key_stored: false };
@@ -502,7 +503,7 @@ function HostDialog({ initial, hosts, onClose, onSaved }) {
               <p className="small muted ssh-jump-body">{t('ssh.jump_no_hosts')}</p>
             ) : (
               <div className="ssh-jump-body">
-                <select value={jumpId} onChange={(e) => set('jump')(e.target.value)} aria-label={t('ssh.jump_pick')} required>
+                <Select value={jumpId} onChange={(e) => set('jump')(e.target.value)} aria-label={t('ssh.jump_pick')} required>
                   <option value="" disabled>
                     {t('ssh.jump_pick')}
                   </option>
@@ -512,7 +513,7 @@ function HostDialog({ initial, hosts, onClose, onSaved }) {
                       {h.port !== 22 ? `:${h.port}` : ''}
                     </option>
                   ))}
-                </select>
+                </Select>
               </div>
             ))}
           {jumpMode === 'new' && (

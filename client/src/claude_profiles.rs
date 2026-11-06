@@ -897,7 +897,7 @@ fn last_line(out: &str) -> String {
     line.chars().take(300).collect()
 }
 
-fn strip_ansi(s: &str) -> String {
+pub(crate) fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut it = s.chars().peekable();
     while let Some(c) = it.next() {

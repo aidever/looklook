@@ -57,6 +57,7 @@ import {
 } from "../shared/ui.jsx";
 import { CHAT_LAUNCHES, isDshWeb } from "../shared/chat.js";
 import { RemoteUpsell, remoteAllowed } from "../shared/Remote.jsx";
+import Select from '../shared/Select.jsx';
 
 const LAUNCHES = ["shell", "codex", "claude", "opencode", "dsh", "custom"];
 // 能一键安装的 AI 工具（没装时提示安装）；能以全部权限启动的
@@ -149,7 +150,7 @@ export function RemoteCard({ initialOpen = false }) {
           {!upsell && <p className="muted small remote-body">{t(body)}</p>}
           {!lan && !upsell && <RelayStatus />}
           {lan && ips.length > 1 && lanReady && (
-            <select
+            <Select
               className="remote-ips"
               value={lanIdx}
               onChange={(e) => setLanIdx(Number(e.target.value))}
@@ -160,7 +161,7 @@ export function RemoteCard({ initialOpen = false }) {
                   {ip}
                 </option>
               ))}
-            </select>
+            </Select>
           )}
           {upsell ? null : lanReady ? (
             <div className="remote-address">
@@ -1033,7 +1034,7 @@ export function InstanceDialog({ open, onClose, initial, preset, workdir: wantWo
       <form onSubmit={submit}>
         {devices.multi && !editing && (
           <Field label={t("devices.create_on")}>
-            <select value={device ?? ""} onChange={(e) => setDevice(e.target.value)}>
+            <Select value={device ?? ""} onChange={(e) => setDevice(e.target.value)}>
               {devices.items.map((d) => (
                 <option key={d.id} value={d.id} disabled={!d.online}>
                   {deviceName(t, d)}
@@ -1041,7 +1042,7 @@ export function InstanceDialog({ open, onClose, initial, preset, workdir: wantWo
                   {d.online ? "" : ` · ${t("devices.offline")}`}
                 </option>
               ))}
-            </select>
+            </Select>
           </Field>
         )}
         <p className="field-label" style={{ margin: "0 0 8px" }}>
@@ -1073,7 +1074,7 @@ export function InstanceDialog({ open, onClose, initial, preset, workdir: wantWo
               <>
                 <p style={{ margin: "4px 0 8px" }}>{t("tools.install_hint")}</p>
                 <div className="row">
-                  <select
+                  <Select
                     value={mirror}
                     onChange={(e) => setMirror(e.target.value)}
                     aria-label={t("tools.mirror")}
@@ -1083,7 +1084,7 @@ export function InstanceDialog({ open, onClose, initial, preset, workdir: wantWo
                         {t(`tools.mirrors.${m}`)}
                       </option>
                     ))}
-                  </select>
+                  </Select>
                   <Button variant="secondary" busy={busy} onClick={install}>
                     {t("tools.install")}
                   </Button>

@@ -57,13 +57,20 @@ export function pickWeighted(list, rng, avoid) {
 
 /**
  * @param {object} m 换算后的清单（后端 `manifest_out`）
- * @param {{ rng?: () => number, now?: number }} opts
+ * @param {{ rng?: () => number, now?: number, roam?: boolean }} opts
+ * `roam`：更爱动——闲时多走动、走得远（桌面宠物满屏跑），待机少一些
  */
-export function createBrain(m, { rng = Math.random, now = 0 } = {}) {
+export function createBrain(m, { rng = Math.random, now = 0, roam = false } = {}) {
   const clips = m.clips ?? {};
   const states = m.states ?? {};
   const actions = m.actions ?? {};
   const behavior = { idle: 40, turn: 5, move: 10, sleepAfter: 600, ...(m.behavior ?? {}) };
+  // 更主动：走动的机会翻几倍、发呆少一半；单次走的距离放大（最远到屏幕那头）
+  const reach = roam ? 4 : 1;
+  if (roam) {
+    behavior.move = Math.max(behavior.move * 3, 15);
+    behavior.idle *= 0.5;
+  }
   const natural = m.stage?.facing === 'right' ? 'right' : 'left';
   const s = {
     agent: 'idle',
@@ -110,6 +117,13 @@ export function createBrain(m, { rng = Math.random, now = 0 } = {}) {
     const sleepSets = (actions.sleep ?? []).filter((x) => x.start?.length && x.loop?.length && x.end?.length);
     if (behavior.sleepAfter > 0 && sleepSets.length && t - s.idleSince >= behavior.sleepAfter * 1000) return startSleep(sleepSets);
     const idle = pool('idle');
+    // 更爱动：刚走完一段，多半接着往同一边走（一段视频走不远，连起来就能跑到屏幕那头）
+    const went = s.walked;
+    s.walked = null;
+    if (roam && went && room && (room[went] ?? 0) > 80 && rng() < 0.65) {
+      const again = walkDir(went, room);
+      if (again) return again;
+    }
     if (s.busy || !idle) {
       s.busy = false;
       return idle ? fromList(idle.list, LAYER.idle) : null;
@@ -150,12 +164,22 @@ export function createBrain(m, { rng = Math.random, now = 0 } = {}) {
     return walkWith(p, dir, room);
   };
 
+  /** 往指定方向走一段（接着走用） */
+  const walkDir = (dir, room) => {
+    const list = (actions.move ?? []).filter(exists).filter((p) => !clips[p.clip].dir || clips[p.clip].dir === dir);
+    if (!list.length) return null;
+    return walkWith(pickWeighted(list, rng, null), dir, room);
+  };
+
   const walkWith = (p, dir, room) => {
     const c = clips[p.clip];
     const w = { min: 60, max: 240, lead: 0, tail: 0, pace: 120, ...(c.move ?? {}) };
+    // 循环的走动段按步速走，走多远都自然；一段定长的视频走太远就成了滑行，靠下面“接着走”走远
+    if (c.loop) w.max *= reach;
     const dist = Math.min(w.min + rng() * Math.max(0, w.max - w.min), room[dir] ?? 0);
     // 分了左右的段（精灵图）自己就朝那边，不镜像；否则按走的方向定朝向
     if (!c.dir) s.facing = dir;
+    s.walked = dir;
     return play(p, LAYER.idle, { mirror: c.dir ? false : mirrored() && c.mirror !== false, move: { dx: dir === 'left' ? -dist : dist, lead: w.lead, tail: w.tail, pace: w.pace, looped: Boolean(c.loop) } });
   };
 
@@ -280,6 +304,12 @@ export function createBrain(m, { rng = Math.random, now = 0 } = {}) {
      * 看向一边（鼠标、输入框在那边）：只在闲着时。有转身段播转身段；没有就直接换朝向，
      * 返回 `{ flip: true }` 让播放器把当前这段翻过来（这段不能镜像就不翻）。
      */
+    /** 往一边走一段（从另一块屏幕进来时往里走）；忙着、睡着、拎着时不走 */
+    walkTo(dir, t, room) {
+      if (s.dragging || s.sleep || PERSIST.includes(s.agent)) return null;
+      s.idleSince = Math.min(s.idleSince, t);
+      return walkDir(dir, room);
+    },
     face(dir, t) {
       if (s.dragging || s.sleep || dir === s.facing) return null;
       if ((s.cur?.layer ?? 0) > LAYER.idle || s.cur?.move) return null;

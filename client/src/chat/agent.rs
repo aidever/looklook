@@ -28,6 +28,12 @@ pub trait TranscriptReader: Send + Sync {
     /// 记录里看到的工具版本
     fn version(&self) -> Option<String>;
     fn stats(&self) -> Stats;
+    /// 编辑重发：用户消息 `key` 之前的那个位置（从那里接着、丢掉这条和之后的）。
+    /// `None`：这条不能改（不是用户消息、运行中插进去的）；`Some(None)`：是第一句话，改了就是开一段新对话。
+    /// Claude Code 是这条消息的父记录（`--resume-session-at`）；Codex 是上一轮的 turn id（`thread/fork` 的 `lastTurnId`）
+    fn rewind_point(&self, _key: &str) -> Option<Option<String>> {
+        None
+    }
 }
 
 impl TranscriptReader for Transcript {
@@ -54,6 +60,9 @@ impl TranscriptReader for Transcript {
     }
     fn stats(&self) -> Stats {
         self.stats
+    }
+    fn rewind_point(&self, key: &str) -> Option<Option<String>> {
+        Transcript::rewind_point(self, key)
     }
 }
 

@@ -280,6 +280,24 @@ input:hover, select:hover, textarea:hover { border-color: var(--line); }
 textarea { min-height: 96px; }
 input:focus, select:focus, textarea:focus { outline: none; background: var(--panel); border-color: var(--brand); box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand) 18%, transparent); }
 input[aria-invalid="true"] { border-color: var(--danger); }
+/* 下拉选择（shared/Select.jsx）：外观同输入框 */
+.select {
+  display: inline-flex; align-items: center; gap: 8px; width: 100%; min-width: 0; min-height: 48px; padding: 10px 12px 10px 14px; text-align: left; cursor: pointer;
+  font: inherit; color: var(--text); background: var(--panel-2); border: 1px solid transparent; border-radius: 12px;
+  transition: border-color .15s, background .15s, box-shadow .15s;
+}
+.select:hover:not(:disabled) { border-color: var(--line); }
+.select:focus-visible, .select[aria-expanded="true"] { outline: none; background: var(--panel); border-color: var(--brand); box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand) 18%, transparent); }
+.select:disabled { cursor: not-allowed; opacity: .6; }
+.select-value { flex: 1; min-width: 0; }
+.select[data-empty] .select-value { color: var(--muted); }
+.select-caret { flex: none; color: var(--muted); transition: transform .15s; }
+.select[aria-expanded="true"] .select-caret { transform: rotate(180deg); }
+.select-list.menu-pop-fixed { overflow-y: auto; overscroll-behavior: contain; }
+.select-list button { min-height: 38px; gap: 8px; }
+.select-list button.hi { background: var(--panel-2); }
+.select-list button[aria-selected="true"] { font-weight: 600; }
+.select-list.menu-pop-sheet button { min-height: 48px; }
 input[type="checkbox"], input[type="radio"] { width: auto; min-height: 0; padding: 0; flex: none; accent-color: var(--brand); }
 .input-wrap { position: relative; display: flex; align-items: center; }
 .input-wrap input { padding-right: 48px; }
@@ -534,10 +552,10 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: 0; paddin
 .srow2-stack .srow2-text { flex: none; }
 .srow2-stack .srow2-ctl { flex: auto; flex-wrap: wrap; }
 @media (max-width: 560px) {
-  .srow2:not(.srow2-stack) .srow2-ctl:has(.seg, input, select, .btn) { width: 100%; }
+  .srow2:not(.srow2-stack) .srow2-ctl:has(.seg, input, select, .select, .btn) { width: 100%; }
   /* 控件占满一行时，说明文字放上面，别被挤成一列一个词 */
-  .srow2:has(.seg, input, select, .btn) { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 8px; }
-  .srow2:has(.seg, input, select, .btn) .srow2-text { flex: none; }
+  .srow2:has(.seg, input, select, .select, .btn) { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 8px; }
+  .srow2:has(.seg, input, select, .select, .btn) .srow2-text { flex: none; }
   .srow2-ctl > .btn { max-width: 100%; }
 }
 /* 收起来的次要内容 */
@@ -1105,6 +1123,13 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: 0; paddin
 .table tr:last-child td { border-bottom: 0; }
 .table .cell-name { display: block; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .table .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.own-table td { vertical-align: top; }
+.own-table .own-share-h { width: 22%; min-width: 80px; }
+.own-table .own-share .meter { margin-top: 7px; }
+.own-table .own-share, .own-table .own-share-h { padding-left: 16px; }
+@media (max-width: 560px) { .own-table .own-share, .own-table .own-share-h { display: none; } }
+.own-sess { display: inline-flex !important; align-items: center; gap: 6px; max-width: 260px; color: inherit; text-decoration: none; font-weight: 500; }
+.own-sess:hover { color: var(--brand); }
 .nav-meta { margin-left: auto; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 
 /* 多设备（远程打开、多台电脑）：顶栏的电脑切换、终端页按电脑分组、登录上限列表 */
@@ -1620,7 +1645,7 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: 0; paddin
 .ssh-jump-head { display: flex; align-items: center; gap: 8px; }
 .ssh-jump-hint { margin: 2px 0 10px; }
 .ssh-jump-body { margin-top: 12px; }
-.ssh-jump-body select { width: 100%; }
+.ssh-jump-body select, .ssh-jump-body .select { width: 100%; }
 .ssh-jump-new { padding-top: 12px; border-top: 1px dashed var(--line); }
 .ssh-jump-new .note { margin-bottom: 14px; }
 
@@ -2093,10 +2118,10 @@ button.chat-task-head.chat-task-main { flex-direction: row; align-items: center;
 .ppick-add { margin-top: 4px; border-top: 1px solid var(--line); border-radius: 0 0 9px 9px; }
 .ppick-dev b { color: var(--dc, inherit); }
 .draft-body { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; padding: 12px 24px; }
-.draft-hero { display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center; }
-.draft-hero h1 { margin: 0; font-size: 22px; font-weight: 600; text-wrap: balance; }
+.draft-hero { display: flex; align-items: center; justify-content: center; gap: 10px; text-align: center; }
+.draft-hero h1 { margin: 0; font-size: 20px; font-weight: 600; text-wrap: balance; }
 .draft-hero p { margin: 0; font-size: 13.5px; }
-.draft-mark { width: 60px; height: 60px; border-radius: 18px; display: grid; place-items: center; background: var(--panel-2); color: var(--muted); }
+.draft-mark { flex: none; width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; background: var(--panel-2); color: var(--muted); }
 .draft-mark-claude { background: color-mix(in srgb, var(--claude) 14%, var(--panel)); color: var(--claude); }
 .draft-mark-codex { background: color-mix(in srgb, #0f766e 14%, var(--panel)); color: #0f766e; }
 .draft-mark-opencode { background: color-mix(in srgb, #7c3aed 14%, var(--panel)); color: #7c3aed; }
@@ -2116,7 +2141,7 @@ button.chat-task-head.chat-task-main { flex-direction: row; align-items: center;
 .draft-dock > * { width: 100%; max-width: 760px; }
 .draft-strip { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 10px 12px; border-radius: 12px; font-size: 13px; }
 .draft-strip .btn-sm { min-height: 28px; }
-.draft-strip select { width: auto; min-height: 28px; padding: 0 6px; font-size: 13px; }
+.draft-strip select, .draft-strip .select { width: auto; min-height: 28px; padding: 0 6px 0 8px; font-size: 13px; }
 .draft-strip .small { margin: 6px 0 0; }
 .draft-strip-warn { background: var(--warn-soft); color: var(--text); }
 .draft-strip-info { background: var(--brand-soft); color: var(--text); }
@@ -2129,7 +2154,19 @@ button.chat-task-head.chat-task-main { flex-direction: row; align-items: center;
 .draft-box.off { background: var(--panel-2); }
 .draft-box .chat-files { padding: 4px 4px 0; }
 .draft-input, .draft-input:focus, .draft-input:hover { width: 100%; min-height: 52px; resize: none; border: 0; padding: 6px 6px 2px; background: none; box-shadow: none; font: inherit; font-size: 15px; line-height: 1.5; }
-.draft-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+.draft-tools { display: flex; align-items: center; gap: 6px; }
+/* 按钮一行放不下时横着滑（不换行），“开始”固定在右边 */
+.draft-tools-row { flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; overflow-x: auto; scrollbar-width: none; overscroll-behavior-x: contain; }
+.draft-tools-row::-webkit-scrollbar { display: none; }
+.draft-tools-row > * { flex: none; }
+.draft-box { position: relative; }
+.draft-assist { bottom: calc(100% + 2px); }
+.draft-model .ellipsis { max-width: 14em; }
+.draft-cmd { display: flex; align-items: center; gap: 8px; padding: 6px 8px; color: var(--muted); }
+.draft-cmd input, .draft-cmd input:focus { flex: 1; min-width: 0; border: 0; background: none; box-shadow: none; padding: 4px 0; font-size: 14px; color: var(--text); }
+/* 软键盘弹着：输入框跟着键盘往上抬（--kb 是键盘挡住的高度，Draft.jsx 的 useKeyboardInset） */
+.draft[data-kb] .draft-dock { bottom: var(--kb, 0px); padding-bottom: 8px; }
+.draft[data-kb] .draft-body { padding-bottom: calc(var(--kb, 0px) + 12px); }
 .draft-attach.btn { width: 34px; min-height: 34px; padding: 0; color: var(--muted); cursor: pointer; }
 .draft-chip, .draft-chip.btn {
   display: inline-flex; align-items: center; gap: 6px; max-width: 100%; height: 30px; min-height: 30px; padding: 0 10px; border-radius: 999px;
@@ -2167,8 +2204,9 @@ button.chat-task-head.chat-task-main { flex-direction: row; align-items: center;
   .draft-head { padding: 8px 8px 6px; border-bottom: 1px solid var(--line); }
   .draft-path { display: none; }
   .draft-body { justify-content: flex-start; padding: 28px 16px 12px; }
-  .draft-hero h1 { font-size: 18px; }
-  .draft-mark { width: 52px; height: 52px; border-radius: 16px; }
+  .draft-hero h1 { font-size: 16px; text-align: left; }
+  .draft-mark { width: 34px; height: 34px; border-radius: 10px; }
+  .draft-body { gap: 12px; padding-top: 16px; }
   .draft-dock { padding: 8px 12px calc(12px + env(safe-area-inset-bottom)); }
   .draft-chip, .draft-chip.btn { height: 36px; min-height: 36px; }
   .draft-go, .draft-attach.btn { height: 44px; min-height: 44px; }
@@ -3044,6 +3082,15 @@ html, body, .drawer-body, .slist-body, .files-body, .hdetail-msgs { overflow-anc
 .chat-user-acts .btn { min-height: 28px; width: 30px; color: var(--muted); }
 .chat-user:hover .chat-user-acts, .chat-user-acts:focus-within { opacity: 1; }
 .chat-user:has(.chat-user-acts) { flex-direction: column; align-items: flex-end; gap: 0; }
+/* 编辑重发：就地改用户消息（ChatView.jsx 的 EditUser） */
+.chat-user[data-editing] { flex-direction: column; align-items: flex-end; gap: 6px; }
+.chat-edit { display: flex; flex-direction: column; gap: 8px; width: min(100%, 640px); padding: 10px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); box-shadow: var(--shadow-sm, none); }
+.chat-edit-text { width: 100%; min-height: 64px; resize: vertical; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--text); font: inherit; font-size: 15px; line-height: 1.55; }
+.chat-edit-text:focus { outline: 2px solid color-mix(in srgb, var(--brand) 55%, transparent); outline-offset: 0; border-color: transparent; }
+.chat-edit-keep { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+.chat-edit-note { margin: 0; font-size: 12.5px; color: var(--muted); }
+.chat-edit-acts { display: flex; justify-content: flex-end; gap: 8px; }
+.chat-edit-acts .btn { min-height: 32px; padding: 0 14px; }
 @media (hover: none) and (pointer: coarse) {
   .chat-user-acts { display: none; }
   /* 系统自己的长按选择换成我们的菜单（里面有“选择文字”） */
@@ -3180,7 +3227,7 @@ html, body, .drawer-body, .slist-body, .files-body, .hdetail-msgs { overflow-anc
 .chat-guard { display: flex; align-items: center; gap: 6px; margin: 6px 0 0; padding: 6px 10px; border-radius: 10px; background: var(--danger-soft); color: var(--danger); font-size: 12.5px; }
 .gd-rule { display: flex; align-items: center; gap: 8px; }
 .gd-rule > code { flex: 1; min-width: 0; padding: 8px 12px; border-radius: 10px; background: var(--panel); border: 1px solid var(--line); font-size: 13px; }
-.gd-rule > input, .gd-rule > select { background: var(--panel); }
+.gd-rule > input, .gd-rule > select, .gd-rule > .select { background: var(--panel); }
 
 /* Codex 待确认的 hook：不挡着输入，不用呼吸边框 */
 .chat-ask.chat-hooks { animation: none; margin-bottom: 8px; }
@@ -3364,6 +3411,8 @@ button.chat-read-no:hover { color: var(--brand); opacity: 1; }
 .pet-hit:active { cursor: grabbing; }
 .pet-hit:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 .pet-bubble { position: absolute; transform: translateX(-50%); max-width: 220px; width: max-content; padding: 6px 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--text); font-size: 13px; line-height: 1.4; box-shadow: 0 4px 14px rgba(20, 24, 40, .12); animation: pet-pop .2s ease-out; pointer-events: none; }
+.pet-bubble-link { pointer-events: auto; cursor: pointer; border-color: color-mix(in srgb, var(--brand) 45%, var(--line)); }
+.pet-bubble-link:hover { background: var(--panel-2); }
 .pet-bubble::after { content: ""; position: absolute; left: 50%; bottom: -6px; width: 10px; height: 10px; margin-left: -5px; background: var(--panel); border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); transform: rotate(45deg); }
 .pet-hide { position: absolute; left: calc(var(--bx) + var(--bw) - 6px); top: calc(var(--by) - 4px); display: grid; place-items: center; width: 18px; height: 18px; padding: 0; border: 1px solid var(--line); border-radius: 50%; background: var(--panel); color: var(--muted); cursor: pointer; opacity: 0; transition: opacity .15s; pointer-events: auto; }
 .pet:hover .pet-hide, .pet-hide:focus-visible { opacity: 1; }
@@ -3373,12 +3422,16 @@ button.chat-read-no:hover { color: var(--brand); opacity: 1; }
 @keyframes pet-pop { from { opacity: 0; transform: translate(-50%, 4px) scale(.96); } to { opacity: 1; transform: translateX(-50%); } }
 @media (prefers-reduced-motion: reduce) { .pet-bubble { animation: none; } .pet-media { transition: none; } .pet-fx { display: none; } }
 /* 设置 → 宠物 */
-.pet-agents { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 0 14px; }
 .pet-bond { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; color: var(--brand); }
 .pet-bond-bar { display: inline-block; width: 80px; height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; }
 .pet-bond-bar > span { display: block; height: 100%; background: var(--brand); }
 .pet-gen-api { margin: 6px 0; }
-.pet-gen-api > summary { cursor: pointer; color: var(--muted); }
+.pet-gen-model { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 0 12px; }
+@media (max-width: 520px) { .pet-gen-model { grid-template-columns: 1fr; } }
+.pet-gen-warn { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 8px 12px; margin: 4px 0 10px; border-radius: 10px; background: color-mix(in srgb, var(--warn, #d97706) 12%, transparent); }
+.pet-style-presets { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+textarea.pet-style { min-height: 64px; }
+.pet-gen-status { display: flex; align-items: center; gap: 6px; color: var(--brand); margin: 2px 0; }
 .pet-gen-actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
 .pet-gen-list dl { max-height: 320px; overflow: auto; }
 .pet-gen-row { display: contents; }

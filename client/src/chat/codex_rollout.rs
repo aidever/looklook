@@ -6,6 +6,10 @@
 //!
 //! 工具调用翻成 Claude Code 的说法（`Bash`、`Edit`、`Write`、`Read`、`WebSearch`、`mcp__…`），界面直接复用 Claude 的卡片。
 //! 文件只追加、不改写，所以条目的 key 用行号：`r:<行号>:<序号>`。
+//!
+//! 0.157 起复制出来的对话（`thread/fork`，编辑重发、`/fork`）是“分页”的：新文件不再抄一遍以前的记录，
+//! 只在 `session_meta.history_base` 里记着接在哪个对话（`thread_id`）的前多少字节（`end_byte_offset`）后面。
+//! 所以先按这条链把上级文件的那一段读进来，再读自己的；行号接着往下数（[`lineage`]、[`logical_lines`]）。
 
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
@@ -38,11 +42,17 @@ pub struct Rollout {
     user_turn: Option<String>,
     /// 子代理（`agent_path`，例如 `/root/helper`）→ 它的卡片（工具调用 id、子会话 id、交回过答复没有）
     agents: HashMap<String, (String, String, bool)>,
+    /// 出现过的 turn id（按顺序，不重复）：编辑重发时找上一轮
+    turns: Vec<String>,
+    /// 每条用户消息（按行号）的上一轮：`Some(None)` 是第一轮，`None` 是插话进来的（不能改）
+    rewind: HashMap<usize, Option<Option<String>>>,
+    /// 接在哪些对话后面（`history_base`）的那几段已经读进来了
+    based: bool,
 }
 
 impl Rollout {
     pub fn new(path: PathBuf) -> Self {
-        Self { path, pos: 0, partial: vec![], line: 0, items: vec![], inputs: HashMap::new(), version: None, stats: Stats::default(), user_turn: None, agents: HashMap::new() }
+        Self { path, pos: 0, partial: vec![], line: 0, items: vec![], inputs: HashMap::new(), version: None, stats: Stats::default(), user_turn: None, agents: HashMap::new(), turns: vec![], rewind: HashMap::new(), based: false }
     }
 
     /// 喂入新读到的字节（测试直接用）。
@@ -123,6 +133,14 @@ impl Rollout {
 
     fn item(&mut self, line: usize, it: &Value, turn: Option<&str>, ts: Option<String>) {
         let id = it["id"].as_str().unwrap_or("").to_string();
+        if it["type"] == "UserMessage" {
+            let mid = turn.is_some() && self.user_turn.as_deref() == turn;
+            let prev = self.turns.iter().rev().find(|t| Some(t.as_str()) != turn).cloned();
+            self.rewind.insert(line, (!mid && turn.is_some()).then_some(prev));
+        }
+        if let Some(t) = turn.filter(|t| self.turns.last().is_none_or(|l| l != t)) {
+            self.turns.push(t.to_string());
+        }
         match it["type"].as_str().unwrap_or("") {
             "UserMessage" => {
                 let parts = it["content"].as_array().cloned().unwrap_or_default();
@@ -371,11 +389,27 @@ impl TranscriptReader for Rollout {
         &self.path
     }
 
-    /// 读新写入的部分。文件变短（被换掉）时从头再来。
+    /// 读新写入的部分。文件变短（被换掉）时从头再来。第一次先读接在前面的那几段（[`lineage`]）。
     fn poll(&mut self) -> std::io::Result<Change> {
+        let start = self.items.len();
+        if !self.based {
+            self.based = true;
+            let segs = lineage(&self.path);
+            for (p, limit) in &segs[..segs.len() - 1] {
+                let mut bytes = read_prefix(p, *limit);
+                if !bytes.is_empty() && bytes.last() != Some(&b'\n') {
+                    bytes.push(b'\n');
+                }
+                self.feed(&bytes);
+            }
+        }
+        let based = |me: &Self, ch: Change| match ch {
+            Change::Upsert { .. } | Change::None if me.items.len() > start && start == 0 => Change::Upsert { start, items: me.items[start..].to_vec() },
+            other => other,
+        };
         let mut f = match std::fs::File::open(&self.path) {
             Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Change::None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(based(self, Change::None)),
             Err(e) => return Err(e),
         };
         let size = f.metadata()?.len();
@@ -385,13 +419,14 @@ impl TranscriptReader for Rollout {
             return Ok(Change::Reset);
         }
         if size == self.pos {
-            return Ok(Change::None);
+            return Ok(based(self, Change::None));
         }
         f.seek(SeekFrom::Start(self.pos))?;
         let mut buf = Vec::with_capacity((size - self.pos) as usize);
         f.take(size - self.pos).read_to_end(&mut buf)?;
         self.pos += buf.len() as u64;
-        Ok(self.feed(&buf))
+        let ch = self.feed(&buf);
+        Ok(based(self, ch))
     }
 
     fn len(&self) -> usize {
@@ -403,11 +438,10 @@ impl TranscriptReader for Rollout {
         self.items[from.min(to)..to].to_vec()
     }
 
-    /// `r:<行号>:<序号>` → 那一行的原始记录
+    /// `r:<行号>:<序号>` → 那一行的原始记录（行号算上接在前面的那几段）
     fn full_item(&self, key: &str) -> Option<Value> {
         let n: usize = key.strip_prefix("r:")?.split(':').next()?.parse().ok()?;
-        let text = std::fs::read_to_string(&self.path).ok()?;
-        text.lines().filter(|l| !l.trim().is_empty()).nth(n).and_then(|l| serde_json::from_str(l).ok())
+        logical_lines(&self.path).get(n).and_then(|l| serde_json::from_str(l).ok())
     }
 
     fn tool_input(&self, tool_use_id: &str) -> Option<&Value> {
@@ -421,6 +455,53 @@ impl TranscriptReader for Rollout {
     fn stats(&self) -> Stats {
         self.stats
     }
+
+    /// `r:<行号>:0` 的用户消息 → 上一轮的 turn id
+    fn rewind_point(&self, key: &str) -> Option<Option<String>> {
+        let n: usize = key.strip_prefix("r:")?.strip_suffix(":0")?.parse().ok()?;
+        self.rewind.get(&n).cloned().flatten()
+    }
+}
+
+/// 这个 rollout 接在哪段对话的前多少字节后面（`session_meta.history_base`，分页的对话才有）
+fn history_base(path: &Path) -> Option<(String, u64)> {
+    use std::io::BufRead;
+    let mut first = String::new();
+    std::io::BufReader::new(std::fs::File::open(path).ok()?).take(4 << 20).read_line(&mut first).ok()?;
+    let v: Value = serde_json::from_str(first.trim()).ok()?;
+    let b = &v["payload"]["history_base"];
+    (v["type"] == "session_meta").then(|| Some((b["thread_id"].as_str()?.to_string(), b["end_byte_offset"].as_u64()?))).flatten()
+}
+
+/// 读出来的顺序：最早的上级在前，每段带着读到哪（字节数），最后是 `path` 自己（读全部）
+pub fn lineage(path: &Path) -> Vec<(PathBuf, Option<u64>)> {
+    let mut chain = vec![(path.to_path_buf(), None)];
+    let mut cur = path.to_path_buf();
+    for _ in 0..32 {
+        let Some((thread, limit)) = history_base(&cur) else { break };
+        let Some(parent) = find_rollout(&cur, &thread).filter(|p| !chain.iter().any(|(c, _)| c == p)) else { break };
+        chain.push((parent.clone(), Some(limit)));
+        cur = parent;
+    }
+    chain.reverse();
+    chain
+}
+
+fn read_prefix(path: &Path, limit: Option<u64>) -> Vec<u8> {
+    let Ok(f) = std::fs::File::open(path) else { return vec![] };
+    let mut buf = vec![];
+    let _ = f.take(limit.unwrap_or(u64::MAX)).read_to_end(&mut buf);
+    buf
+}
+
+/// 整条链上的非空行（和 [`Rollout`] 的行号一致）
+fn logical_lines(path: &Path) -> Vec<String> {
+    let mut out = vec![];
+    for (p, limit) in lineage(path) {
+        let bytes = read_prefix(&p, limit);
+        out.extend(String::from_utf8_lossy(&bytes).lines().filter(|l| !l.trim().is_empty()).map(String::from));
+    }
+    out
 }
 
 /// 子代理（子会话 `thread`）的 rollout：先在主线 rollout 同一个目录里找（一般是同一天），再找整个 `sessions` 目录
@@ -455,8 +536,8 @@ pub fn find_rollout(main: &Path, thread: &str) -> Option<PathBuf> {
 /// 从那里取，不去读路径指向的文件：附件可能已经清掉了，能读哪个文件也不该由记录里的路径决定。
 pub fn user_image(path: &Path, key: &str, n: usize) -> Option<(&'static str, Vec<u8>)> {
     let line: usize = key.strip_prefix("r:")?.split(':').next()?.parse().ok()?;
-    let text = std::fs::read_to_string(path).ok()?;
-    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).take(line + 1).collect();
+    let all = logical_lines(path);
+    let lines: Vec<&str> = all.iter().map(String::as_str).take(line + 1).collect();
     let rec: Value = serde_json::from_str(lines.get(line)?).ok()?;
     let item = &rec["payload"]["item"];
     if item["type"] != "UserMessage" {
@@ -522,6 +603,7 @@ fn token_usage_in(text: &str) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn token_usage_from_last_token_count() {
@@ -652,6 +734,49 @@ mod tests {
         r.feed(text.as_bytes());
         let mids: Vec<bool> = r.items(0, r.len()).iter().filter_map(|i| if let Body::User { mid, .. } = i.body { Some(mid) } else { None }).collect();
         assert_eq!(mids, [false, true, false]);
+        // 编辑重发：第一轮的从头开，第二轮的接在 t1 后面，插话进来的不能改
+        assert_eq!(r.rewind_point("r:0:0"), Some(None));
+        assert_eq!(r.rewind_point("r:2:0"), None);
+        assert_eq!(r.rewind_point("r:3:0"), Some(Some("t1".into())));
+        assert_eq!(r.rewind_point("r:1:0"), None);
+    }
+
+    #[test]
+    fn forked_rollout_reads_parent_prefix() {
+        // 分页的对话：子对话只记着接在父对话前多少字节后面
+        let dir = std::env::temp_dir().join(format!("ll-rollout-fork-{}", std::process::id()));
+        let day = dir.join("sessions/2026/11/06");
+        std::fs::create_dir_all(&day).unwrap();
+        let user = |turn: &str, text: &str| {
+            line(json!({ "type": "event_msg", "payload": { "type": "item_completed", "turn_id": turn, "item": { "type": "UserMessage", "id": text, "content": [{ "type": "text", "text": text }] } } }))
+        };
+        let meta = |id: &str, base: Option<(&str, usize)>| {
+            let mut p = json!({ "id": id, "cli_version": "0.157.1" });
+            if let Some((t, n)) = base {
+                p["history_base"] = json!({ "thread_id": t, "end_byte_offset": n, "end_ordinal_exclusive": 9 });
+            }
+            line(json!({ "type": "session_meta", "payload": p }))
+        };
+        let pid = "0000aaaa-0000-0000-0000-000000000001";
+        let cid = "0000aaaa-0000-0000-0000-000000000002";
+        let kept = meta(pid, None) + &user("t1", "APPLE");
+        std::fs::write(day.join(format!("rollout-2026-11-06T01-00-00-{pid}.jsonl")), kept.clone() + &user("t2", "BANANA")).unwrap();
+        let child = day.join(format!("rollout-2026-11-06T01-01-00-{cid}.jsonl"));
+        std::fs::write(&child, meta(cid, Some((pid, kept.len()))) + &user("t3", "CHERRY")).unwrap();
+        let mut r = Rollout::new(child.clone());
+        let ch = r.poll().unwrap();
+        assert!(matches!(ch, Change::Upsert { start: 0, ref items } if items.len() == 2));
+        let texts: Vec<String> = r.items(0, r.len()).iter().filter_map(|i| if let Body::User { text, .. } = &i.body { Some(text.clone()) } else { None }).collect();
+        assert_eq!(texts, ["APPLE", "CHERRY"], "父对话里被丢掉的那轮不显示");
+        // 行号接着往下数：父对话 2 行，子对话的用户消息在第 3 行
+        assert_eq!(r.items(1, 2)[0].key, "r:3:0");
+        assert_eq!(r.full_item("r:3:0").unwrap()["payload"]["item"]["id"], "CHERRY");
+        assert_eq!(r.full_item("r:1:0").unwrap()["payload"]["item"]["id"], "APPLE");
+        assert_eq!(r.rewind_point("r:3:0"), Some(Some("t1".into())), "改子对话的第一句：接在父对话的上一轮后面");
+        // 子对话接着写：增量
+        std::fs::OpenOptions::new().append(true).open(&child).unwrap().write_all(user("t4", "DATE").as_bytes()).unwrap();
+        assert!(matches!(r.poll().unwrap(), Change::Upsert { start: 2, .. }));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

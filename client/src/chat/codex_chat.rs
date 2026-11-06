@@ -64,6 +64,10 @@ pub struct Hub {
     pub(super) adopting: Mutex<HashSet<String>>,
     /// 刚让 TUI 不带会话号启动、等它自己开一段对话的终端（终端 id → 什么时候开始等）
     tui_waiting: Mutex<HashMap<String, Instant>>,
+    /// TUI 不带会话号启动后自己开的空对话，但对话页这时已经在自己的对话里发了消息、没让对话页跟过去（终端 id → 那段空对话）。
+    /// 这一轮结束、对话页的对话有了记录文件后，让终端里的 TUI 换到对话页的对话上（见 [`Chat::codex_claim_thread`]）
+    /// 对话页自己 `thread/start` 的通知比答复先到，也会记进来：换之前排除掉已经记在 `threads` 里的
+    strays: Mutex<HashMap<String, Vec<String>>>,
     /// 已经确认在 Codex 配置里有信任记录的工作目录（见 [`Chat::codex_trust`]）
     trusted: Mutex<HashSet<String>>,
     /// 这个 app-server 进程里已经记过“模型升级提示看过了”（见 [`Chat::codex_model_notices`]）
@@ -151,6 +155,44 @@ pub struct CodexSt {
     pub cwd: Option<String>,
     /// 界面上选的权限（[`PERMS`] 之一）：之后每一轮、重新加载对话都带上；没选过是 None，按 Codex 自己的配置
     pub perm: Option<String>,
+    /// 对话页正在发消息（`codex_input` 还没返回：可能正在 `thread/start`、拍检查点、`turn/start`）
+    sending: u32,
+    /// 对话页发过消息的那段对话：它还没写出记录文件时也不是“还没聊过”，终端里 TUI 自己开的空对话不能把它顶掉
+    prompted: Option<String>,
+}
+
+/// `codex_input` 期间标着“正在发”，返回（包括出错）时去掉
+struct Sending(Arc<Inst>);
+
+impl Sending {
+    fn new(inst: Arc<Inst>) -> Self {
+        lock(&inst.st).codex.sending += 1;
+        Self(inst)
+    }
+}
+
+impl Drop for Sending {
+    fn drop(&mut self) {
+        let mut st = lock(&self.0.st);
+        st.codex.sending = st.codex.sending.saturating_sub(1);
+    }
+}
+
+/// 让终端里的 TUI 换到对话页的对话上（装箱是为了断开 通知处理 → 重连终端 → codex_attach → 通知处理 的类型递归）
+fn follow_later(me: Arc<Chat>, id: String, strays: Vec<String>) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(async move {
+        // 对话页自己开的不算；用户在那段空对话里聊起来了（有了记录文件）就不动它
+        let strays: Vec<String> = strays.into_iter().filter(|t| !lock(&me.codex.threads).contains_key(t)).collect();
+        if strays.is_empty() || tokio::task::block_in_place(|| strays.iter().any(|t| crate::history::codex_rollout(t).is_some())) {
+            return;
+        }
+        if !matches!(me.codex_terminal_kind(&id).await, TermCodex::Remote) || !has_rollout(&lock(&me.inst(&id).st)) {
+            return;
+        }
+        if let Err(e) = me.codex_reconnect_terminal(&id).await {
+            tracing::warn!(id, error = ?e, "没能让终端里的 Codex 换到对话页的对话上");
+        }
+    })
 }
 
 /// 发出排在一轮之后的消息（在通知处理里起任务；装箱是为了断开 codex_input → 通知处理 → codex_input 的类型递归）
@@ -863,6 +905,12 @@ impl Chat {
             self.codex_fill_path(&inst).await;
             self.poll(&inst).await;
         }
+        if method == "turn/completed" {
+            let stray = lock(&self.codex.strays).remove(&inst.id);
+            if let (Some(stray), Some(me)) = (stray, self.me.upgrade()) {
+                tokio::spawn(follow_later(me, inst.id.clone(), stray));
+            }
+        }
     }
 
     /// app-server 要看看答复的请求：审批、提问挂起来等界面回答；其余不支持的答错误（Codex 按拒绝处理）。
@@ -986,6 +1034,8 @@ impl Chat {
             self.codex_follow_terminal(id).await;
             return Ok(json!({ "delivered": true }));
         }
+        // 从这里到 turn/start 返回之前，终端里 TUI 自己开的空对话不能把这个终端认领走（见 codex_claim_thread）
+        let _sending = Sending::new(inst.clone());
         let server = self.codex_attach(id).await?;
         let (thread, turn, phase, model, effort, current) = {
             let st = lock(&inst.st);
@@ -1000,6 +1050,7 @@ impl Chat {
             Some(t) => t,
             None => self.codex_new_thread(&server, &inst).await?,
         };
+        lock(&inst.st).codex.prompted = Some(thread.clone());
         // 界面上的“压缩上下文”
         if text.trim() == "/compact" && images.is_empty() {
             server.call("thread/compact/start", json!({ "threadId": thread })).await?;
@@ -1171,6 +1222,35 @@ impl Chat {
         Ok(json!({ "cwd": cwd, "root": checkout.root, "thread": tid }))
     }
 
+    /// 编辑重发（[`Chat::edit`]）：`thread/fork` 复制到上一轮 `after` 为止（含），换到新的 thread 上；
+    /// `after` 为空（改的是第一轮）开一段新对话。原来那段对话不动，还在历史里。工作目录照旧（托管工作树里的接着在工作树里）。
+    pub(super) async fn codex_edit(&self, id: &str, after: Option<String>) -> Result<(), LocalError> {
+        let inst = self.inst(id);
+        let thread = lock(&inst.st).binding.as_ref().map(|b| b.session_id.clone());
+        let server = self.codex_ready(id).await?;
+        let cwd = self.codex_current_cwd(id)?;
+        let tid = match after {
+            None => {
+                self.codex_forget(thread).await;
+                self.codex_new_thread_in(&server, &inst, &cwd).await?
+            }
+            Some(turn) => {
+                let thread = thread.ok_or_else(|| LocalError::new("CHAT_EDIT_STALE"))?;
+                let mut params = json!({ "threadId": thread, "cwd": cwd, "lastTurnId": turn });
+                merge(&mut params, self.codex_thread_opts(id));
+                let r = server.call("thread/fork", params).await?;
+                let tid = r["thread"]["id"].as_str().ok_or_else(|| LocalError::new("CODEX_REQUEST_FAILED"))?.to_string();
+                self.codex_forget(Some(thread)).await;
+                self.codex_loaded(&inst, &r, self.codex.generation.load(Ordering::SeqCst));
+                let _ = inst.tx.send(super::Event::Reset);
+                tid
+            }
+        };
+        self.store.set(&thread_cwd_key(&tid), &cwd)?;
+        self.codex_follow_terminal(id).await;
+        Ok(())
+    }
+
     pub(super) async fn codex_interrupt(&self, id: &str) -> Result<(), LocalError> {
         let inst = self.inst(id);
         // 没有在跑的一轮：不用去加载会话（会话接不上时“停止”也不报错）
@@ -1226,6 +1306,11 @@ impl Chat {
     /// 这段对话工作目录下能用的技能（app-server `skills/list`，缓存 [`SKILLS_TTL`]）
     pub(super) async fn codex_skill_list(&self, id: &str, fresh: bool) -> Result<Vec<Skill>, LocalError> {
         let cwd = self.codex_current_cwd(id)?;
+        self.codex_skills_at(cwd, fresh).await
+    }
+
+    /// 一个目录下 Codex 认得的技能（草稿页还没有会话时也能列）
+    pub(super) async fn codex_skills_at(&self, cwd: String, fresh: bool) -> Result<Vec<Skill>, LocalError> {
         if !fresh {
             if let Some((at, v)) = lock(&self.codex.skills).get(&cwd) {
                 if at.elapsed() < SKILLS_TTL {
@@ -1245,7 +1330,11 @@ impl Chat {
     /// 输入框打 `$` 时提示的技能：名字写成 `$名字`
     pub(super) async fn codex_commands(&self, id: &str) -> Result<Value, LocalError> {
         let list = self.codex_skill_list(id, true).await?;
-        Ok(json!({ "items": list.iter().map(|s| json!({ "name": format!("${}", s.name), "description": s.description, "source": format!("codex_{}", s.scope) })).collect::<Vec<_>>() }))
+        Ok(skill_items(&list))
+    }
+
+    pub(super) async fn codex_commands_at(&self, cwd: String) -> Result<Value, LocalError> {
+        Ok(skill_items(&self.codex_skills_at(cwd, false).await?))
     }
 
     pub(super) async fn codex_models(&self, id: &str) -> Result<Value, LocalError> {
@@ -1276,6 +1365,18 @@ impl Chat {
         let st = lock(&inst.st);
         let provider = third.map(|_| json!({ "name": profile.name }));
         Ok(json!({ "options": options, "provider": provider, "model": st.model, "actual_model": st.actual_model, "effort": st.effort }))
+    }
+
+    /// 不属于哪个会话的 Codex 模型目录（宠物生成台词选模型用）：共用的 app-server 的 `model/list`
+    pub(super) async fn codex_catalog(&self) -> Result<Value, LocalError> {
+        if let Some(v) = lock(&self.codex.models).as_ref().filter(|(t, _)| t.elapsed() < MODELS_TTL).map(|(_, v)| v.clone()) {
+            return Ok(v);
+        }
+        let server = self.codex_server().await?;
+        let r = server.call("model/list", json!({})).await?;
+        let v = json!(model_options(&r));
+        *lock(&self.codex.models) = Some((Instant::now(), v.clone()));
+        Ok(v)
     }
 
     /// 账号用量（5 小时、每周的限额）和这个会话的上下文、token
@@ -1611,6 +1712,13 @@ impl Chat {
                 st.codex.turn.is_none() && !has_rollout(&st)
             }
         };
+        // 对话页正在发、或者已经发过消息的（第一轮的记录文件可能还没写出来，turn/start 也可能还没返回）：
+        // 对话页留在自己的对话上，不跟到 TUI 的空对话去（以前会跟过去：对话页变回空白的新会话、却一直显示“正在处理”）
+        let busy = |id: &str| {
+            let inst = self.inst(id);
+            let st = lock(&inst.st);
+            st.codex.sending > 0 || st.binding.as_ref().is_some_and(|b| st.codex.prompted.as_deref() == Some(b.session_id.as_str()))
+        };
         let waiting: Vec<(String, Instant)> = lock(&self.codex.tui_waiting).iter().filter(|(_, at)| at.elapsed() < TUI_CLAIM).map(|(k, v)| (k.clone(), *v)).collect();
         let pick = waiting.iter().filter(|(id, _)| fits(id)).max_by_key(|(_, at)| *at).map(|(id, _)| id.clone()).or_else(|| {
             let c: Vec<&str> = rows.iter().map(|r| r.id.as_str()).filter(|id| fits(id)).collect();
@@ -1618,6 +1726,12 @@ impl Chat {
         });
         let Some(id) = pick else { return false };
         lock(&self.codex.tui_waiting).remove(&id);
+        if busy(&id) {
+            // 等这一轮结束、对话页的对话有了记录文件，再让 TUI 换过去（见 codex_note 的 turn/completed）
+            tracing::info!(id, thread = tid, "终端里的 Codex 自己开了新对话，但对话页已经在发消息：对话页不跟过去");
+            lock(&self.codex.strays).entry(id).or_default().push(tid.to_string());
+            return true;
+        }
         lock(&self.codex.threads).insert(tid.to_string(), id.clone());
         let inst = self.inst(&id);
         let path = t["path"].as_str().map(PathBuf::from).filter(|p| inst.agent.valid_transcript(p)).unwrap_or_default();
@@ -1769,7 +1883,7 @@ impl Chat {
             let idle = {
                 let inst = self.inst(&r.id);
                 let st = lock(&inst.st);
-                st.codex.turn.is_none() && matches!(st.phase, Phase::Idle | Phase::Detached)
+                st.codex.turn.is_none() && st.codex.sending == 0 && matches!(st.phase, Phase::Idle | Phase::Detached)
             };
             if idle && matches!(self.codex_terminal_kind(&r.id).await, TermCodex::Remote) {
                 found.push(r.id.clone());
@@ -2163,6 +2277,48 @@ fn set_usage(st: &mut super::State, u: &Value) {
 mod tests {
     use super::*;
 
+    /// 对话页正在发 / 已经发过第一条消息时，终端里不带会话号启动的 TUI 自己开的空对话不能把对话页顶掉
+    /// （以前对话页会跳回空白的新会话页、一直显示“正在处理”，终端里也是一段空对话）
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tui_thread_does_not_steal_busy_chat() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path().display().to_string();
+        let paths = crate::paths::Paths::discover(Some(home.path().to_path_buf())).unwrap();
+        let store = Arc::new(crate::store::Store::memory().unwrap());
+        let instances = crate::instances::Instances::new(store.clone(), paths.clone());
+        let input = crate::instances::Input { name: Some("c".into()), workdir: Some(workdir.clone()), launch: Some("codex".into()), chat_ui: Some(true), ..Default::default() };
+        let id = instances.create(input).await.unwrap().row.id;
+        if !instances.codex_app_mode(&store.instance(&id).unwrap().unwrap()) {
+            return; // 没有 tmux
+        }
+        let chat = Chat::new(store.clone(), paths.clone(), instances.clone());
+        let started = |tid: &str| json!({ "thread": { "id": tid, "cwd": workdir, "threadSource": "user" } });
+        let bound = || lock(&chat.inst(&id).st).binding.as_ref().map(|b| b.session_id.clone());
+        let inst = chat.inst(&id);
+
+        // 对话页正在发（thread/start、检查点、turn/start 还没返回）：TUI 的空对话不认领，记下等这一轮结束让 TUI 换过来
+        lock(&chat.codex.tui_waiting).insert(id.clone(), Instant::now());
+        {
+            let _sending = Sending::new(inst.clone());
+            assert!(chat.codex_claim_thread(&started("tui-1")));
+            assert_eq!(bound(), None);
+            assert!(!lock(&chat.codex.threads).contains_key("tui-1"));
+        }
+        assert_eq!(lock(&chat.codex.strays).get(&id), Some(&vec!["tui-1".to_string()]));
+
+        // 对话页发过消息的对话（第一轮的记录文件还没写出来）：也不认领
+        chat.codex_bind(&id, "mine");
+        lock(&inst.st).codex.prompted = Some("mine".into());
+        assert!(chat.codex_claim_thread(&started("tui-2")));
+        assert_eq!(bound().as_deref(), Some("mine"));
+
+        // 对话页新开的、还没发过消息的空对话：照旧跟 TUI 的走
+        chat.codex_bind(&id, "fresh");
+        assert!(chat.codex_claim_thread(&started("tui-3")));
+        assert_eq!(bound().as_deref(), Some("tui-3"));
+    }
+
     #[test]
     fn perms_round_trip() {
         for p in PERMS {
@@ -2312,4 +2468,8 @@ mod tests {
         assert!(side_thread(&json!({ "threadSource": "thread_title" })));
         assert!(!side_thread(&json!({ "threadSource": "user", "source": "vscode" })));
     }
+}
+
+fn skill_items(list: &[Skill]) -> Value {
+    json!({ "items": list.iter().map(|s| json!({ "name": format!("${}", s.name), "description": s.description, "source": format!("codex_{}", s.scope) })).collect::<Vec<_>>() })
 }

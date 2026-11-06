@@ -349,6 +349,14 @@ impl Transcript {
         }
     }
 
+    /// 编辑重发的位置（见 [`super::agent::TranscriptReader::rewind_point`]）：用户消息所在记录的父记录。
+    /// 运行中并进来的（`queued_command`）不算：它不是一轮的开头。
+    pub fn rewind_point(&self, key: &str) -> Option<Option<String>> {
+        let uuid = key.split(':').next()?;
+        let rec = &self.recs[*self.by_uuid.get(uuid)?];
+        rec.items.iter().any(|it| it.key == key && matches!(it.body, Body::User { mid: false, .. })).then(|| rec.parent.clone())
+    }
+
     /// 第 `from` 到 `to` 条（不含）显示条目。
     pub fn items(&self, from: usize, to: usize) -> Vec<Item> {
         let to = to.min(self.display.len());
@@ -707,7 +715,9 @@ fn command_text(s: &str) -> Option<String> {
         let (open, close) = (format!("<{t}>"), format!("</{t}>"));
         if let Some(start) = s.find(&open) {
             let rest = &s[start + open.len()..];
-            let inner = rest.find(&close).map(|e| &rest[..e]).unwrap_or(rest).trim();
+            // 命令输出里带终端颜色码（`\x1b[2m…\x1b[22m`），网页上会显示成乱码
+            let inner = crate::claude_profiles::strip_ansi(rest.find(&close).map(|e| &rest[..e]).unwrap_or(rest));
+            let inner = inner.trim();
             if !inner.is_empty() && !(t == "command-name" && parts.iter().any(|p: &String| p == inner)) {
                 parts.push(match t {
                     "bash-input" => format!("! {inner}"),
@@ -827,6 +837,12 @@ fn slim_extra(v: &Value) -> Option<Value> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn command_output_drops_ansi() {
+        let t = command_text("<local-command-stdout>\u{1b}[2mCompacted (ctrl+o to see full summary)\u{1b}[22m\n\u{1b}[2mPreCompact done\u{1b}[22m</local-command-stdout>").unwrap();
+        assert_eq!(t, "Compacted (ctrl+o to see full summary)\nPreCompact done");
+    }
+
     #[test]
     fn user_image_from_records() {
         let img = |d: Option<(&str, Vec<u8>)>| d.map(|(m, b)| format!("{m}:{}", String::from_utf8_lossy(&b)));
@@ -1050,6 +1066,21 @@ mod tests {
         let texts: Vec<String> = t.items(0, t.len()).iter().map(|i| serde_json::to_string(i).unwrap()).collect();
         assert_eq!(texts.len(), 3);
         assert!(texts[2].contains("改过的问题") && !texts.iter().any(|s| s.contains("被丢弃")));
+    }
+
+    #[test]
+    fn rewind_point_is_the_parent_of_a_prompt() {
+        let mut t = Transcript::new("/nonexistent".into());
+        let mut s = user("u1", None, json!("第一问"));
+        s += &assistant("a1", "u1", "m1", json!({"type":"text","text":"答一"}));
+        s += &user("u2", Some("a1"), json!("第二问"));
+        s += &line(json!({"type":"attachment","uuid":"q1","parentUuid":"u2","attachment":{"type":"queued_command","prompt":"插一句","commandMode":"prompt"}}));
+        t.feed(s.as_bytes());
+        assert_eq!(t.rewind_point("u1:0"), Some(None), "第一句话：开一段新对话");
+        assert_eq!(t.rewind_point("u2:0"), Some(Some("a1".into())));
+        assert_eq!(t.rewind_point("a:m1"), None, "回复不能改");
+        assert_eq!(t.rewind_point("q1:0"), None, "运行中插进去的不能改");
+        assert_eq!(t.rewind_point("nope:0"), None);
     }
 
     #[test]

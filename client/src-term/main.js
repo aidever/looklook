@@ -8,6 +8,20 @@
 // 4. 去掉了 ZMODEM（tmux 吞掉它的控制字节，ttyd 一直没开）与 Canvas 绘制（xterm.js 6 已移除）。
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+
+/** 外面页面里 iframe 的大小和自己窗口的大小对得上（同源才看得到；看不到就当对得上） */
+function frameMatches() {
+  let f = null;
+  try {
+    f = window.frameElement;
+  } catch {
+    return true;
+  }
+  if (!f) return true;
+  const r = f.getBoundingClientRect();
+  if (!r.width || !r.height) return false;
+  return Math.abs(r.width - window.innerWidth) < 4 && Math.abs(r.height - window.innerHeight) < 4;
+}
 import { ProgressAddon } from '@xterm/addon-progress';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { WebglAddon } from '@xterm/addon-webgl';
@@ -107,7 +121,32 @@ class Xterm {
   fit() {
     const el = this.parent;
     if (!el || el.clientWidth < 40 || el.clientHeight < 20) return;
-    this.fitAddon.fit();
+    const want = this.fitAddon.proposeDimensions?.();
+    const term = this.terminal;
+    if (!want || !term || (want.cols === term.cols && want.rows === term.rows)) return this.fitAddon.fit();
+    // 尺寸要变：等布局稳定再改。macOS App（WKWebView）里藏起来（display:none）的 iframe 重新显示时，
+    // 头一两帧里面的窗口还是默认的 300×150，这时改了会把一个很小的尺寸报给 tmux，程序（Codex 等）按小窗口整屏重画，
+    // 紧接着又撑回全屏——看起来就是“先显示一个很小的终端，马上又变回来”。连着两帧量到一样的、
+    // 并且和外面页面里 iframe 的实际大小对得上，才改。
+    this.fitWant = want;
+    if (this.fitRaf) return;
+    let tries = 0;
+    const check = () => {
+      this.fitRaf = 0;
+      if (!this.parent || this.parent.clientWidth < 40 || this.parent.clientHeight < 20) return;
+      const now = this.fitAddon.proposeDimensions?.();
+      if (!now) return;
+      const same = this.fitWant && now.cols === this.fitWant.cols && now.rows === this.fitWant.rows;
+      this.fitWant = now;
+      tries += 1;
+      if ((!same || !frameMatches()) && tries < 12) {
+        this.fitRaf = requestAnimationFrame(check);
+        return;
+      }
+      this.fitWant = null;
+      this.fitAddon.fit();
+    };
+    this.fitRaf = requestAnimationFrame(check);
   }
 
   open(parent) {

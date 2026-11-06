@@ -13,6 +13,7 @@ import { useRouter } from '../shared/router.jsx';
 import { formatTime } from '../shared/time.js';
 import { Button, Card, CopyButton, ErrorNote, Field, FoldNote, Modal, Note, PasswordInput, Skeleton, Spinner, useAction, useConfirm, useLoad, useToast } from '../shared/ui.jsx';
 import { Disclaimer, ProviderLogo } from './ModelProviders.jsx';
+import Select from '../shared/Select.jsx';
 
 const CUSTOM = 'custom';
 // 本机的 Ollama（docs/PLAN_2026-10-27.md §4）：检测到才出现，一键填好地址和 Key，模型从已下载的里选
@@ -430,13 +431,13 @@ function ApiForm({ agent, initial, accepted, onClose, onSaved }) {
         )}
         {ollama && local.models.length > 0 && (
           <Field label={t('cprof.ollama_model')} hint={t('cprof.ollama_model_hint')}>
-            <select value={localModel || local.models[0]} onChange={(e) => setLocalModel(e.target.value)}>
+            <Select value={localModel || local.models[0]} onChange={(e) => setLocalModel(e.target.value)}>
               {local.models.map((m) => (
                 <option key={m} value={m}>
                   {m}
                 </option>
               ))}
-            </select>
+            </Select>
           </Field>
         )}
         {!ollama && (

@@ -182,6 +182,24 @@ pub async fn input(State(app): State<App>, Path(id): Path<String>, Json(req): Js
 }
 
 #[derive(Deserialize)]
+pub struct EditReq {
+    /// 要改的那条用户消息的 key
+    key: String,
+    text: String,
+    /// 原来那条带的图片一起再发
+    #[serde(default)]
+    keep_images: bool,
+}
+
+/// 编辑重发：丢掉这条和之后的对话，发出改过的（见 `Chat::edit`）
+pub async fn edit(State(app): State<App>, Path(id): Path<String>, Json(req): Json<EditReq>) -> R<Json<Value>> {
+    if req.text.len() > 200_000 || req.key.len() > 200 {
+        return Err(LocalError::invalid("text", "too_long"));
+    }
+    Ok(Json(app.chat.edit(&id, &req.key, &req.text, req.keep_images).await?))
+}
+
+#[derive(Deserialize)]
 pub struct LaterTake {
     n: usize,
 }
@@ -415,6 +433,9 @@ pub struct DialogReq {
     /// 选的那一项的文字（标题对不上时按它核对）
     #[serde(default)]
     label: String,
+    /// 选的是 AskUserQuestion 的“Type something.”（自己填）时填的内容
+    #[serde(default)]
+    text: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -432,7 +453,7 @@ pub async fn seen(State(app): State<App>, Path(id): Path<String>, Json(req): Jso
 /// TUI 上的选择框：选一项或取消
 pub async fn dialog(State(app): State<App>, Path(id): Path<String>, Json(req): Json<DialogReq>) -> R<StatusCode> {
     match req.index {
-        Some(i) => app.chat.dialog_choose(&id, &req.title, &req.label, i).await?,
+        Some(i) => app.chat.dialog_choose(&id, &req.title, &req.label, i, req.text.as_deref()).await?,
         None => app.chat.dialog_cancel(&id).await?,
     }
     Ok(StatusCode::NO_CONTENT)

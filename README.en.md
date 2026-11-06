@@ -8,13 +8,13 @@
 
 Close the tab and the work keeps going. No VPN, no port forwarding, no phone app.
 
-[![GitHub stars](https://img.shields.io/github/stars/imythu/looklook?style=flat&logo=github&color=6366f1)](https://github.com/imythu/looklook/stargazers)
-[![Release](https://img.shields.io/github/v/release/imythu/looklook?label=release&color=0ea5e9)](https://github.com/imythu/looklook/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/imythu/looklook/total?color=10b981)](https://github.com/imythu/looklook/releases)
+[![GitHub stars](https://img.shields.io/github/stars/aidever/looklook?style=flat&logo=github&color=6366f1)](https://github.com/aidever/looklook/stargazers)
+[![Release](https://img.shields.io/github/v/release/aidever/looklook?label=release&color=0ea5e9)](https://github.com/aidever/looklook/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/aidever/looklook/total?color=10b981)](https://github.com/aidever/looklook/releases)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
 [![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](#platforms)
 
-[Website](https://looklook.dev) · [Download](https://looklook.dev/download) · [Docs](https://looklook.dev/docs) · [Roadmap](https://looklook.dev/roadmap) · [Releases](https://github.com/imythu/looklook/releases)
+[Website](https://looklook.dev) · [Download](https://looklook.dev/download) · [Docs](https://looklook.dev/docs) · [Roadmap](https://looklook.dev/roadmap) · [Releases](https://github.com/aidever/looklook/releases)
 
 [简体中文](README.md) · **English**
 
@@ -132,13 +132,13 @@ This repository is the **desktop app / client** (`client/`) and the **client ↔
 
 ## Roadmap
 
-Next up: end-to-end encryption for local pages, signed updates, more notification channels (Web Push, Slack, Telegram, email…), start tasks and review diffs from your phone, shareable previews, and more relay regions. See the [full roadmap](https://looklook.dev/roadmap). Feature requests and 👍 votes in [Issues](https://github.com/imythu/looklook/issues) shape the order.
+Next up: end-to-end encryption for local pages, signed updates, more notification channels (Web Push, Slack, Telegram, email…), start tasks and review diffs from your phone, shareable previews, and more relay regions. See the [full roadmap](https://looklook.dev/roadmap). Feature requests and 👍 votes in [Issues](https://github.com/aidever/looklook/issues) shape the order.
 
 ## Support the project
 
-If Looklook saves you a trip back to your desk, **[give it a ⭐ star](https://github.com/imythu/looklook/stargazers)**. It's the main way other developers find it. Telling a friend who runs agents all day helps too.
+If Looklook saves you a trip back to your desk, **[give it a ⭐ star](https://github.com/aidever/looklook/stargazers)**. It's the main way other developers find it. Telling a friend who runs agents all day helps too.
 
-[![Star History Chart](https://api.star-history.com/svg?repos=imythu/looklook&type=Date)](https://star-history.com/#imythu/looklook&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=aidever/looklook&type=Date)](https://star-history.com/#aidever/looklook&Date)
 
 ## Build
 

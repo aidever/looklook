@@ -43,6 +43,13 @@ const ZH = {
   sleepEnd: ['我醒啦', '睡饱了！', '伸个懒腰~'],
   wake: ['别吵我……', '唔…再睡五分钟', '谁呀…'],
   levelUp: ['和你更熟了！Lv.{level}', '好感升级 Lv.{level}！', '我们是 Lv.{level} 的好朋友啦'],
+  idleChat: ['啦啦啦~', '好无聊呀', '发会儿呆', '今天天气怎么样？', '到处逛逛~', '嗯哼哼~', '有什么好玩的吗', '我在巡逻！'],
+  roam: ['出去溜达一圈~', '那边是什么？', '去那边看看', '冲呀~'],
+  peerHello: ['咦，你也在呀！', '嗨~ 是另一个我！', '哟，好巧', '你好呀~'],
+  peerChat: ['今天你那边忙吗？', '我们一起陪主人吧', '嘘，主人在专心呢', '你那边的代码写得怎么样？', '击个掌！'],
+  notifyDone: ['「{name}」做完啦，快去看看', '{name} 好了！', '报告：「{name}」完成~'],
+  notifyWait: ['「{name}」在等你确认哦', '{name} 需要你点个头', '「{name}」那边卡住了，等你回话'],
+  notifyError: ['「{name}」出错了…', '{name} 出问题了，去看看吧'],
 };
 
 const EN = {
@@ -86,6 +93,13 @@ const EN = {
   sleepEnd: ['I’m awake', 'Well rested!', 'Big stretch~'],
   wake: ['Let me sleep……', 'Five more minutes…', 'Who’s there…'],
   levelUp: ['We’re closer now! Lv.{level}', 'Bond up: Lv.{level}!', 'Lv.{level} besties'],
+  idleChat: ['La la la~', 'So bored…', 'Just spacing out', 'Nice weather?', 'Wandering around~', 'Hmm hmm~', 'Anything fun?', 'On patrol!'],
+  roam: ['Going for a stroll~', 'What’s over there?', 'Let me check that side', 'Charge~'],
+  peerHello: ['Oh, you’re here too!', 'Hi~ it’s another me!', 'Hey, fancy that', 'Hello there~'],
+  peerChat: ['Busy on your side?', 'Let’s keep our human company', 'Shh, they’re focused', 'How’s the code over there?', 'High five!'],
+  notifyDone: ['“{name}” is done — take a look', '{name} finished!', 'Report: “{name}” complete~'],
+  notifyWait: ['“{name}” needs your OK', '{name} is waiting for you', '“{name}” is stuck waiting on you'],
+  notifyError: ['“{name}” hit an error…', '{name} ran into trouble'],
 };
 
 export const BUILTIN = { 'zh-CN': ZH, 'en-US': EN };

@@ -300,26 +300,39 @@ JSON（允许 `//` 注释和尾逗号，按 JSONC 解析）。下面每个字段
 ### 6.2.1 好感度、台词、桌面宠物的接口
 
 - `POST /api/pets/{source}/{id}/bond {add: {xp, clicks, pets, turns, tests, fixes, commits, errors}, day: "YYYY-MM-DD"}` → 累计的好感；`day`（页面的本地日期）换了一天时 `days + 1`、返回 `newDay: true`（页面打招呼）。
-- `GET /api/pets/{source}/{id}/lines` → 生成的台词 `{ "zh-CN": { 键: [句子] }, at, via }`；`POST … {lang, via: auto|claude|codex|api}` 生成（`src/pet_lines.rs`：
-  OpenAI 兼容接口，或本机 `claude -p --model haiku`、`codex exec`，在空的临时目录里跑，3 分钟超时）；`DELETE …` 删掉。
-- `GET /api/desktop/pet` → `{running, focus}`；`PUT /api/desktop/pet {hit, grab, focus}`（只认本机）。见 §6.5。
+- `GET /api/pets/{source}/{id}/lines` → 生成的台词 `{ "zh-CN": { 键: [句子] }, at, via, job }`；`POST … {lang, via: claude|codex|api, model, effort, style}` 在后台生成，马上返回
+  `job {state: running|done|failed, via, model, at, error}`，做完版本号 + 1（下面的长轮询），各处马上换上（`src/pet_lines.rs`）：
+  - `claude -p [--model 选的（默认 haiku）] [--effort]`、`codex exec [-m] [-c model_reasoning_effort=…]`，在空的临时目录里跑，5 分钟超时；
+    PATH 按那台电脑的登录 shell 补齐（`codex_app::launch_path`，不然 npm 装的 codex 找不到 node）；
+  - 自配接口：`settings.pet.api {url, key, model, protocol: responses|chat|anthropic, effort}`；
+  - `style`：风格提示（预设：傲娇、元气、温柔、毒舌、中二、经典、猫系、管家，或自己写），拼进生成提示词。
+- `GET /api/pets/gen-models?via=claude|codex` → `{installed, options: [{value, label, description, efforts}]}`：那台电脑上的工具自己列的模型（Codex 是 app-server `model/list`）；没装时 `installed: false`。
+- `GET /api/pets/current` → `{pet, size, lines, chatter, desktop, notify, gen, ver}`（全局一只，不再按对话类型分）；
+  `GET /api/pets/version?since=` 长轮询（最多 25 秒）：设置、装 / 删、生成了台词都 + 1，页面（含桌面宠物窗口、远程打开的）发 `ll-pets-changed` 重新取。
+- `GET /api/desktop/pet?since=` 长轮询 → `{running, focus, owner, entry, screens, peer, chat, note, open, pos, seq, here}`；
+  `PUT /api/desktop/pet {hit, grab, focus, exit, peer, chat, note, open}`（只认本机）。见 §6.5。
 
 ### 6.3 设置
 
-存在 `Settings`（`src/settings.rs`）里：
+存在 `Settings`（`src/settings.rs`）里。宠物是全局的一只（2026-11-05 起；以前的 `byAgent` 读的时候并进 `default`）：
 
 ```jsonc
 "pet": {
   "enabled": true,
-  "byAgent": { "claude": "local:claude-girl", "codex": "local:robot", "dsh": null },
-  "default": null,            // 上面没配的对话类型用哪只
+  "default": "local:claude-girl", // 用哪只
   "size": 1,                  // 缩放，1 = 桌面 130 px 高、手机 96 px 高
   "lines": true,              // 显示气泡
-  "chatter": true,            // 碎碎念（§3.6）
+  "chatter": true,            // 碎碎念、自己走动做表情（§3.6）
   "desktop": true,            // 桌面应用里宠物住在桌面上（§6.5）
-  "api": { "url": "https://api.deepseek.com/v1", "model": "deepseek-chat", "key": "…" }   // 可选：生成台词用；页面只看到 keySet
+  "notify": true,             // 会话提醒由宠物来说（下面）
+  "gen": { "via": "claude", "model": "", "effort": "", "style": "tsundere" },   // 上次生成台词用的
+  "api": { "url": "https://api.deepseek.com/v1", "model": "deepseek-chat", "protocol": "chat", "effort": "", "key": "…" }   // 可选；页面只看到 keySet
 }
 ```
+
+宠物来报信（`notify`）：别的会话做完 / 出错 / 等你处理时（`shared/inapp.jsx` 的提醒），页面里有宠物就由它说一句（`notifyDone` / `notifyError` /
+`notifyWait`，`{name}` 是会话名），气泡能点、点了打开那个会话，不再弹右上角的卡片；桌面应用开着桌面宠物时主窗口把提醒 `PUT {note}` 给桌面宠物说，
+点气泡 `PUT {open}`，桌面那边把主窗口叫出来、主窗口打开那个会话。没有宠物时照旧弹卡片。
 
 浏览器各自记“这只藏起来了”（localStorage），和以前的小胖鱼一样。
 
@@ -344,8 +357,15 @@ JSON（允许 `//` 注释和尾逗号，按 JSONC 解析）。下面每个字段
 
 ### 6.5 桌面宠物（桌面应用）
 
-Windows / macOS 桌面应用（`src/desktop.rs`）开一个铺满主屏工作区的透明、无边框、置顶、不进任务栏的窗口（标签 `pet`），
-加载 `/pet-desk`（`src-ui/pages/DeskPet.jsx`，只放宠物）。应用最小化、主窗口关掉（隐藏）时它都在，能拖到屏幕任何地方。
+Windows / macOS 桌面应用（`src/desktop.rs`）每块屏幕开一个铺满工作区的透明、无边框、置顶、不进任务栏的窗口（标签 `pet-0`、`pet-1`…，主屏在前），
+加载 `/pet-desk?screen=i`（`src-ui/pages/DeskPet.jsx`，只放宠物）。应用最小化、主窗口关掉（隐藏）时它都在，能拖到屏幕任何地方。
+
+- 多屏：各块屏幕的位置、大小、缩放记在 `desk_pet`（物理像素）。宠物只在 `owner` 那块的窗口里画；走出窗口边（那边挨着别的屏幕时边界放开）
+  或拖出去松手时 `PUT {exit}`，`desk_pet::handoff` 换算到落在哪块屏幕、从哪边进来（`entry`），那块的窗口接着画、往里走；那边没屏幕就贴边放回来往回走。
+- 更主动：闲着时自己走来走去（连着往一个方向走的多）、隔一会儿做个表情（问号、花、音符…），偶尔说一句（`idleChat`、`roam`）。
+- 和网页里的宠物互动：同一台电脑上浏览器里开着带宠物的页面、标签和窗口都在前台时，网页每 3 秒按窗口位置估一下自己在屏幕上的位置报 `PUT {peer}`；
+  两只转向对方、打招呼（`peerHello`），一方开口另一方 1–2 秒后接一句（`peerChat`，`chat.reply` 的只回个表情）。
+- 贴边：人物框按浏览器实际播的格式（苹果上 mov）量出来，空白边不算，记在 localStorage；桌面宠物的边距是 0，能贴到屏幕边。
 
 - 鼠标穿透：页面每次宠物动了把人物的框报给 `PUT /api/desktop/pet`（`src/desk_pet.rs` 记着），桌面这边每 40 ms 看一次光标在不在框里，
   在就让窗口接鼠标，不在就 `set_ignore_cursor_events(true)` 穿透到下面的窗口；拖着时（`grab`）一直接。
@@ -358,6 +378,7 @@ Windows / macOS 桌面应用（`src/desktop.rs`）开一个铺满主屏工作区
 1. 第一期：格式、导入、视频 + 精灵图播放、状态联动、点击、拖拽甩抛、闲时随机 / 走动 / 睡觉、气泡、`looklook pet check`。
 2. 第二期（2026-11-04）：看得懂在干什么、碎碎念（按运行数据套台词，不花 token；按 `persona` 一次性生成一批台词）、
    摸头 / 连点 / 看人、整页随意拖放、好感度、桌面宠物窗口。
+   2026-11-05：全局一只、改了马上生效、台词后台生成（可选工具、模型、思考强度、风格、自配接口三种协议）、多屏、和网页宠物互动、宠物来报信。
 3. 第三期：做包的辅助（从立绘出提示词、批量抠像脚本）。
 
 ## 7. 许可

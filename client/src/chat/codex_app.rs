@@ -96,7 +96,7 @@ pub(super) async fn user_path(shell: &str) -> Option<String> {
 }
 
 /// 启动 app-server 时的 PATH：codex 所在的目录（node 常在它旁边）、用户 shell 的 PATH、客户端自己的 PATH
-pub(super) async fn launch_path(shell: &str, program: &Path) -> Option<std::ffi::OsString> {
+pub(crate) async fn launch_path(shell: &str, program: &Path) -> Option<std::ffi::OsString> {
     if cfg!(windows) {
         return None;
     }
@@ -179,6 +179,11 @@ fn kill_pid(pid: u32) {
 }
 
 impl AppServer {
+    /// 进程号（资源看板用；接回以前的进程时是记下来的那个）
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
+    }
+
     /// 接上 app-server：`run/codex-app.json` 记着的还在、配置也没变就接回去，否则另起一个（单独运行，不随客户端退出）。
     /// `env`：第三方服务商（环境变量和 `-c` 参数）。
     pub async fn start(run: &Path, program: PathBuf, shell: &str, env: Option<&crate::model::LaunchEnv>, signature: String, tx: mpsc::UnboundedSender<Incoming>) -> Result<Arc<Self>, LocalError> {

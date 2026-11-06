@@ -303,9 +303,81 @@ pub fn message_text(msg: &Value) -> String {
     let s = match msg["message_type"].as_str() {
         Some("text") => c["text"].as_str().unwrap_or_default().to_string(),
         Some("post") => post_text(&c),
+        // 卡片（机器人发的，常被合并转发过来）：标题和里面的文字
+        Some("interactive") => card_text(&c),
         _ => String::new(),
     };
     s.trim().to_string()
+}
+
+/// 卡片消息里的文字。开放接口取回的卡片是简化过的（`{title, elements: [[{tag, text}…]…]}`，和富文本差不多），
+/// 事件里也可能是完整的卡片 JSON（`header.title.content`、`elements` / `body.elements`）：都按“有 tag 的文字元素”收
+fn card_text(c: &Value) -> String {
+    fn walk(v: &Value, line: &mut String, lines: &mut Vec<String>) {
+        match v {
+            Value::Array(a) => {
+                for x in a {
+                    walk(x, line, lines);
+                }
+            }
+            Value::Object(o) => {
+                let tag = o.get("tag").and_then(Value::as_str).unwrap_or_default();
+                let s = ["text", "content"].iter().find_map(|k| o.get(*k).and_then(Value::as_str));
+                match (tag, s) {
+                    ("text" | "plain_text" | "lark_md" | "markdown" | "a" | "md", Some(s)) => line.push_str(s),
+                    ("at", _) => line.push_str(&format!("@{}", o.get("user_name").and_then(Value::as_str).unwrap_or_default())),
+                    _ => {
+                        for (k, x) in o {
+                            if k != "tag" && (x.is_object() || x.is_array()) {
+                                walk(x, line, lines);
+                            }
+                        }
+                    }
+                }
+                // 一个块（div、markdown、一行）一行
+                if matches!(tag, "div" | "markdown" | "md" | "note" | "column_set" | "hr") || !line.is_empty() && tag.is_empty() {
+                    if !line.trim().is_empty() {
+                        lines.push(std::mem::take(line));
+                    }
+                    line.clear();
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut lines = Vec::new();
+    let title = c["title"].as_str().or_else(|| c["header"]["title"]["content"].as_str()).filter(|t| !t.trim().is_empty());
+    if let Some(t) = title {
+        lines.push(t.to_string());
+    }
+    let els = if c["elements"].is_array() { &c["elements"] } else { &c["body"]["elements"] };
+    for el in els.as_array().into_iter().flatten() {
+        let mut line = String::new();
+        walk(el, &mut line, &mut lines);
+        if !line.trim().is_empty() {
+            lines.push(line);
+        }
+    }
+    lines.iter().map(|l| l.trim_end()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n")
+}
+
+/// 认不出文字的消息在聊天记录里写成什么（让 AI 知道那里有一条）
+fn placeholder(kind: &str, en: bool) -> Option<String> {
+    let (zh, e) = match kind {
+        "sticker" => ("[表情]", "[sticker]"),
+        "audio" => ("[语音]", "[voice message]"),
+        "share_chat" => ("[群名片]", "[group card]"),
+        "share_user" => ("[个人名片]", "[contact card]"),
+        "location" => ("[位置]", "[location]"),
+        "todo" => ("[任务]", "[task]"),
+        "vote" => ("[投票]", "[poll]"),
+        "hongbao" => ("[红包]", "[red packet]"),
+        "calendar" | "share_calendar_event" | "general_calendar" => ("[日程]", "[calendar event]"),
+        "video_chat" => ("[视频会议]", "[video meeting]"),
+        "system" => return None,
+        _ => ("[消息]", "[message]"),
+    };
+    Some(tr(en, zh, e))
 }
 
 fn content(msg: &Value) -> Value {
@@ -422,7 +494,20 @@ fn as_event_msg(m: &Value) -> Value {
 /// 名字要通讯录权限，不要：你自己写“我”，别人按出现的顺序写 A、B…（只有一个人时写“对方”）。
 /// `me`：绑定的人的 open_id；`chat`：转到的这个私聊（子消息带的群不是它时才当原来的群）
 fn forwarded_parts(id: &str, items: &[Value], me: &str, chat: &str, en: bool) -> (String, Vec<Resource>, Origin) {
-    let subs: Vec<&Value> = items.iter().filter(|m| m["upper_message_id"] == id).collect();
+    // 子消息；里面又套着合并转发的，把它的子消息摊开接在后面（最多套 3 层）
+    fn subs_of<'a>(items: &'a [Value], id: &str, depth: usize, out: &mut Vec<&'a Value>) {
+        for m in items.iter().filter(|m| m["upper_message_id"] == id) {
+            if m["msg_type"] == "merge_forward" && depth < 3 {
+                if let Some(sub) = m["message_id"].as_str() {
+                    subs_of(items, sub, depth + 1, out);
+                    continue;
+                }
+            }
+            out.push(m);
+        }
+    }
+    let mut subs: Vec<&Value> = Vec::new();
+    subs_of(items, id, 0, &mut subs);
     let who = |m: &Value| m["sender"]["id"].as_str().filter(|_| m["sender"]["sender_type"] == "user").unwrap_or_default().to_string();
     // 别人：按第一次出现的顺序，数一下各说了几条
     let mut others: Vec<(String, usize)> = Vec::new();
@@ -451,7 +536,11 @@ fn forwarded_parts(id: &str, items: &[Value], me: &str, chat: &str, en: bool) ->
     let mut hint = String::new();
     for m in &subs {
         let e = as_event_msg(m);
-        let t = message_text(&e);
+        let found = attachments(&e);
+        let mut t = message_text(&e);
+        if t.is_empty() && found.is_empty() {
+            t = placeholder(m["msg_type"].as_str().unwrap_or_default(), en).unwrap_or_default();
+        }
         if !t.is_empty() {
             let w = label(&who(m));
             if hint.is_empty() && who(m) != me {
@@ -460,7 +549,7 @@ fn forwarded_parts(id: &str, items: &[Value], me: &str, chat: &str, en: bool) ->
             let body = t.lines().map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n");
             lines.push(if w.is_empty() { body } else { format!("> **{w}**：\n{body}") });
         }
-        files.extend(attachments(&e));
+        files.extend(found);
     }
     let user = others.iter().max_by_key(|(_, n)| *n).map(|(w, _)| w.clone()).unwrap_or_default();
     let from = subs.iter().filter_map(|m| m["chat_id"].as_str()).find(|c| c.starts_with("oc_") && *c != chat).unwrap_or_default();
@@ -475,8 +564,19 @@ fn forwarded_parts(id: &str, items: &[Value], me: &str, chat: &str, en: bool) ->
 async fn quoted(app: &App, api: &Api, id: &str) -> Option<String> {
     match api.get_message(id).await {
         Ok(items) => {
-            let t = message_text(&as_event_msg(items.first()?));
-            (!t.is_empty()).then(|| t.chars().take(1000).collect())
+            let first = items.first()?;
+            // 机器人自己发的短回复（“暂时只支持……”之类）不当引用
+            if first["sender"]["sender_type"] == "app" && first["msg_type"] == "text" {
+                return None;
+            }
+            // 引用的是合并转发的聊天记录：把里面的话带上
+            let t = if first["msg_type"] == "merge_forward" {
+                let en = load_rules(&app.store).lang.starts_with("en");
+                forwarded_parts(first["message_id"].as_str().unwrap_or(id), &items, "", "", en).0
+            } else {
+                message_text(&as_event_msg(first))
+            };
+            (!t.is_empty()).then(|| t.chars().take(if first["msg_type"] == "merge_forward" { 6000 } else { 1000 }).collect())
         }
         Err(e) => {
             scope_hint(app, api, &e, "read").await;
@@ -776,12 +876,15 @@ async fn route(app: &App, api: &Api, chat: &str, id: &str, thread: &[String], te
     let found = if thread.is_empty() { None } else { find(app, thread, operator).await };
     let mut text = cmd.clone().unwrap_or(text);
     if !thread.is_empty() && found.is_none() {
-        if proj.is_some() {
-            let hint = tr(en, "这个话题的会话找不到了（可能已删除，或者那台电脑不在线）。在群里发一条新消息开新会话。", "Can't find this topic's session (deleted, or its computer is offline). Post a new message in the group to start one.");
-            reply(api, id, &hint).await;
-            return Ok(false);
+        // 话题里还没有会话（第一条没开起来，比如转发了认不出的消息），或者会话没了：
+        // 项目群里就在这个话题里开一个新的，话题的第一条（和回复的那条）当引用带上；别的地方当引用带上
+        let root = thread.last().cloned().unwrap_or_default();
+        if proj.is_some() && root != thread[0] {
+            if let Some(q) = quoted(app, api, &root).await {
+                let q = q.lines().map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n");
+                text = format!("{q}\n\n{text}");
+            }
         }
-        // 回复的不是哪个会话的消息：当引用带上
         if let Some(q) = quoted(app, api, &thread[0]).await {
             let q = q.lines().map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n");
             text = format!("{q}\n\n{text}");
@@ -2293,6 +2396,28 @@ fn status_line(b: &Value, en: bool) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn card_and_nested_forward_text() {
+        // 开放接口取回的卡片（简化格式）
+        let c = json!({ "title": "做完了：修登录页", "elements": [[{ "tag": "text", "text": "改了 2 个文件" }], [{ "tag": "a", "text": "打开", "href": "x" }]] });
+        assert_eq!(card_text(&c), "做完了：修登录页\n改了 2 个文件\n打开");
+        // 完整卡片 JSON
+        let c = json!({ "header": { "title": { "tag": "plain_text", "content": "等你处理" } }, "elements": [{ "tag": "div", "text": { "tag": "lark_md", "content": "**要执行** rm" } }, { "tag": "action", "actions": [{ "tag": "button", "text": { "tag": "plain_text", "content": "允许" } }] }] });
+        let t = card_text(&c);
+        assert!(t.starts_with("等你处理\n**要执行** rm"), "{t}");
+        // 合并转发里套着合并转发、卡片、表情
+        let card = json!({ "title": "卡片标题", "elements": [[{ "tag": "text", "text": "卡片正文" }]] }).to_string();
+        let items = vec![
+            json!({ "message_id": "om_f", "msg_type": "merge_forward", "body": { "content": "Merged and Forwarded Message" } }),
+            json!({ "message_id": "om_c", "upper_message_id": "om_f", "msg_type": "interactive", "body": { "content": card } }),
+            json!({ "message_id": "om_n", "upper_message_id": "om_f", "msg_type": "merge_forward", "body": { "content": "Merged and Forwarded Message" } }),
+            json!({ "message_id": "om_n1", "upper_message_id": "om_n", "msg_type": "text", "body": { "content": "{\"text\":\"里面那层\"}" } }),
+            json!({ "message_id": "om_s", "upper_message_id": "om_f", "msg_type": "sticker", "body": { "content": "{}" } }),
+        ];
+        let (t, _, _) = forwarded_parts("om_f", &items, "ou_me", "oc_dm", false);
+        assert!(t.contains("卡片正文") && t.contains("里面那层") && t.contains("[表情]"), "{t}");
+    }
+
     fn msg(kind: &str, content: Value) -> Value {
         json!({ "message_id": "om_1", "message_type": kind, "content": content.to_string() })
     }
@@ -2518,7 +2643,7 @@ mod tests {
         let mut s = crate::settings::Settings::load(&store);
         s.default_workdir = dir.clone();
         s.save(&store, account.clock.now_ms()).unwrap();
-        notify::save_feishu(&app, Some(&Feishu { app_id: "cli_test".into(), app_secret: "secret".into(), domain: "feishu".into(), open_id: Some("ou_me".into()), bound_at: Some(1), callback_ok: true })).unwrap();
+        notify::save_feishu(&app, Some(&Feishu { app_id: "cli_test".into(), app_secret: "secret".into(), domain: "feishu".into(), open_id: Some("ou_me".into()), bound_at: Some(1), callback_ok: true, home: String::new() })).unwrap();
         notify::save_rules(&app, &notify::Rules { agent: true, agent_groups: true, ..Default::default() }).unwrap();
         for _ in 0..150 {
             if fake.connected.load(std::sync::atomic::Ordering::SeqCst) {

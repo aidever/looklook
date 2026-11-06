@@ -2,24 +2,19 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Download, FolderOpen, Github, Heart, MessageCircle, Monitor, Play, RefreshCw, Trash2, Upload } from 'lucide-react';
-import { api, deviceApi, postFile } from '../shared/api.js';
-import { deviceName, useDevices } from '../shared/devices.jsx';
+import { api, postFile } from '../shared/api.js';
+import { deviceName } from '../shared/devices.jsx';
 import { errorText } from '../shared/i18n.js';
-import { PETS_CHANGED, inDesktopMain } from '../shared/ChatPet.jsx';
+import { PETS_CHANGED, inDesktopMain, usePetsLive } from '../shared/ChatPet.jsx';
 import { levelOf } from '../shared/pet/bond.js';
 import PetPlayer from '../shared/pet/PetPlayer.jsx';
 import { loadBlob, videoFormat } from '../shared/pet/media.js';
 import { textOf } from '../shared/pet/brain.js';
-import { Button, Card, CopyButton, ErrorNote, Field, Modal, Seg, useConfirm, useLoad, useToast } from '../shared/ui.jsx';
+import { Button, Card, CopyButton, ErrorNote, Field, Modal, Seg, Spinner, useConfirm, useLoad, useToast } from '../shared/ui.jsx';
 import { FolderPicker } from './Terminals.jsx';
+import Select from '../shared/Select.jsx';
 
-const AGENTS = [
-  ['claude', 'Claude Code'],
-  ['codex', 'Codex'],
-  ['dsh', 'DSH'],
-  ['opencode', 'OpenCode'],
-];
-const GUIDE_URL = 'https://github.com/imythu/looklook/blob/main/client/docs/PET_PACK_GUIDE.md';
+const GUIDE_URL = 'https://github.com/aidever/looklook/blob/main/client/docs/PET_PACK_GUIDE.md';
 const enc = encodeURIComponent;
 const fileUrlOf = (p) => (key) => `/pets/${enc(p.source)}/${enc(p.id)}/file/${key}`;
 const ghLink = (o) => `https://github.com/${o.github}${o.path || o.ref ? `/tree/${o.ref || 'HEAD'}/${o.path || ''}` : ''}`;
@@ -58,11 +53,21 @@ export default function PetSection() {
     setFresh((n) => n + 1);
     reloadSettings();
   };
+  // 别处改了（另一个标签页、后台导入 / 生成台词做完了）：跟着刷新
+  usePetsLive();
+  useEffect(() => {
+    const on = () => {
+      reloadList();
+      reloadSettings();
+    };
+    window.addEventListener(PETS_CHANGED, on);
+    return () => window.removeEventListener(PETS_CHANGED, on);
+  }, []);
   const onInstalled = (p) => {
     reload();
     changed();
-    // 第一只宠物：直接设成默认
-    if (p && s && !s.default && !Object.values(s.byAgent ?? {}).some(Boolean)) save({ ...s, default: p.key });
+    // 第一只宠物：直接用它
+    if (p && s && !s.default) save({ ...s, default: p.key });
   };
 
   return (
@@ -119,12 +124,13 @@ export default function PetSection() {
  */
 function FromDevices({ mine, onDone }) {
   const { t, i18n } = useTranslation();
-  const d = useDevices();
   const toast = useToast();
   const [open, setOpen] = useState(null);
   const [jobs, setJobs] = useState([]);
   const seen = useRef(new Set());
-  const others = d.multi ? d.items.filter((x) => x.id !== d.selected) : [];
+  // 自己问同一账户有哪些电脑：“只看本机”时界面上的电脑列表是空的，导入宠物照样要能用
+  const [devs] = useLoad(() => api.get('/pets/devices').catch(() => ({ items: [] })));
+  const others = devs?.items ?? [];
   const running = jobs.some((j) => j.state === 'running');
   // 第一次打开时看看有没有还在进行的（之前点过、离开了页面）；已经做完的不再提示
   useEffect(() => {
@@ -137,7 +143,7 @@ function FromDevices({ mine, onDone }) {
       },
       () => {},
     );
-  }, [others.length > 0, d.selected]);
+  }, [others.length > 0]);
   useEffect(() => {
     if (!running) return undefined;
     const poll = () =>
@@ -174,15 +180,18 @@ function FromDevices({ mine, onDone }) {
     <Card title={t('pet.from_devices')}>
       <p className="muted small">{t('pet.from_devices_hint')}</p>
       <div className="pet-devs">
-        {others.map((dev) => (
-          <div key={dev.id} className="pet-dev">
-            <Button variant="secondary" icon={Monitor} disabled={!dev.online} aria-expanded={open === dev.id} onClick={() => setOpen(open === dev.id ? null : dev.id)}>
-              {deviceName(t, dev)}
-              {!dev.online && <span className="muted small"> · {t('pet.dev_offline')}</span>}
-            </Button>
-            {open === dev.id && dev.online && <DevicePets dev={dev} mine={mine} jobs={jobs} onImport={(p) => start(dev, p)} />}
-          </div>
-        ))}
+        {others.map((dev) => {
+          const online = dev.online !== false;
+          return (
+            <div key={dev.id} className="pet-dev">
+              <Button variant="secondary" icon={Monitor} disabled={!online} aria-expanded={open === dev.id} onClick={() => setOpen(open === dev.id ? null : dev.id)}>
+                {deviceName(t, dev)}
+                {!online && <span className="muted small"> · {t('pet.dev_offline')}</span>}
+              </Button>
+              {open === dev.id && online && <DevicePets dev={dev} mine={mine} jobs={jobs} onImport={(p) => start(dev, p)} />}
+            </div>
+          );
+        })}
       </div>
     </Card>
   );
@@ -190,7 +199,7 @@ function FromDevices({ mine, onDone }) {
 
 function DevicePets({ dev, mine, jobs, onImport }) {
   const { t, i18n } = useTranslation();
-  const [list, err, reload] = useLoad(() => deviceApi(dev.id).get('/pets'), [dev.id]);
+  const [list, err, reload] = useLoad(() => api.get(`/pets/devices/${enc(dev.id)}`), [dev.id]);
   if (err) {
     return (
       <div className="pet-dev-list">
@@ -232,135 +241,42 @@ function DevicePets({ dev, mine, jobs, onImport }) {
 function SettingsCard({ s, usable, save, error }) {
   const { t, i18n } = useTranslation();
   if (!s) return <Card title={t('pet.title')}>{error ? <ErrorNote error={error} /> : <p className="muted">{t('common.loading')}</p>}</Card>;
-  const opts = usable.map((p) => [p.key, `${textOf(p.name, i18n.language) || p.id} · ${t(`pet.src_${p.source}`)}`]);
-  const byAgent = s.byAgent ?? {};
-  // 选项值：'' = 跟默认，'-' = 不显示，其余是宠物
-  const agentValue = (a) => (a in byAgent ? byAgent[a] ?? '-' : '');
-  const setAgent = (a, v) => {
-    const next = { ...byAgent };
-    if (v === '') delete next[a];
-    else next[a] = v === '-' ? null : v;
-    save({ ...s, byAgent: next });
-  };
+  const opts = usable.map((p) => [p.key, textOf(p.name, i18n.language) || p.id]);
+  const onOff = [
+    [true, t('pet.on')],
+    [false, t('pet.off')],
+  ];
+  const sw = (k, label, hint, def = true) => (
+    <Field label={label} hint={hint}>
+      <Seg value={def ? s[k] !== false : Boolean(s[k])} label={label} onChange={(v) => save({ ...s, [k]: v })} options={onOff} />
+    </Field>
+  );
   return (
     <Card title={t('pet.title')}>
       <p className="muted small">{t('pet.intro')}</p>
-      <Field label={t('pet.enabled')}>
-        <Seg
-          value={Boolean(s.enabled)}
-          label={t('pet.enabled')}
-          onChange={(v) => save({ ...s, enabled: v })}
-          options={[
-            [true, t('pet.on')],
-            [false, t('pet.off')],
-          ]}
-        />
-      </Field>
+      {sw('enabled', t('pet.enabled'), undefined, false)}
       {s.enabled && (
         <>
-          <Field label={t('pet.default')} hint={!usable.length ? t('pet.default_none') : undefined}>
-            <select value={s.default ?? '-'} onChange={(e) => save({ ...s, default: e.target.value === '-' ? null : e.target.value })}>
-              <option value="-">{t('pet.hidden')}</option>
+          <Field label={t('pet.which')} hint={!usable.length ? t('pet.default_none') : t('pet.which_hint')}>
+            <Select value={s.default ?? ''} aria-label={t('pet.which')} placeholder={t('pet.which_none')} onChange={(e) => save({ ...s, default: e.target.value || null })}>
               {opts.map(([k, n]) => (
                 <option key={k} value={k}>
                   {n}
                 </option>
               ))}
-            </select>
+            </Select>
           </Field>
-          <div className="pet-agents">
-            {AGENTS.map(([a, n]) => (
-              <Field key={a} label={n}>
-                <select value={agentValue(a)} onChange={(e) => setAgent(a, e.target.value)}>
-                  <option value="">{t('pet.follow_default')}</option>
-                  <option value="-">{t('pet.hidden')}</option>
-                  {opts.map(([k, name]) => (
-                    <option key={k} value={k}>
-                      {name}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-            ))}
-          </div>
           <Field label={t('pet.size')}>
             <Seg value={Number(s.size)} label={t('pet.size')} onChange={(v) => save({ ...s, size: v })} options={[0.75, 1, 1.25, 1.5].map((n) => [n, `${Math.round(n * 100)}%`])} />
           </Field>
-          <Field label={t('pet.lines')}>
-            <Seg
-              value={s.lines !== false}
-              label={t('pet.lines')}
-              onChange={(v) => save({ ...s, lines: v })}
-              options={[
-                [true, t('pet.on')],
-                [false, t('pet.off')],
-              ]}
-            />
-          </Field>
-          {s.lines !== false && (
-            <Field label={t('pet.chatter')} hint={t('pet.chatter_hint')}>
-              <Seg
-                value={s.chatter !== false}
-                label={t('pet.chatter')}
-                onChange={(v) => save({ ...s, chatter: v })}
-                options={[
-                  [true, t('pet.on')],
-                  [false, t('pet.off')],
-                ]}
-              />
-            </Field>
-          )}
-          {inDesktopMain() && (
-            <Field label={t('pet.desktop')} hint={t('pet.desktop_hint')}>
-              <Seg
-                value={s.desktop !== false}
-                label={t('pet.desktop')}
-                onChange={(v) => save({ ...s, desktop: v })}
-                options={[
-                  [true, t('pet.on')],
-                  [false, t('pet.off')],
-                ]}
-              />
-            </Field>
-          )}
-          <GenApiFields s={s} save={save} />
+          {sw('lines', t('pet.lines'))}
+          {s.lines !== false && sw('chatter', t('pet.chatter'), t('pet.chatter_hint'))}
+          {s.lines !== false && sw('notify', t('pet.notify'), t('pet.notify_hint'))}
+          {inDesktopMain() && sw('desktop', t('pet.desktop'), t('pet.desktop_hint'))}
         </>
       )}
       <ErrorNote error={error} />
     </Card>
-  );
-}
-
-/** 生成人设台词用的接口（OpenAI 兼容）：不填就用本机的 Claude Code / Codex */
-function GenApiFields({ s, save }) {
-  const { t } = useTranslation();
-  const a = s.api ?? {};
-  const [url, setUrl] = useState(a.url ?? '');
-  const [model, setModel] = useState(a.model ?? '');
-  const [key, setKey] = useState('');
-  const dirty = url !== (a.url ?? '') || model !== (a.model ?? '') || key !== '';
-  const apply = () => {
-    const blank = !url.trim() && !model.trim();
-    save({ ...s, api: blank ? null : { url: url.trim(), model: model.trim(), key } });
-    setKey('');
-  };
-  return (
-    <details className="pet-gen-api">
-      <summary className="small">{t('pet.gen_api')}</summary>
-      <p className="muted small">{t('pet.gen_api_hint')}</p>
-      <Field label={t('pet.gen_api_url')}>
-        <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://api.deepseek.com/v1" spellCheck={false} />
-      </Field>
-      <Field label={t('pet.gen_api_model')}>
-        <input value={model} onChange={(e) => setModel(e.target.value)} placeholder="deepseek-chat" spellCheck={false} />
-      </Field>
-      <Field label={t('pet.gen_api_key')} hint={a.keySet ? t('pet.gen_api_key_set') : undefined}>
-        <input type="password" value={key} onChange={(e) => setKey(e.target.value)} autoComplete="off" placeholder={a.keySet ? '••••••••' : ''} />
-      </Field>
-      <Button variant="secondary" disabled={!dirty} onClick={apply}>
-        {t('action.save')}
-      </Button>
-    </details>
   );
 }
 
@@ -389,29 +305,86 @@ function BondLine({ p }) {
 
 const count = (m) => (m ? Object.values(m).reduce((a, l) => a + l.length, 0) : 0);
 
-/** 按人设生成一批台词（中英两套）：花一次 token，之后宠物说话只是挑一句填数据 */
+/** 风格预设（填进“风格”框，可以再改） */
+const STYLES = ['tsundere', 'genki', 'gentle', 'snarky', 'chuuni', 'classic', 'cat', 'butler'];
+const API_EFFORTS = ['', 'minimal', 'low', 'medium', 'high', 'xhigh'];
+
+/** 生成台词的进度（卡片上、弹窗里共用）：`job` 是后台任务 `{ state, via, model, at, error }` */
+function useGenLines(p) {
+  const url = `/pets/${enc(p.source)}/${enc(p.id)}/lines`;
+  const [data, err, reload] = useLoad(() => api.get(url), [p.key]);
+  const running = data?.job?.state === 'running';
+  // 后台在生成：隔一会儿问一次（做完时版本号也会变，usePetsLive 会让整页刷新）
+  useEffect(() => {
+    if (!running) return undefined;
+    const id = setInterval(reload, 2000);
+    return () => clearInterval(id);
+  }, [running]);
+  useEffect(() => {
+    window.addEventListener(PETS_CHANGED, reload);
+    return () => window.removeEventListener(PETS_CHANGED, reload);
+  }, []);
+  return { url, data, err, reload, running };
+}
+
+/** 卡片上的生成状态：在生成时显示，做完 / 失败时提示一次 */
+function GenStatus({ p, name }) {
+  const { t } = useTranslation();
+  const toast = useToast();
+  const { data, running } = useGenLines(p);
+  const was = useRef(null);
+  useEffect(() => {
+    const st = data?.job?.state;
+    if (was.current === 'running' && st === 'done') toast?.(t('pet.gen_done_name', { name }));
+    if (was.current === 'running' && st === 'failed') toast?.(errorText(t, data.job.error ?? {}), 'error');
+    if (st) was.current = st;
+  }, [data?.job?.state]);
+  if (!running) return null;
+  return (
+    <p className="small pet-gen-status">
+      <Spinner size={12} /> {t('pet.gen_running')}
+    </p>
+  );
+}
+
+/** 按人设生成一批台词（中英两套）：花一次 token，之后宠物说话只是挑一句填数据。在后台生成，关掉窗口也照样做完、马上生效 */
 function LinesModal({ p, name, onClose }) {
   const { t, i18n } = useTranslation();
   const toast = useToast();
-  const url = `/pets/${enc(p.source)}/${enc(p.id)}/lines`;
-  const [data, err, reload] = useLoad(() => api.get(url), [p.key]);
-  const [via, setVia] = useState('auto');
-  const [busy, setBusy] = useState(false);
+  const { url, data, err, reload, running } = useGenLines(p);
+  const [settings] = useLoad(() => api.get('/pets/settings'));
+  const [g, setG] = useState(null);
+  const [a, setA] = useState(null);
+  const [key, setKey] = useState('');
   const [genErr, setGenErr] = useState(null);
+  const [starting, setStarting] = useState(false);
+  useEffect(() => {
+    if (!settings || g) return;
+    const x = settings.gen ?? {};
+    setG({ via: x.via || 'auto', model: x.model ?? '', effort: x.effort ?? '', style: x.style ?? '' });
+    const y = settings.api ?? {};
+    setA({ url: y.url ?? '', model: y.model ?? '', protocol: y.protocol || 'responses', effort: y.effort ?? '', keySet: Boolean(y.keySet) });
+  }, [settings]);
   const lang = i18n.language?.startsWith('en') ? 'en-US' : 'zh-CN';
   const mine = data?.[lang];
+  const job = data?.job;
+  const set = (patch) => setG((x) => ({ ...x, ...patch }));
   const run = async () => {
-    setBusy(true);
+    setStarting(true);
     setGenErr(null);
     try {
-      await api.post(url, { via });
+      // 自配接口：先存起来（密钥不填就是不改）
+      if (g.via === 'api') {
+        const blank = !a.url.trim() && !a.model.trim();
+        await api.put('/pets/settings', { ...settings, api: blank ? null : { url: a.url.trim(), model: a.model.trim(), protocol: a.protocol, effort: a.effort, key } });
+        setKey('');
+      }
+      await api.post(url, { via: g.via, model: g.model, effort: g.effort, style: g.style });
       reload();
-      changed();
-      toast?.(t('pet.gen_done'));
     } catch (e) {
       setGenErr(e);
     } finally {
-      setBusy(false);
+      setStarting(false);
     }
   };
   const clear = async () => {
@@ -419,33 +392,57 @@ function LinesModal({ p, name, onClose }) {
     reload();
     changed();
   };
+  const was = useRef(null);
+  useEffect(() => {
+    if (was.current === 'running' && job?.state === 'done') toast?.(t('pet.gen_done'));
+    if (job?.state) was.current = job.state;
+  }, [job?.state]);
   return (
     <Modal open onClose={onClose} title={t('pet.gen_title', { name })} wide>
       <p className="muted small">{t('pet.gen_intro')}</p>
-      <Field label={t('pet.gen_via')}>
-        <Seg
-          value={via}
-          label={t('pet.gen_via')}
-          onChange={setVia}
-          options={[
-            ['auto', t('pet.gen_via_auto')],
-            ['claude', 'Claude Code'],
-            ['codex', 'Codex'],
-            ['api', t('pet.gen_via_api')],
-          ]}
-        />
-      </Field>
+      {!g ? (
+        <p className="muted">{t('common.loading')}</p>
+      ) : (
+        <>
+          <Field label={t('pet.gen_via')}>
+            <Seg
+              value={g.via}
+              label={t('pet.gen_via')}
+              onChange={(v) => set({ via: v, model: '', effort: '' })}
+              options={[
+                ['auto', t('pet.gen_via_auto')],
+                ['claude', 'Claude Code'],
+                ['codex', 'Codex'],
+                ['api', t('pet.gen_via_api')],
+              ]}
+            />
+          </Field>
+          {(g.via === 'claude' || g.via === 'codex') && <ToolModel via={g.via} model={g.model} effort={g.effort} onChange={set} />}
+          {g.via === 'api' && a && <ApiFields a={a} setA={setA} keyVal={key} setKey={setKey} />}
+          <Field label={t('pet.gen_style')} hint={t('pet.gen_style_hint')}>
+            <div className="pet-style-presets">
+              {STYLES.map((k) => (
+                <button key={k} type="button" className="chip" aria-pressed={g.style === t(`pet.style.${k}_text`)} onClick={() => set({ style: t(`pet.style.${k}_text`) })}>
+                  {t(`pet.style.${k}`)}
+                </button>
+              ))}
+            </div>
+            <textarea className="pet-style" rows={2} maxLength={500} value={g.style} placeholder={t('pet.gen_style_ph')} onChange={(e) => set({ style: e.target.value })} />
+          </Field>
+        </>
+      )}
       <div className="pet-gen-actions">
-        <Button busy={busy} icon={MessageCircle} onClick={run}>
+        <Button busy={starting || running} disabled={!g || running} icon={MessageCircle} onClick={run}>
           {mine ? t('pet.gen_again') : t('pet.gen_run')}
         </Button>
-        {data?.at && (
+        {data?.at && !running && (
           <Button variant="ghost" onClick={clear}>
             {t('pet.gen_clear')}
           </Button>
         )}
       </div>
-      {busy && <p className="muted small">{t('pet.gen_wait')}</p>}
+      {running && <p className="muted small">{t('pet.gen_bg')}</p>}
+      {job?.state === 'failed' && !running && <ErrorNote error={{ code: job.error?.code, params: job.error?.params }} />}
       <ErrorNote error={genErr ?? err} />
       {mine && (
         <div className="pet-gen-list">
@@ -461,6 +458,99 @@ function LinesModal({ p, name, onClose }) {
         </div>
       )}
     </Modal>
+  );
+}
+
+/** Claude Code / Codex：选模型和思考等级（列表现取；没装时提示） */
+function ToolModel({ via, model, effort, onChange }) {
+  const { t } = useTranslation();
+  const [list, err, reload] = useLoad(() => api.get(`/pets/gen-models?via=${via}`), [via]);
+  const tool = via === 'claude' ? 'Claude Code' : 'Codex';
+  if (err) return <ErrorNote error={err} />;
+  if (!list) {
+    return (
+      <p className="muted small">
+        <Spinner size={12} /> {t('pet.gen_models_loading', { tool })}
+      </p>
+    );
+  }
+  if (!list.installed) {
+    return (
+      <div className="pet-gen-warn small">
+        {t('pet.gen_not_installed', { tool })}{' '}
+        <Button variant="ghost" icon={RefreshCw} onClick={reload}>
+          {t('tools.recheck')}
+        </Button>
+      </div>
+    );
+  }
+  const opts = (list.options ?? []).filter((o) => o.value && o.value !== 'default');
+  const cur = opts.find((o) => o.value === model);
+  const efforts = (cur ?? opts.find((o) => o.default) ?? (via === 'claude' ? opts[0] : null))?.efforts ?? [];
+  const defLabel = via === 'claude' ? t('pet.gen_model_default_claude') : t('pet.gen_model_default');
+  return (
+    <div className="pet-gen-model">
+      <Field label={t('pet.gen_model')}>
+        <Select value={model} aria-label={t('pet.gen_model')} onChange={(e) => onChange({ model: e.target.value, effort: '' })}>
+          <option value="">{defLabel}</option>
+          {opts.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+              {o.description ? ` · ${o.description}` : ''}
+            </option>
+          ))}
+        </Select>
+      </Field>
+      <Field label={t('pet.gen_effort')}>
+        <Select value={effort} aria-label={t('pet.gen_effort')} disabled={!efforts.length} onChange={(e) => onChange({ effort: e.target.value })}>
+          <option value="">{t('pet.gen_effort_default')}</option>
+          {efforts.map((x) => (
+            <option key={x} value={x}>
+              {t(`pet.effort.${x}`, { defaultValue: x })}
+            </option>
+          ))}
+        </Select>
+      </Field>
+      {list.error && <ErrorNote error={list.error} />}
+    </div>
+  );
+}
+
+/** 自配接口：协议、地址、密钥、模型、思考等级 */
+function ApiFields({ a, setA, keyVal, setKey }) {
+  const { t } = useTranslation();
+  const set = (patch) => setA((x) => ({ ...x, ...patch }));
+  const ph = a.protocol === 'anthropic' ? ['https://api.anthropic.com', 'claude-haiku-4-5'] : a.protocol === 'chat' ? ['https://api.deepseek.com/v1', 'deepseek-chat'] : ['https://api.openai.com/v1', 'gpt-5-mini'];
+  return (
+    <div className="pet-gen-api">
+      <Field label={t('pet.gen_api_protocol')}>
+        <Select value={a.protocol} aria-label={t('pet.gen_api_protocol')} onChange={(e) => set({ protocol: e.target.value })}>
+          <option value="responses">{t('pet.proto_responses')}</option>
+          <option value="anthropic">{t('pet.proto_anthropic')}</option>
+          <option value="chat">{t('pet.proto_chat')}</option>
+        </Select>
+      </Field>
+      <Field label={t('pet.gen_api_url')}>
+        <input value={a.url} onChange={(e) => set({ url: e.target.value })} placeholder={ph[0]} spellCheck={false} autoCapitalize="off" />
+      </Field>
+      <Field label={t('pet.gen_api_key')} hint={a.keySet ? t('pet.gen_api_key_set') : undefined}>
+        <input type="password" value={keyVal} onChange={(e) => setKey(e.target.value)} autoComplete="off" placeholder={a.keySet ? '••••••••' : ''} />
+      </Field>
+      <div className="pet-gen-model">
+        <Field label={t('pet.gen_api_model')}>
+          <input value={a.model} onChange={(e) => set({ model: e.target.value })} placeholder={ph[1]} spellCheck={false} autoCapitalize="off" />
+        </Field>
+        <Field label={t('pet.gen_effort')}>
+          <Select value={a.effort} aria-label={t('pet.gen_effort')} onChange={(e) => set({ effort: e.target.value })}>
+            {API_EFFORTS.map((x) => (
+              <option key={x} value={x}>
+                {x ? t(`pet.effort.${x}`, { defaultValue: x }) : t('pet.gen_effort_none')}
+              </option>
+            ))}
+          </Select>
+        </Field>
+      </div>
+    </div>
   );
 }
 
@@ -728,6 +818,7 @@ function PetCard({ p, onRemoved }) {
             )}
             {p.renderer === 'video' && !p.mov && <p className="small muted">{t(apple ? 'pet.no_mov_here' : 'pet.no_mov')}</p>}
             <BondLine p={p} />
+            <GenStatus p={p} name={name} />
           </>
         )}
         <p className="small muted mono ellipsis" title={p.dir}>

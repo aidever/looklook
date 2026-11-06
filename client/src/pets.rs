@@ -761,6 +761,7 @@ pub fn all(home: &Path, fresh: bool) -> Vec<Pack> {
 
 pub(crate) fn forget() {
     *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    changed();
 }
 
 pub fn find(home: &Path, source: &str, id: &str) -> Option<Pack> {
@@ -773,43 +774,76 @@ pub fn find(home: &Path, source: &str, id: &str) -> Option<Pack> {
 #[serde(default)]
 pub struct PetSettings {
     pub enabled: bool,
-    /// 对话类型 → 宠物（`source:id`），None = 这种对话不显示
-    #[serde(rename = "byAgent")]
-    pub by_agent: BTreeMap<String, Option<String>>,
-    /// 上面没写的对话类型用哪只
+    /// 用哪只（`source:id`）：全局一只，所有对话、桌面宠物都是它
     pub default: Option<String>,
+    /// 旧版按对话类型分别配的：只在读旧设置时用来挑一只，不再写回
+    #[serde(rename = "byAgent", skip_serializing)]
+    pub by_agent: BTreeMap<String, Option<String>>,
     pub size: f64,
     pub lines: bool,
     /// 碎碎念：按运行数据（做完一轮花了多久、改了几个文件、测试过没过……）套文案说一句，不花 token
     pub chatter: bool,
     /// 桌面应用里宠物住在桌面上（独立的透明窗口，应用最小化也在），不在页面里
     pub desktop: bool,
-    /// 生成人设文案用的接口（OpenAI 兼容）；没配就用本机的 Claude Code / Codex
+    /// 应用里的会话通知（做完了、在等你）由宠物说，不再弹右上角的卡片
+    pub notify: bool,
+    /// 生成台词：用哪个、哪个模型、什么风格（上次选的，下次打开还是它）
+    pub gen: GenCfg,
+    /// 生成人设文案用的自配接口；没配就用本机的 Claude Code / Codex
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api: Option<GenApi>,
 }
 
 impl Default for PetSettings {
     fn default() -> Self {
-        Self { enabled: true, by_agent: BTreeMap::new(), default: None, size: 1.0, lines: true, chatter: true, desktop: true, api: None }
+        Self { enabled: true, default: None, by_agent: BTreeMap::new(), size: 1.0, lines: true, chatter: true, desktop: true, notify: true, gen: GenCfg::default(), api: None }
     }
 }
 
-/// OpenAI 兼容的接口：`{url}/chat/completions`
+/// 生成台词的选择：`via` = auto / claude / codex / api；`model`、`effort` 只对 claude / codex 有用（空 = 它自己的默认）
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct GenCfg {
+    pub via: String,
+    pub model: String,
+    pub effort: String,
+    /// 额外的风格要求（自己写的，或者从预设里挑的）
+    pub style: String,
+}
+
+/// 自配接口：`protocol` = `responses`（OpenAI Responses，`{url}/responses`）/ `chat`（OpenAI 兼容 `{url}/chat/completions`）/
+/// `anthropic`（`{url}/v1/messages`）；`effort` 思考等级（空 = 不指定）
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct GenApi {
     pub url: String,
     pub key: String,
     pub model: String,
+    pub protocol: String,
+    pub effort: String,
     /// 只在给前端时用：存着密钥（密钥本身不发给页面）
     #[serde(rename = "keySet", skip_deserializing)]
     pub key_set: bool,
 }
 
+pub const PROTOCOLS: &[&str] = &["responses", "chat", "anthropic"];
+pub const EFFORTS: &[&str] = &["", "minimal", "low", "medium", "high", "xhigh", "max"];
+
 impl PetSettings {
     pub fn load(store: &crate::store::Store) -> Self {
-        store.get(SETTINGS_KEY).ok().flatten().unwrap_or_default()
+        let mut s: Self = store.get(SETTINGS_KEY).ok().flatten().unwrap_or_default();
+        // 旧设置按对话类型分别配：挑一只当全局的（原来的默认优先，其次 Claude Code、Codex……配的那只）
+        if s.default.is_none() {
+            s.default = AGENTS.iter().find_map(|a| s.by_agent.get(*a).cloned().flatten());
+        }
+        s.by_agent.clear();
+        if let Some(a) = s.api.as_mut() {
+            // 旧版只有 OpenAI 兼容的 chat/completions
+            if a.protocol.is_empty() {
+                a.protocol = "chat".into();
+            }
+        }
+        s
     }
 
     /// 给页面看的：密钥换成 `keySet`
@@ -830,48 +864,82 @@ impl PetSettings {
             if a.key.is_empty() {
                 a.key = Self::load(store).api.map(|o| o.key).unwrap_or_default();
             }
+            if a.protocol.is_empty() {
+                a.protocol = "responses".into();
+            }
             if !(a.url.starts_with("http://") || a.url.starts_with("https://")) || a.url.len() > 500 || a.model.len() > 200 || a.key.len() > 1000 {
+                return Err(LocalError::invalid("pet", "api"));
+            }
+            if !PROTOCOLS.contains(&a.protocol.as_str()) || !EFFORTS.contains(&a.effort.as_str()) {
                 return Err(LocalError::invalid("pet", "api"));
             }
         }
         if self.api.as_ref().is_some_and(|a| a.url.is_empty() && a.model.is_empty()) {
             self.api = None;
         }
+        let g = &mut self.gen;
+        if !matches!(g.via.as_str(), "" | "auto" | "claude" | "codex" | "api") || g.model.len() > 200 || g.effort.len() > 20 || g.style.chars().count() > 500 {
+            return Err(LocalError::invalid("pet", "gen"));
+        }
         self.size = if self.size.is_finite() { self.size.clamp(0.5, 2.0) } else { 1.0 };
-        self.by_agent.retain(|k, _| AGENTS.contains(&k.as_str()));
-        let ok = |k: &Option<String>| k.as_ref().is_none_or(|k| k.len() <= 200 && k.contains(':'));
-        if !self.by_agent.values().all(ok) || !ok(&self.default) {
+        self.by_agent.clear();
+        if !self.default.as_ref().is_none_or(|k| k.len() <= 200 && k.contains(':')) {
             return Err(LocalError::invalid("pet", "format"));
         }
         store.set(SETTINGS_KEY, &self)?;
         crate::desk_pet::set_wanted(self.enabled && self.desktop);
+        changed();
         Ok(self.masked())
     }
 
-    /// 这种对话用哪只（`source:id`）
-    pub fn pick(&self, agent: &str) -> Option<&str> {
+    /// 现在用哪只（`source:id`）；关了宠物时 None
+    pub fn pick(&self) -> Option<&str> {
         if !self.enabled {
             return None;
         }
-        match self.by_agent.get(agent) {
-            Some(v) => v.as_deref(),
-            None => self.default.as_deref(),
-        }
+        self.default.as_deref()
     }
 }
 
-/// 对话页要的：这个对话用哪只、它的清单、大小和气泡开关
-pub fn for_agent(home: &Path, store: &crate::store::Store, agent: &str) -> Value {
+/// 对话页、桌面宠物要的：用哪只、它的清单、大小和气泡开关
+pub fn current(home: &Path, store: &crate::store::Store) -> Value {
     let s = PetSettings::load(store);
-    let pack = s.pick(agent).and_then(|k| k.split_once(':')).and_then(|(src, id)| find(home, src, id));
+    let pack = s.pick().and_then(|k| k.split_once(':')).and_then(|(src, id)| find(home, src, id));
     json!({
         "pet": pack.as_ref().map(|p| json!({ "key": p.key(), "source": p.source, "id": p.id, "manifest": p.manifest_out() })),
         "size": s.size,
         "lines": s.lines,
         "chatter": s.chatter,
         "desktop": s.desktop,
+        "notify": s.notify,
         "gen": pack.as_ref().map(|p| gen_lines(store, &p.key())),
+        "ver": ver(),
     })
+}
+
+// ---------------- 改动通知 ----------------
+// 设置、装 / 删宠物、生成台词：版本号 + 1。页面（包括桌面宠物窗口、别的标签页、远程打开的）长轮询它，变了就重新取。
+
+static VER: std::sync::OnceLock<tokio::sync::watch::Sender<u64>> = std::sync::OnceLock::new();
+
+fn ver_tx() -> &'static tokio::sync::watch::Sender<u64> {
+    VER.get_or_init(|| tokio::sync::watch::channel(1).0)
+}
+
+pub fn ver() -> u64 {
+    *ver_tx().borrow()
+}
+
+/// 宠物相关的东西变了
+pub fn changed() {
+    ver_tx().send_modify(|v| *v += 1);
+}
+
+/// 等版本号不再是 `since`（最多等 `max`），返回现在的
+pub async fn wait_change(since: u64, max: Duration) -> u64 {
+    let mut rx = ver_tx().subscribe();
+    let _ = tokio::time::timeout(max, rx.wait_for(|v| *v != since)).await;
+    ver()
 }
 
 // ---------------- 好感度、碎碎念文案 ----------------
@@ -955,6 +1023,7 @@ pub fn set_gen_lines(store: &crate::store::Store, pet: &str, v: Option<&Value>) 
         Some(v) => store.set(&gen_key(pet), v)?,
         None => store.remove(&gen_key(pet))?,
     }
+    changed();
     Ok(())
 }
 
@@ -1542,12 +1611,16 @@ pub(crate) mod tests {
     #[test]
     fn settings_pick() {
         let mut s = PetSettings { default: Some("local:a".into()), ..PetSettings::default() };
-        s.by_agent.insert("codex".into(), None);
-        s.by_agent.insert("dsh".into(), Some("local:b".into()));
-        assert_eq!(s.pick("claude"), Some("local:a"));
-        assert_eq!(s.pick("codex"), None);
-        assert_eq!(s.pick("dsh"), Some("local:b"));
+        assert_eq!(s.pick(), Some("local:a"));
         s.enabled = false;
-        assert_eq!(s.pick("dsh"), None);
+        assert_eq!(s.pick(), None);
+        // 旧设置：只按对话类型配了，挑一只当全局的
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(&dir.path().join("t.db")).unwrap();
+        store.set(SETTINGS_KEY, &json!({ "enabled": true, "byAgent": { "codex": "local:c", "dsh": null }, "api": { "url": "https://x", "model": "m" } })).unwrap();
+        let s = PetSettings::load(&store);
+        assert_eq!(s.default.as_deref(), Some("local:c"));
+        assert_eq!(s.api.unwrap().protocol, "chat");
+        assert!(s.notify);
     }
 }

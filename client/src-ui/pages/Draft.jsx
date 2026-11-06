@@ -3,7 +3,7 @@
 // ⋯ 里是名字、Shell、开机自动启动、Docker；AI 工具旁边有常用任务模板（PromptTemplates.jsx）。终端、DSH 点了马上开，不用草稿。
 // 发出去后会话马上打开：Claude Code、Codex 的第一句（连同图片）等对话起来了再发（shared/firstSend.js），
 // 其他的交给电脑在启动时带上（prompt）。没写完的字按项目存在浏览器里。
-import { ArrowLeft, ArrowUp, Container, FolderOpen, Folder, FolderPlus, ImagePlus, MoreHorizontal, Search, ShieldCheck, X } from 'lucide-react';
+import { ArrowLeft, ArrowUp, AtSign, Brain, Container, FolderOpen, Folder, FolderPlus, ImagePlus, MoreHorizontal, Search, ShieldCheck, Sparkles, TerminalSquare, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -27,6 +27,8 @@ import PromptsMenu from './PromptTemplates.jsx';
 import { AI_TOOLS, FULL_ACCESS, fullAccessFor, opensInPage, shortAgo, useSessionUi } from './Sessions.jsx';
 import { BackendNote, FolderPicker, InstallProgress, Promotions, RemoteCard, ShellPicker } from './Terminals.jsx';
 import { imeComposing } from '../shared/ime.js';
+import Select from '../shared/Select.jsx';
+import { useComposeAssist } from '../shared/composeAssist.jsx';
 
 // 留在草稿里的类型（写好第一句再开始）；终端、DSH 点了马上开
 const DRAFT_LAUNCHES = ['claude', 'codex', 'opencode', 'dsh'];
@@ -253,6 +255,13 @@ function DraftForm() {
   // Claude Code 账号 / Codex 配置（null 用默认）；换了助手就回到默认
   const [profile, setProfile] = useState(null);
   useEffect(() => setProfile(null), [launch]);
+  // 模型、思考强度（空 = 用默认）：会话起来后先设好再发第一句（firstSend.js）
+  const [model, setModel] = useState('');
+  const [effort, setEffort] = useState('');
+  useEffect(() => {
+    setModel('');
+    setEffort('');
+  }, [launch, device]);
   const [picking, setPicking] = useState(false);
   const [dirPick, setDirPick] = useState(false);
   const [adv, setAdv] = useState(false);
@@ -268,6 +277,7 @@ function DraftForm() {
   const [error, setError] = useState(null);
   const input = useRef(null);
   const picker = useRef(null);
+  const kb = useKeyboardInset();
   const client = deviceApi(device);
   // 不是顶栏选中的那台电脑时，用那台电脑自己的状态（默认文件夹、能力）
   const [devStatus] = useLoad(() => (devices.multi && device && device !== devices.selected ? client.get('/status').catch(() => null) : Promise.resolve(null)), [device]);
@@ -301,8 +311,10 @@ function DraftForm() {
     const el = input.current;
     if (!el) return;
     el.style.height = 'auto';
-    el.style.height = `${Math.min(el.scrollHeight, Math.round(window.innerHeight * 0.35))}px`;
-  }, [text]);
+    // 按看得见的高度算（手机上软键盘弹着时 innerHeight 不变）：输入框长高了也不会把下面的按钮挤到键盘后面
+    const vh = window.visualViewport?.height ?? window.innerHeight;
+    el.style.height = `${Math.min(el.scrollHeight, Math.round(vh * (isTouch() ? 0.28 : 0.35)))}px`;
+  }, [text, kb]);
   // 换了项目：写了一半的字留着（那个项目存着的草稿只在这边没写时拿出来）；类型、全部权限等跟着那个项目上次的（自己改过的不动）
   const pickProject = (dev, dir, c = null) => {
     setPicking(false);
@@ -339,6 +351,23 @@ function DraftForm() {
   const willChat = canChat && !termMode;
   // 类型按钮上写清楚开出来的是对话界面还是终端
   const modeName = t(willChat ? 'sess.mode.chat' : 'sess.mode.term_short');
+  // 选模型：那台电脑上的 Claude Code / Codex 自己列的（对话界面才能先选好）
+  const pickModel = willChat && (launch === 'claude' || launch === 'codex');
+  const [models] = useLoad(() => (pickModel ? client.get(`/draft/models?agent=${launch}`).catch(() => null) : Promise.resolve(null)), [pickModel, launch, device]);
+  const modelOpts = (models?.options ?? []).filter((o) => o.value && o.value !== 'default');
+  const curModel = modelOpts.find((o) => o.value === model);
+  const efforts = (curModel ?? modelOpts.find((o) => o.default) ?? (launch === 'claude' ? modelOpts[0] : null))?.efforts ?? [];
+  const modelItems = [
+    { head: t('chat.model') },
+    { label: t('draft.model_default'), checked: !model, onClick: () => setModel('') },
+    ...modelOpts.map((o) => ({ label: o.label, hint: o.description || undefined, checked: model === o.value, onClick: () => setModel(o.value) })),
+    efforts.length > 0 && { head: t('pet.gen_effort') },
+    efforts.length > 0 && { label: t('pet.gen_effort_default'), checked: !effort, onClick: () => setEffort('') },
+    ...efforts.map((x) => ({ label: t(`pet.effort.${x}`, { defaultValue: x }), checked: effort === x, onClick: () => setEffort(x) })),
+  ];
+  const modelText = [curModel?.label, effort && t(`pet.effort.${effort}`, { defaultValue: effort })].filter(Boolean).join(' · ') || t('draft.model_default');
+  // @ 文件、/ 和 $ 技能的提示（和对话页输入框一样）：按要开的工具、项目目录取
+  const assist = useComposeAssist({ client, agent: !container && launch !== 'custom' ? launch : null, workdir: container ? '' : workdir, text, setText, area: input });
   // 没装的工具：点开始就先在后台装（npm），装好后自动接着开始
   const [job, setJob] = useState(null);
   const [mirror, setMirror] = useState('npmmirror');
@@ -421,7 +450,8 @@ function DraftForm() {
         start: true,
       });
       if (device && r.id) rememberTerminals(device, [r]);
-      if (willChat && r.chat_ui && (body || files.length)) queueFirst(r.id, body, files.map((f) => f.file));
+      const preset = pickModel && (model || effort) ? { model, effort } : null;
+      if (willChat && r.chat_ui && (body || files.length || preset)) queueFirst(r.id, body, files.map((f) => f.file), preset);
       // 全部权限只在能选的类型（AI 会话）上记
       if (!container) s.touchProject(device, r.workdir ?? workdir, { launch, shell: shell.trim(), auto_start: autoStart, ...(canFull ? { full_access: fullAccess } : {}) });
       latest.current.sent = true;
@@ -482,7 +512,7 @@ function DraftForm() {
   const sendLabel = missing(launch) && canInstall ? t('draft.install_start') : t('sess.start');
   const where2 = container ? `${container.name}:${container.dir}` : workdir;
   return (
-    <div className="draft">
+    <div className="draft" style={kb ? { '--kb': `${kb}px` } : undefined} data-kb={kb ? '' : undefined}>
       <header className="draft-head">
         {!opensInPage() && (
           <button type="button" className="btn btn-plain btn-icon draft-back" onClick={() => navigate('/')} aria-label={t('sess.back')}>
@@ -503,10 +533,9 @@ function DraftForm() {
       <div className="draft-body">
         <div className="draft-hero">
           <span className={`draft-mark draft-mark-${launch}`} aria-hidden="true">
-            <LaunchIcon launch={launch} size={30} />
+            <LaunchIcon launch={launch} size={22} />
           </span>
           <h1>{launch === 'custom' ? t('draft.title_custom', { name: projName }) : t('draft.title', { name: projName, tool: toolName })}</h1>
-          <p className="muted">{t('draft.lead')}</p>
         </div>
         {recent.length > 0 && <RecentConvs device={device} items={recent} />}
         {empty && (
@@ -549,13 +578,13 @@ function DraftForm() {
             <div className="draft-strip draft-strip-warn">
               <span className="grow">{t(container ? 'sess.container_missing' : canInstall ? 'draft.install_strip' : 'sess.install_first', { tool: toolName })}</span>
               {canInstall && (
-                <select value={mirror} onChange={(e) => setMirror(e.target.value)} aria-label={t('tools.mirror')}>
+                <Select value={mirror} onChange={(e) => setMirror(e.target.value)} aria-label={t('tools.mirror')}>
                   {['npmmirror', 'tencent', 'official'].map((m) => (
                     <option key={m} value={m}>
                       {t(`tools.mirrors.${m}`)}
                     </option>
                   ))}
-                </select>
+                </Select>
               )}
               {!container && (
                 <button type="button" className="btn btn-plain btn-sm" onClick={reloadTools}>
@@ -590,28 +619,73 @@ function DraftForm() {
               ))}
             </div>
           )}
-          <textarea
-            ref={input}
-            className="draft-input"
-            rows={2}
-            autoCapitalize="none"
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            onPaste={(e) => willChat && addFiles(e.clipboardData.files) && e.preventDefault()}
-            // 手机上没有 Shift+回车：回车换行，点“开始”发出去（同对话页的输入框）
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey && !imeComposing(e) && !isTouch()) {
-                e.preventDefault();
-                go();
-              }
-            }}
-            enterKeyHint={isTouch() ? 'enter' : 'send'}
-            placeholder={ph}
-            aria-label={t('draft.first_line')}
-            spellCheck={false}
-            maxLength={4000}
-          />
+          {assist.list}
+          {launch === 'custom' ? (
+            // 自定义命令：一行命令，回车开始（不是对AI说的话，不用大输入框）
+            <label className="draft-cmd">
+              <TerminalSquare size={16} aria-hidden="true" />
+              <input
+                ref={input}
+                className="mono"
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !imeComposing(e)) {
+                    e.preventDefault();
+                    go();
+                  }
+                }}
+                enterKeyHint="go"
+                autoCapitalize="none"
+                autoCorrect="off"
+                placeholder={ph}
+                aria-label={t('draft.custom')}
+                spellCheck={false}
+                maxLength={4000}
+              />
+            </label>
+          ) : (
+            <textarea
+              ref={input}
+              className="draft-input"
+              rows={2}
+              autoCapitalize="none"
+              value={text}
+              onChange={(e) => {
+                setText(e.target.value);
+                assist.onCaret(e);
+              }}
+              onSelect={assist.onCaret}
+              onClick={assist.onCaret}
+              onPaste={(e) => willChat && addFiles(e.clipboardData.files) && e.preventDefault()}
+              // 手机上没有 Shift+回车：回车换行，点“开始”发出去（同对话页的输入框）
+              onKeyDown={(e) => {
+                if (assist.onKeyDown(e)) return;
+                if (e.key === 'Enter' && !e.shiftKey && !imeComposing(e) && !isTouch()) {
+                  e.preventDefault();
+                  go();
+                }
+              }}
+              enterKeyHint={isTouch() ? 'enter' : 'send'}
+              placeholder={ph}
+              aria-label={t('draft.first_line')}
+              spellCheck={false}
+              maxLength={4000}
+            />
+          )}
           <div className="draft-tools">
+            {/* 按钮多了横着滑，不换行：“开始”一直在右边看得见 */}
+            <div className="draft-tools-row">
+            {assist.on && launch !== 'opencode' && (
+              <>
+                <button type="button" className="btn btn-plain btn-icon draft-attach" onMouseDown={(e) => e.preventDefault()} onClick={() => assist.trigger('@')} aria-label={t('chat.mention')} title={t('chat.mention_hint')}>
+                  <AtSign size={17} />
+                </button>
+                <button type="button" className="btn btn-plain btn-icon draft-attach" onMouseDown={(e) => e.preventDefault()} onClick={() => assist.trigger(launch === 'codex' ? '$' : '/')} aria-label={t('chat.skill_pick')} title={t(launch === 'codex' ? 'chat.skill_pick_codex' : 'chat.skill_pick_hint')}>
+                  <Sparkles size={17} />
+                </button>
+              </>
+            )}
             {willChat && (
               <label className="btn btn-plain btn-icon draft-attach" title={t('draft.attach')}>
                 <ImagePlus size={17} aria-hidden="true" />
@@ -648,6 +722,9 @@ function DraftForm() {
               label={t('draft.pick_type')}
               items={typeItems}
             />
+            {pickModel && (
+              <PopMenu sheet className="draft-chip draft-model" icon={(p) => <Brain {...p} />} text={modelText} label={t('chat.model_pick')} items={modelItems} />
+            )}
             {launch === 'claude' && !container && <ClaudeProfilePick client={client} device={device} value={profile} onChange={setProfile} className="draft-chip" />}
             {launch === 'codex' && !container && <CodexProfilePick client={client} device={device} value={profile} onChange={setProfile} className="draft-chip" />}
             {canFull && (
@@ -659,7 +736,7 @@ function DraftForm() {
             <button type="button" className="draft-chip" onClick={() => setAdv(!adv)} aria-expanded={adv} aria-label={t('draft.more')} title={t('draft.more')}>
               <MoreHorizontal size={16} aria-hidden="true" />
             </button>
-            <span className="grow" />
+            </div>
             <button type="submit" className={`draft-go ${empty || sendLabel !== t('sess.start') ? 'wide' : ''}`} disabled={busy || installing || Boolean(blocked)} aria-label={sendLabel} title={blocked ?? t('sess.start_hint')}>
               {busy || installing ? <Spinner size={16} /> : empty || missing(launch) ? sendLabel : <ArrowUp size={18} />}
             </button>
@@ -752,4 +829,28 @@ function RecentConvs({ device, items }) {
       })}
     </div>
   );
+}
+
+/**
+ * 手机上软键盘挡住的高度（px，没弹出时 0）：iOS 弹出键盘时布局视口不变，贴在底部的输入框会被键盘盖住，
+ * 草稿页把输入框往上抬这么多（CSS 变量 --kb），跟着键盘走。
+ */
+function useKeyboardInset() {
+  const [kb, setKb] = useState(0);
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv || !isTouch()) return undefined;
+    const on = () => {
+      const h = Math.round(window.innerHeight - vv.height - vv.offsetTop);
+      setKb(h > 80 ? h : 0);
+    };
+    on();
+    vv.addEventListener('resize', on);
+    vv.addEventListener('scroll', on);
+    return () => {
+      vv.removeEventListener('resize', on);
+      vv.removeEventListener('scroll', on);
+    };
+  }, []);
+  return kb;
 }

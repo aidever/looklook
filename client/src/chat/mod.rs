@@ -13,6 +13,8 @@
 
 pub mod agent;
 pub mod board;
+pub mod claude_chat;
+pub mod claude_sdk;
 pub mod codex_app;
 pub mod codex_artifacts;
 pub mod codex_chat;
@@ -177,6 +179,8 @@ struct State {
     codex: codex_chat::CodexSt,
     /// DSH（dsh web）的跟读、排队的消息、用量
     dsh: dsh_chat::DshSt,
+    /// 走 stream-json 的 Claude Code（claude_chat.rs）的进程和状态
+    sdk: claude_chat::SdkSt,
     /// 上一次抓屏认不出输入框、也读不出选择框时的屏幕（去掉转义）。重绘、缩放到一半时会抓到这种半截屏幕，
     /// 前后两次一模一样才算真的开着别的界面
     odd_screen: Option<String>,
@@ -269,6 +273,8 @@ pub struct Inst {
     prompts: watch::Sender<u64>,
     /// 正在看着额度用完的菜单（[`Chat::guard_limit`]）
     limit_guard: AtomicBool,
+    /// Claude Code 走 stream-json（不抓屏、不打字，见 claude_chat.rs）
+    sdk: AtomicBool,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -286,6 +292,8 @@ pub struct Chat {
     codex: codex_chat::Hub,
     /// DSH 的 dsh web
     dsh: dsh_chat::Hub,
+    /// stream-json 的 Claude Code
+    sdk: claude_chat::Hub,
     me: Weak<Chat>,
 }
 
@@ -312,6 +320,7 @@ impl Chat {
             insts: Mutex::new(HashMap::new()),
             codex: Default::default(),
             dsh: Default::default(),
+            sdk: Default::default(),
             me: me.clone(),
         })
     }
@@ -368,6 +377,7 @@ impl Chat {
                         suggestion: None,
                         codex: Default::default(),
                         dsh: Default::default(),
+                        sdk: Default::default(),
                         odd_screen: None,
                         other_since: None,
                         other: false,
@@ -390,6 +400,7 @@ impl Chat {
                     watching: AtomicBool::new(false),
                     prompts: watch::channel(0).0,
                     limit_guard: AtomicBool::new(false),
+                    sdk: AtomicBool::new(self.store.instance(id).ok().flatten().is_some_and(|r| self.instances.claude_sdk_mode(&r))),
                 })
             })
             .clone()
@@ -401,6 +412,9 @@ impl Chat {
             let mut st = lock(&inst.st);
             if let Some(p) = st.pending.as_mut() {
                 p.resolve(String::new());
+            }
+            if let Some(p) = st.sdk.proc.take() {
+                p.kill();
             }
             if inst.agent.launch() == "codex" {
                 let thread = st.binding.as_ref().map(|b| b.session_id.clone());
@@ -430,9 +444,18 @@ impl Chat {
     // ---------------- 状态 ----------------
 
     fn status_of(inst: &Inst, st: &State) -> Value {
+        let mut caps = inst.agent.caps();
+        if inst.sdk.load(Ordering::Relaxed) {
+            // stream-json：没有 TUI 可以退回去（审批不能“到终端里回答”）
+            caps["sdk"] = json!(true);
+        }
+        // 编辑重发（[`Chat::edit`]）
+        if inst.sdk.load(Ordering::Relaxed) || inst.agent.launch() == "codex" {
+            caps["edit"] = json!(true);
+        }
         json!({
             "agent": inst.agent.launch(),
-            "caps": inst.agent.caps(),
+            "caps": caps,
             "dialog": st.dialog,
             "phase": st.phase,
             "reason": st.reason,
@@ -873,6 +896,14 @@ impl Chat {
     pub async fn snapshot(self: &Arc<Self>, id: &str) -> Result<Value, LocalError> {
         self.require(id)?;
         let inst = self.inst(id);
+        inst.sdk.store(self.is_sdk(id), Ordering::Relaxed);
+        if inst.sdk.load(Ordering::Relaxed) {
+            if let Err(e) = self.sdk_attach(id).await {
+                let mut st = lock(&inst.st);
+                st.error = Some(e.params.get("detail").and_then(Value::as_str).map(String::from).unwrap_or_else(|| e.code.to_string()).chars().take(500).collect());
+                Self::set_phase(&inst, &mut st, Phase::Detached, Some("claude_sdk"));
+            }
+        }
         if inst.agent.launch() == "codex" {
             if let Err(e) = self.codex_attach(id).await {
                 let mut st = lock(&inst.st);
@@ -983,7 +1014,7 @@ impl Chat {
                 }
                 self.poll(&inst).await;
                 // Codex、DSH 的状态来自它们的后台服务，不用看屏幕
-                if tick.is_multiple_of(3) && !matches!(inst.agent.launch(), "codex" | "dsh") {
+                if tick.is_multiple_of(3) && !matches!(inst.agent.launch(), "codex" | "dsh") && !inst.sdk.load(Ordering::Relaxed) {
                     self.check_screen(&inst, true).await;
                     if lock(&inst.st).dialog.as_ref().is_some_and(screen::Dialog::is_limit) {
                         self.guard_limit(&inst);
@@ -1172,7 +1203,8 @@ impl Chat {
                 "kind": if d.is_limit() { "limit" } else { "dialog" },
                 "detail": d.title,
                 "title": d.title,
-                "options": d.options.iter().map(|o| &o.label).collect::<Vec<_>>(),
+                // 自己填的那一项要输入内容，不能在看板、通知上一点就选
+                "options": d.options.iter().map(|o| &o.label).take_while(|l| !screen::is_free_text(l)).collect::<Vec<_>>(),
             })),
             (None, None) if st.phase == Phase::Tui => Some(json!({ "kind": "dialog" })),
             _ => None,
@@ -1211,6 +1243,14 @@ impl Chat {
             // 有人正开着这个会话（会话页可见且有焦点）：不发通知
             "watched": st.active_until > crate::util::system_ms(),
         }))
+    }
+
+    /// 资源看板（metrics.rs）：对话模式另起的进程。每个终端的 stream-json Claude Code（算进那个终端），
+    /// 和所有 Codex 对话共用的 app-server（单独运行，不是客户端的子进程）。
+    pub async fn process_roots(&self) -> (Vec<(String, u32)>, Option<u32>) {
+        let sdk = lock(&self.insts).iter().filter_map(|(id, inst)| Some((id.clone(), lock(&inst.st).sdk.proc.as_ref().filter(|p| p.alive())?.pid?))).collect();
+        let codex = self.codex.server.lock().await.as_ref().filter(|s| s.alive()).and_then(|s| s.pid());
+        (sdk, codex)
     }
 
     /// 带对话界面的会话（通知按它们逐个检查）
@@ -1253,7 +1293,11 @@ impl Chat {
             let insts: Vec<Arc<Inst>> = lock(&self.insts).values().cloned().collect();
             for inst in insts {
                 // Codex、DSH 的状态来自它们的后台服务，不看屏幕
-                let claude = !matches!(inst.agent.launch(), "codex" | "dsh");
+                let sdk = inst.sdk.load(Ordering::Relaxed);
+                if sdk {
+                    self.sdk_reap(&inst);
+                }
+                let claude = !matches!(inst.agent.launch(), "codex" | "dsh") && !sdk;
                 let phase = lock(&inst.st).phase;
                 let due = match phase {
                     Phase::Running | Phase::Approval | Phase::Tui => true,
@@ -1338,6 +1382,30 @@ impl Chat {
         };
         let q = q.chars().take(200).collect::<String>();
         let items = tokio::task::spawn_blocking(move || mentions::search(Path::new(&root), &q, 30)).await.map_err(|e| LocalError::from(anyhow::anyhow!(e)))?;
+        Ok(json!({ "items": items }))
+    }
+
+    /// 草稿页（还没有会话）：打 `/`（Claude Code 的命令、技能）、`$`（Codex 的技能）时提示的，按要开的工具和项目目录列
+    pub async fn draft_commands(&self, agent: &str, workdir: &str) -> Result<Value, LocalError> {
+        let dir = PathBuf::from(workdir);
+        if !dir.is_absolute() || !dir.is_dir() {
+            return Ok(json!({ "items": [] }));
+        }
+        match agent {
+            "claude" => Ok(json!({ "items": tokio::task::block_in_place(|| commands::scan(&dir)) })),
+            "codex" => self.codex_commands_at(workdir.to_string()).await,
+            _ => Ok(json!({ "items": [] })),
+        }
+    }
+
+    /// 草稿页：打 `@` 时提示的文件、目录（相对项目目录）
+    pub async fn draft_mentions(&self, workdir: &str, q: &str) -> Result<Value, LocalError> {
+        let root = PathBuf::from(workdir);
+        if !root.is_absolute() || !root.is_dir() {
+            return Ok(json!({ "items": [] }));
+        }
+        let q = q.chars().take(200).collect::<String>();
+        let items = tokio::task::spawn_blocking(move || mentions::search(&root, &q, 30)).await.map_err(|e| LocalError::from(anyhow::anyhow!(e)))?;
         Ok(json!({ "items": items }))
     }
 
@@ -1435,6 +1503,60 @@ impl Chat {
         self.submit(id, text, images, true, false).await
     }
 
+    /// 编辑重发：丢掉用户消息 `key` 和它之后的对话，从它前面接着，发出改过的 `text`。
+    /// `keep_images`：原来那条带的图片一起再发（从记录里取出来，存进附件目录）。
+    /// 只改对话，不撤回文件改动（要撤回用检查点）。只支持 stream-json 的 Claude Code 和 app-server 的 Codex：
+    /// Claude Code 重起进程 `--resume <会话> --resume-session-at <这条的父记录>`（同一个会话里分出新的一支，transcript 只显示最新那支）；
+    /// Codex 用 `thread/fork` 复制到上一轮为止（`lastTurnId`），接到新的 thread 上（原来那段还在历史里）。改的是第一句话时开一段新对话。
+    pub async fn edit(self: &Arc<Self>, id: &str, key: &str, text: &str, keep_images: bool) -> Result<Value, LocalError> {
+        self.require(id)?;
+        let (sdk, codex) = (self.is_sdk(id), self.is_codex(id));
+        if !sdk && !codex {
+            return Err(LocalError::new("CHAT_EDIT_UNAVAILABLE"));
+        }
+        let inst = self.inst(id);
+        if matches!(lock(&inst.st).phase, Phase::Running | Phase::Approval) {
+            return Err(LocalError::new("CHAT_RUNNING"));
+        }
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        let text = text.trim_end();
+        let (point, n_images) = {
+            let tr = inst.tr.lock().await;
+            let t = tr.as_ref().map(Reader::get).ok_or_else(|| LocalError::new("CHAT_EDIT_STALE"))?;
+            let point = t.rewind_point(key).ok_or_else(|| LocalError::new("CHAT_EDIT_STALE"))?;
+            let n = t.items(0, t.len()).iter().find(|i| i.key == key).map(|i| if let transcript::Body::User { images, .. } = i.body { images } else { 0 }).unwrap_or(0);
+            (point, n)
+        };
+        let mut images = vec![];
+        if keep_images {
+            let dir = self.paths.attach_dir(id);
+            std::fs::create_dir_all(&dir).map_err(|e| LocalError::from(anyhow::anyhow!(e)))?;
+            let stamp = crate::util::system_ms();
+            for n in 0..n_images.min(10) as usize {
+                let Ok((mime, bytes)) = self.user_image(id, key, n).await else { continue };
+                let ext = match mime {
+                    "image/jpeg" => "jpg",
+                    "image/gif" => "gif",
+                    "image/webp" => "webp",
+                    _ => "png",
+                };
+                let path = dir.join(format!("edit-{stamp}-{n}.{ext}"));
+                std::fs::write(&path, bytes).map_err(|e| LocalError::from(anyhow::anyhow!(e)))?;
+                images.push(path.to_string_lossy().into_owned());
+            }
+        }
+        if text.is_empty() && images.is_empty() {
+            return Err(LocalError::invalid("text", "required"));
+        }
+        tracing::info!(id, key, fresh = point.is_none(), "编辑重发");
+        if sdk {
+            self.sdk_edit(id, point).await?;
+        } else {
+            self.codex_edit(id, point).await?;
+        }
+        self.submit(id, text, &images, false, false).await
+    }
+
     async fn submit(self: &Arc<Self>, id: &str, text: &str, images: &[String], now: bool, later: bool) -> Result<Value, LocalError> {
         self.require(id)?;
         let inst = self.inst(id);
@@ -1461,6 +1583,9 @@ impl Chat {
         }
         if inst.agent.launch() == "dsh" {
             return self.dsh_input(id, text, images).await;
+        }
+        if inst.sdk.load(Ordering::Relaxed) {
+            return self.sdk_input(id, text, images).await;
         }
         let (hooked, running) = {
             let st = lock(&inst.st);
@@ -1610,6 +1735,9 @@ impl Chat {
         if self.is_dsh(id) {
             return self.dsh_interrupt(id).await;
         }
+        if self.is_sdk(id) {
+            return self.sdk_interrupt(id).await;
+        }
         let inst = self.inst(id);
         // 已经停下来时不按：输入框空着时连按两次 Esc 会打开回退（Rewind）菜单
         // 额度用完、正在等重置后自动继续时也按（Esc 取消等待；这时输入框是空闲的）
@@ -1630,6 +1758,9 @@ impl Chat {
     pub fn answer(&self, id: &str, req: &PermissionAnswer) -> Result<(), LocalError> {
         self.require(id)?;
         let inst = self.inst(id);
+        if inst.sdk.load(Ordering::Relaxed) {
+            return self.sdk_answer(&inst, req);
+        }
         let mut st = lock(&inst.st);
         let Some(p) = st.pending.as_mut().filter(|p| p.id == req.id) else { return Err(LocalError::new("CHAT_STALE")) };
         // DSH：答复是 waterfall 的结果；不替用户回答时交给 DSH 自己的界面
@@ -1692,6 +1823,9 @@ impl Chat {
             let feedback = feedback.map(str::trim).filter(|f| !f.is_empty()).map(|f| f.chars().take(2000).collect::<String>());
             return self.dsh_plan(id, choice, feedback.as_deref());
         }
+        if self.is_sdk(id) {
+            return self.sdk_plan(&self.inst(id), choice, feedback);
+        }
         // 计划确认框是 Claude Code 的（[`Agent::plan_check`]；Codex 没有）
         if self.inst(id).agent.plan_check(1).is_none() {
             return Err(LocalError::invalid("choice", "invalid"));
@@ -1728,6 +1862,9 @@ impl Chat {
         if self.is_dsh(id) {
             return self.dsh_attach(id).await.map(|_| ());
         }
+        if self.is_sdk(id) {
+            return self.me.upgrade().ok_or_else(|| LocalError::new("CHAT_UNAVAILABLE"))?.sdk_relaunch(id).await;
+        }
         let pane = self.instances.pane(id).await.ok_or_else(|| LocalError::new("CHAT_NOT_RUNNING"))?;
         if agent_state(self.inst(id).agent, &pane).is_some() {
             return Err(LocalError::new("CHAT_CLAUDE_RUNNING"));
@@ -1748,6 +1885,9 @@ impl Chat {
         }
         if self.is_dsh(id) {
             return self.dsh_attach(id).await.map(|_| ());
+        }
+        if self.is_sdk(id) {
+            return self.me.upgrade().ok_or_else(|| LocalError::new("CHAT_UNAVAILABLE"))?.sdk_attach(id).await.map(|_| ());
         }
         self.claude_adopt(id, true).await
     }
@@ -1815,6 +1955,9 @@ impl Chat {
             return Err(LocalError::new("CHAT_UNAVAILABLE"));
         }
         crate::claude_profiles::get(&self.store, profile).ok_or_else(|| LocalError::invalid("claude_profile", "not_found"))?;
+        if self.is_sdk(id) {
+            return self.sdk_switch_profile(id, profile, go_on).await;
+        }
         let inst = self.inst(id);
         let session = lock(&inst.st).binding.as_ref().map(|b| b.session_id.clone()).ok_or_else(|| LocalError::new("CHAT_NOT_RUNNING"))?;
         self.instances.pane(id).await.ok_or_else(|| LocalError::new("CHAT_NOT_RUNNING"))?;
@@ -1927,6 +2070,9 @@ impl Chat {
         if inst.agent.launch() == "dsh" {
             return self.dsh_setting(id, kind, value).await;
         }
+        if inst.sdk.load(Ordering::Relaxed) {
+            return self.me.upgrade().ok_or_else(|| LocalError::new("CHAT_UNAVAILABLE"))?.sdk_setting(id, kind, value).await;
+        }
         // 斜杠命令和状态栏都是按 Claude Code 认的
         if inst.agent.launch() != "claude" {
             return Err(LocalError::new("CHAT_UNAVAILABLE"));
@@ -2029,6 +2175,34 @@ impl Chat {
         let mut ctx = models::Ctx { config_dir, state_file, workdir, env };
         models::merge_settings_env(&mut ctx);
         ctx
+    }
+
+    /// 不属于哪个会话的模型列表（宠物生成台词用）：`claude` 读 Claude Code 的模型目录（默认配置目录），`codex` 问共用的 app-server。
+    /// 返回 `{ installed, options: [{ value, label, efforts, default_effort }] }`；没装时 `installed: false`。
+    pub async fn tool_models(&self, agent: &str) -> Result<Value, LocalError> {
+        let found = crate::tools::detect(self.instances.shell()).await;
+        match agent {
+            "claude" => {
+                if found.claude.is_none() && crate::agents::claude_fallback().is_none() {
+                    return Ok(json!({ "installed": false, "options": [] }));
+                }
+                let home = dirs::home_dir().unwrap_or_default();
+                let mut ctx = models::Ctx { config_dir: models::config_dir(), state_file: models::state_file(), workdir: &home, env: HashMap::new() };
+                models::merge_settings_env(&mut ctx);
+                let options = tokio::task::block_in_place(|| models::options(&ctx));
+                Ok(json!({ "installed": true, "options": options }))
+            }
+            "codex" => {
+                if found.codex.is_none() {
+                    return Ok(json!({ "installed": false, "options": [] }));
+                }
+                match self.codex_catalog().await {
+                    Ok(v) => Ok(json!({ "installed": true, "options": v })),
+                    Err(e) => Ok(json!({ "installed": true, "options": [], "error": { "code": e.code, "params": e.params } })),
+                }
+            }
+            _ => Err(LocalError::invalid("agent", "one_of")),
+        }
     }
 
     /// 模型菜单：Claude Code 的选项（`/model` 里的那些），加上第三方接口自己列出的模型。
@@ -2263,7 +2437,7 @@ impl Chat {
                         }
                         if first.elapsed() >= LIMIT_AUTO_AFTER {
                             tracing::info!(id = %inst.id, option = %d.options[n].label, "额度用完的菜单没人选，替用户选“等重置后自动继续”");
-                            if let Err(e) = me.dialog_choose(&inst.id, &d.title, &d.options[n].label, n).await {
+                            if let Err(e) = me.dialog_choose(&inst.id, &d.title, &d.options[n].label, n, None).await {
                                 tracing::warn!(code = %e.code, "没能替用户选“等重置后自动继续”");
                             }
                             break;
@@ -2288,8 +2462,11 @@ impl Chat {
     // ---------------- TUI 上的选择框 ----------------
 
     /// 在界面上选了选择框的第 `index` 项：再抓一次屏，标题和选项数都对得上才按方向键移过去、回车。
-    pub async fn dialog_choose(&self, id: &str, title: &str, label: &str, index: usize) -> Result<(), LocalError> {
+    pub async fn dialog_choose(&self, id: &str, title: &str, label: &str, index: usize, text: Option<&str>) -> Result<(), LocalError> {
         self.require(id)?;
+        if self.is_sdk(id) {
+            return Err(LocalError::new("CHAT_SCREEN_CHANGED"));
+        }
         let agent = self.inst(id).agent;
         let d = self.instances.screen(id).await.as_deref().and_then(|c| agent.dialog(c)).ok_or_else(|| LocalError::new("CHAT_SCREEN_CHANGED"))?;
         // 标题是从选项往上找的第一行文字，说明里的时间、重绘时的折行都会让它和界面上看到的不一样；
@@ -2298,14 +2475,24 @@ impl Chat {
         if index >= d.options.len() || (d.title != title && !same_option) {
             return Err(LocalError::new("CHAT_SCREEN_CHANGED"));
         }
+        // AskUserQuestion 的“Type something.”：光标移过去就是一个输入框，空着按回车 Claude Code 当成取消、这一轮停掉。
+        // 一定要带上填的内容：移过去、打字、再回车
+        let free = screen::is_free_text(&d.options[index].label);
+        let text = text.map(|t| t.replace(['\r', '\n'], " ")).map(|t| t.trim().chars().take(2000).collect::<String>()).filter(|t| !t.is_empty());
+        if free && text.is_none() {
+            return Err(LocalError::invalid("text", "required"));
+        }
         let key = if index > d.selected { "Down" } else { "Up" };
-        let n = index.abs_diff(d.selected);
-        let mut keys = vec![key; n];
-        keys.push("Enter");
-        for k in keys {
-            self.instances.send_keys(id, &[k]).await?;
+        for _ in 0..index.abs_diff(d.selected) {
+            self.instances.send_keys(id, &[key]).await?;
             tokio::time::sleep(Duration::from_millis(40)).await;
         }
+        if let Some(t) = text.filter(|_| free) {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            self.type_text(id, &t).await?;
+            tokio::time::sleep(Duration::from_millis(80)).await;
+        }
+        self.instances.send_keys(id, &["Enter"]).await?;
         let inst = self.inst(id);
         lock(&inst.st).last_hook = None;
         Ok(())
@@ -2315,6 +2502,9 @@ impl Chat {
     pub async fn dialog_cancel(&self, id: &str) -> Result<(), LocalError> {
         self.require(id)?;
         let inst = self.inst(id);
+        if inst.sdk.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         // 界面上的弹窗和状态可能慢一步：只要屏幕上真有选择框就按 Esc（没有选择框时不按：
         // 输入框空着时连按两次 Esc 会打开回退菜单）
         let modal = matches!(self.instances.screen(id).await.map(|s| inst.agent.classify(&s)), Some(Screen::Modal));
@@ -2542,6 +2732,12 @@ impl Chat {
     pub async fn stop_task(&self, id: &str, tool: &str, command: Option<&str>) -> Result<(), LocalError> {
         self.require(id)?;
         let inst = self.inst(id);
+        if inst.sdk.load(Ordering::Relaxed) {
+            if tool.is_empty() {
+                return Err(LocalError::not_found());
+            }
+            return self.sdk_stop_task(id, tool).await;
+        }
         if !matches!(lock(&inst.st).phase, Phase::Idle | Phase::Running) {
             return Err(LocalError::new("CHAT_BUSY"));
         }
@@ -3750,5 +3946,147 @@ mod tests {
         if let Some(server) = server {
             server.kill();
         }
+    }
+
+    /// stream-json 的 Claude Code（claude_chat.rs），真的 claude：
+    /// `env -u TMUX -u TMUX_PANE TMUX_TMPDIR=<临时目录> CHAT_E2E_DIR=<项目目录> cargo test chat_e2e_sdk -- --ignored --nocapture`
+    /// （用 haiku，花不了几个 token）。看的是：发消息、审批、停止、/clear、重起后接着同一段。
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn chat_e2e_sdk() {
+        use std::sync::Arc;
+        let dir = std::env::var("CHAT_E2E_DIR").expect("CHAT_E2E_DIR");
+        assert!(std::env::var_os("TMUX").is_none(), "要在隔开的 tmux 里跑（env -u TMUX TMUX_TMPDIR=…）");
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::discover(Some(home.path().to_path_buf())).unwrap();
+        let store = Arc::new(Store::memory().unwrap());
+        let instances = Instances::new(store.clone(), paths.clone());
+        let input = crate::instances::Input { name: Some("sdk".into()), workdir: Some(dir.clone()), launch: Some("claude".into()), ..Default::default() };
+        let id = instances.create(input).await.unwrap().row.id;
+        let row = store.instance(&id).unwrap().unwrap();
+        assert!(instances.claude_sdk_mode(&row), "新建的对话模式 Claude Code 走 stream-json");
+        assert!(instances.launch_command(&row).is_none(), "终端里是 shell");
+        let chat = Chat::new(store.clone(), paths.clone(), instances.clone());
+        let (_rx, viewer) = chat.subscribe(&id).unwrap();
+
+        async fn wait(chat: &Arc<Chat>, id: &str, what: &str, secs: u64, f: impl Fn(&Value) -> bool) -> Value {
+            for _ in 0..secs * 4 {
+                let s = chat.snapshot(id).await.unwrap();
+                if f(&s) {
+                    return s;
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            let s = chat.snapshot(id).await.unwrap();
+            let items = s["items"].as_array().unwrap();
+            for it in &items[items.len().saturating_sub(6)..] {
+                println!("  {}", it.to_string().chars().take(400).collect::<String>());
+            }
+            panic!("等不到：{what}；最后的状态 {}", s["status"]);
+        }
+        let last_text = |s: &Value| s["items"].as_array().unwrap().iter().rev().find(|i| i["k"] == "assistant").map(|i| i.to_string()).unwrap_or_default();
+
+        let s = wait(&chat, &id, "起来", 30, |s| s["status"]["phase"] == "idle").await;
+        assert_eq!(s["status"]["caps"]["sdk"], true);
+        println!("起来了：version={} mode={}", s["status"]["version"], s["status"]["mode"]);
+        chat.setting(&id, "model", "haiku").await.unwrap();
+        chat.setting(&id, "mode", "default").await.unwrap();
+
+        let r = chat.input(&id, "只回复两个字母 ok，不要别的", &[]).await.unwrap();
+        assert_eq!(r["delivered"], true, "{r}");
+        let s = wait(&chat, &id, "回复 ok", 60, |s| s["status"]["phase"] == "idle" && last_text(s).to_lowercase().contains("ok")).await;
+        let sid = s["status"]["session_id"].as_str().expect("会话号").to_string();
+        println!("回复：{} 会话 {sid}", last_text(&s));
+
+        // 审批：界面上允许
+        let file = format!("{dir}/chat-e2e-sdk.txt");
+        let _ = std::fs::remove_file(&file);
+        chat.input(&id, &format!("用 Write 工具创建文件 {file}，内容是 hi。不要用别的工具。做完只回复 done"), &[]).await.unwrap();
+        let s = wait(&chat, &id, "审批", 60, |s| s["status"]["phase"] == "approval").await;
+        assert_eq!(s["status"]["pending"]["tool"], "Write", "{}", s["status"]);
+        let pid = s["status"]["pending"]["id"].as_u64().unwrap();
+        chat.answer(&id, &PermissionAnswer { id: pid, decision: "allow".into(), message: None, answers: None }).unwrap();
+        wait(&chat, &id, "写完", 60, |s| s["status"]["phase"] == "idle").await;
+        assert_eq!(std::fs::read_to_string(&file).unwrap_or_default().trim(), "hi");
+
+        // 拒绝：带理由
+        chat.input(&id, &format!("用 Bash 工具运行 rm {file}"), &[]).await.unwrap();
+        let s = wait(&chat, &id, "第二个审批", 60, |s| s["status"]["phase"] == "approval").await;
+        let pid = s["status"]["pending"]["id"].as_u64().unwrap();
+        chat.answer(&id, &PermissionAnswer { id: pid, decision: "deny".into(), message: Some("先别删".into()), answers: None }).unwrap();
+        wait(&chat, &id, "拒绝后结束", 60, |s| s["status"]["phase"] == "idle").await;
+        assert!(Path::new(&file).is_file(), "拒绝了就不能删");
+
+        // 停止
+        chat.setting(&id, "mode", "bypassPermissions").await.unwrap();
+        chat.input(&id, "用 Bash 工具在前台运行这条命令（不要设 run_in_background）：for i in $(seq 1 60); do echo $i; sleep 1; done 。然后回复 counted", &[]).await.unwrap();
+        wait(&chat, &id, "开始跑", 60, |s| s["status"]["phase"] == "running" && s["status"]["tool"] == "Bash").await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let t0 = Instant::now();
+        chat.interrupt(&id).await.unwrap();
+        wait(&chat, &id, "停下来", 20, |s| s["status"]["phase"] == "idle").await;
+        assert!(t0.elapsed() < Duration::from_secs(15), "停止要快");
+
+        // 重起进程：接着同一段
+        chat.relaunch(&id).await.unwrap();
+        let s = wait(&chat, &id, "重起", 30, |s| s["status"]["phase"] == "idle").await;
+        assert_eq!(s["status"]["session_id"], sid.as_str(), "接着同一段");
+        chat.input(&id, "我第一句话让你回复的两个字母是什么？只回复那两个字母", &[]).await.unwrap();
+        let s = wait(&chat, &id, "记得", 60, |s| s["status"]["phase"] == "idle" && last_text(s).to_lowercase().contains("ok")).await;
+        assert_eq!(s["status"]["session_id"], sid.as_str());
+
+        // 正在输出的预览、提问、计划
+        chat.setting(&id, "mode", "default").await.unwrap();
+        let (mut rx, _v2) = chat.subscribe(&id).unwrap();
+        let previews = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let p2 = previews.clone();
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(Event::Status(st)) if st["preview"].is_string() => {
+                        p2.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(_) => break,
+                }
+            }
+        });
+        chat.input(&id, "用中文写一段大约 150 字的话介绍猫，不要用任何工具", &[]).await.unwrap();
+        wait(&chat, &id, "写完一段", 60, |s| s["status"]["phase"] == "idle" && last_text(s).chars().count() > 60).await;
+        println!("预览推了 {} 次", previews.load(Ordering::SeqCst));
+        assert!(previews.load(Ordering::SeqCst) > 0, "正在输出时要推预览");
+        chat.input(&id, "用 AskUserQuestion 工具问我喜欢哪种颜色，选项 red 和 blue（单选）。拿到回答后只回复那个颜色的英文", &[]).await.unwrap();
+        let s = wait(&chat, &id, "提问", 60, |s| s["status"]["phase"] == "approval").await;
+        assert_eq!(s["status"]["pending"]["kind"], "question", "{}", s["status"]);
+        let q = s["status"]["pending"]["input"]["questions"][0]["question"].as_str().unwrap().to_string();
+        let pid = s["status"]["pending"]["id"].as_u64().unwrap();
+        chat.answer(&id, &PermissionAnswer { id: pid, decision: "answer".into(), message: None, answers: Some(json!({ q: "blue" })) }).unwrap();
+        let s = wait(&chat, &id, "按回答回复", 60, |s| s["status"]["phase"] == "idle" && last_text(s).to_lowercase().contains("blue")).await;
+        println!("提问后：{}", last_text(&s));
+        chat.setting(&id, "mode", "plan").await.unwrap();
+        chat.input(&id, &format!("计划：在 {dir} 里新建 plan-e2e.txt 写入 x。计划只要一句话，马上用 ExitPlanMode 提交"), &[]).await.unwrap();
+        let s = wait(&chat, &id, "计划确认", 90, |s| s["status"]["phase"] == "approval").await;
+        assert_eq!(s["status"]["pending"]["kind"], "plan", "{}", s["status"]);
+        chat.plan(&id, 1, None).await.unwrap();
+        let s = wait(&chat, &id, "批准计划后做完", 90, |s| s["status"]["phase"] == "idle").await;
+        assert_eq!(s["status"]["mode"], "acceptEdits");
+        assert!(Path::new(&format!("{dir}/plan-e2e.txt")).is_file(), "批准计划、自动接受改动后写了文件");
+        let _ = std::fs::remove_file(format!("{dir}/plan-e2e.txt"));
+        // 图片
+        let png = format!("{dir}/e2e.png");
+        std::fs::write(&png, base64::Engine::decode(&base64::engine::general_purpose::STANDARD, "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC").unwrap()).unwrap();
+        chat.input(&id, "这张图片是什么颜色？只回复一个英文单词", &[png.clone()]).await.unwrap();
+        let s = wait(&chat, &id, "看图", 60, |s| s["status"]["phase"] == "idle" && s["items"].as_array().unwrap().last().is_some_and(|i| i["k"] == "assistant")).await;
+        println!("看图：{}", last_text(&s));
+        let _ = std::fs::remove_file(&png);
+
+        // /clear：换一段新的
+        chat.input(&id, "/clear", &[]).await.unwrap();
+        let s = wait(&chat, &id, "新会话", 30, |s| s["status"]["session_id"].as_str().is_some_and(|x| x != sid)).await;
+        println!("/clear 后：{}", s["status"]["session_id"]);
+
+        let _ = std::fs::remove_file(&file);
+        drop(viewer);
+        chat.forget(&id);
     }
 }

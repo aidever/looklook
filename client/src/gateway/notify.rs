@@ -15,6 +15,7 @@ type R<T> = Result<T, LocalError>;
 
 fn view(app: &App) -> Value {
     let f = notify::load_feishu(&app.store);
+    let own = app.account.session().map(|s| s.device_id).unwrap_or_default();
     let now = app.account.clock.now_ms();
     let st = app.notify.status();
     json!({
@@ -39,6 +40,11 @@ fn view(app: &App) -> Value {
         // 没绑定时才显示绑定码（绑定后换人也可以再发一次码）
         "pair": f.as_ref().map(|f| json!({ "code": notify::pair_code(f, now), "expires_at": notify::pair_expires(now) })),
         "sync_enabled": crate::settings_sync::enabled(&app.store),
+        // 这台电脑的会话发不发；飞书是不是在这台电脑上配的（不是的话默认不发）
+        "here": {
+            "on": notify::sends_here(&app.store, f.as_ref(), &own),
+            "home": f.as_ref().is_none_or(|f| f.home.is_empty() || f.home == own),
+        },
         // 扫码建应用的进度（这台电脑上的）
         "register": app.notify.reg(),
     })
@@ -82,7 +88,7 @@ pub async fn put_feishu(State(app): State<App>, Json(req): Json<FeishuReq>) -> R
     let same_app = old.as_ref().is_some_and(|o| o.app_id == app_id && o.domain == domain);
     let f = match old {
         Some(o) if same_app => Feishu { app_secret: secret, ..o },
-        _ => Feishu { app_id, app_secret: secret, domain, ..Default::default() },
+        _ => Feishu { app_id, app_secret: secret, domain, home: app.account.session().map(|s| s.device_id).unwrap_or_default(), ..Default::default() },
     };
     notify::save_feishu(&app, Some(&f))?;
     app.notify.reset();
@@ -111,6 +117,17 @@ pub async fn register_cancel(State(app): State<App>) -> R<Json<Value>> {
 pub async fn delete_feishu(State(app): State<App>) -> R<Json<Value>> {
     notify::save_feishu(&app, None)?;
     app.notify.reset();
+    Ok(Json(view(&app)))
+}
+
+#[derive(Deserialize)]
+pub struct HereReq {
+    on: bool,
+}
+
+/// 这台电脑的会话提醒发不发到飞书等外部渠道（只改这台电脑，不同步）
+pub async fn put_here(State(app): State<App>, Json(req): Json<HereReq>) -> R<Json<Value>> {
+    notify::set_here(&app.store, Some(req.on))?;
     Ok(Json(view(&app)))
 }
 

@@ -235,6 +235,10 @@ pub struct Opts {
     /// 名字是用户自己起的
     #[serde(default)]
     pub name_custom: bool,
+    /// 对话模式的 Claude Code 由看看通过 stream-json 驱动（docs/CLAUDE_SDK.md），终端里是 shell。
+    /// 新建的都是；之前建的（TUI + hooks）保持原样，在编辑里重新打开对话界面后才换
+    #[serde(default)]
+    pub sdk: bool,
 }
 
 /// 第一句话最长多少个字符（太长的请在会话里粘贴）
@@ -746,6 +750,7 @@ impl Instances {
             // 新建的 Claude Code 终端默认带对话界面（需要会话保持）
             chat_ui: input.chat_ui.unwrap_or(matches!(self.backend, Backend::Tmux(_))),
             name_custom,
+            sdk: row.launch == "claude",
         };
         if container.is_some() {
             // 容器里的 root 不是这台电脑的 root，不用确认；没有对话界面
@@ -842,6 +847,10 @@ impl Instances {
             if row.launch == "dsh" && v != opts.chat_ui {
                 return Err(LocalError::invalid("chat_ui", "invalid"));
             }
+            // 重新打开对话界面的 Claude Code 换成 stream-json（重启终端后生效）
+            if v && !opts.chat_ui && row.launch == "claude" {
+                opts.sdk = true;
+            }
             opts.chat_ui = v;
         }
         if renamed {
@@ -892,6 +901,12 @@ impl Instances {
         self.stop(&v.row.id).await?;
         self.bump();
         Ok(())
+    }
+
+    /// 第一句话、接着的对话已经交给对话界面了（stream-json 的 Claude Code）：终端启动时不再用
+    pub fn forget_first(&self, id: &str) {
+        lock(&self.first_prompt).remove(id);
+        lock(&self.first_resume).remove(id);
     }
 
     pub async fn delete(&self, id: &str) -> Result<(), LocalError> {
@@ -1001,6 +1016,36 @@ impl Instances {
                 d
             }
         }
+    }
+
+    /// 资源看板（metrics.rs）：每个终端的进程树从哪几个进程开始（ttyd、tmux 面板），以及 tmux 服务进程。
+    /// 只问一次 tmux（`list-panes -a`），不逐个终端去问。
+    pub async fn process_roots(&self) -> crate::metrics::Roots {
+        let rows = self.store.instances().unwrap_or_default();
+        let mut panes: HashMap<String, Vec<u32>> = HashMap::new();
+        let mut mux = None;
+        if let Backend::Tmux(_) = self.backend {
+            if let Ok(out) = self.tmux(&["list-panes", "-a", "-F", "#{pid}\t#{session_name}\t#{pane_pid}"]).await {
+                for line in String::from_utf8_lossy(&out.stdout).lines() {
+                    let mut f = line.split('\t');
+                    let (Some(server), Some(session), Some(pane)) = (f.next(), f.next(), f.next()) else { continue };
+                    mux = mux.or(server.trim().parse().ok());
+                    if let Ok(pane) = pane.trim().parse() {
+                        panes.entry(session.to_string()).or_default().push(pane);
+                    }
+                }
+            }
+        }
+        let procs = lock(&self.procs);
+        let sessions = rows
+            .into_iter()
+            .map(|r| {
+                let mut roots = panes.remove(&Self::session_name(&r.id)).unwrap_or_default();
+                roots.extend(procs.get(&r.id).and_then(|p| p.child.id()));
+                crate::metrics::SessionRoots { id: r.id, name: r.name, launch: r.launch, roots }
+            })
+            .collect();
+        crate::metrics::Roots { mux, sessions, ..Default::default() }
     }
 
     pub async fn restart(&self, id: &str) -> Result<View, LocalError> {
@@ -1140,7 +1185,7 @@ impl Instances {
         }
         let launch = match prompt {
             // 对话模式的 Codex：第一句话、接着的会话都由对话界面交给 app-server，终端里是接上同一个会话的 TUI
-            _ if self.codex_app_mode(row) => self.launch_command(row),
+            _ if self.codex_app_mode(row) || self.claude_sdk_mode(row) => self.launch_command(row),
             None if resume.is_some() => resume.and_then(|r| self.resume_command(row, r)),
             None => self.launch_command(row),
             Some(p) => match row.launch.as_str() {
@@ -1212,10 +1257,14 @@ impl Instances {
     }
 
     /// 启动类型对应的命令行（含“全部权限”参数）；普通终端为 None。
-    fn launch_command(&self, row: &InstanceRow) -> Option<String> {
+    pub(crate) fn launch_command(&self, row: &InstanceRow) -> Option<String> {
         // 对话模式的 Codex：终端里是接到看看的 app-server 上的 TUI，和对话界面是同一个会话（还没起 app-server 时是 shell）
         if self.codex_app_mode(row) {
             return self.codex_tui_command(row);
+        }
+        // stream-json 的 Claude Code：对话由看看起的进程跑，终端里是 shell
+        if self.claude_sdk_mode(row) {
+            return None;
         }
         let cmd = launch_command_line(row, self.opts(&row.id), crate::platform::is_root())?;
         match self.chat_settings(row) {
@@ -1234,6 +1283,7 @@ impl Instances {
         let base = launch_command_line(row, self.opts(&row.id), crate::platform::is_root())?;
         let fork = if r.fork { " --fork-session" } else { "" };
         match row.launch.as_str() {
+            "claude" if self.claude_sdk_mode(row) => None,
             "claude" => Some(match self.chat_settings(row) {
                 Some(settings) => format!("{}{fork}", with_chat_hooks(&base, &row.id, &settings, Some(&r.id))),
                 None => format!("{} --resume {}{fork}", self.with_terminal_settings(row, base), r.id),
@@ -1253,6 +1303,12 @@ impl Instances {
     /// 对话模式的 Codex：对话由看看通过 `codex app-server` 驱动，终端里是同一个工作目录下的普通 shell。
     pub fn codex_app_mode(&self, row: &InstanceRow) -> bool {
         row.launch == "codex" && self.opts(&row.id).chat_ui && matches!(self.backend, Backend::Tmux(_)) && self.container(&row.id).is_none()
+    }
+
+    /// 对话模式的 Claude Code 走 stream-json（docs/CLAUDE_SDK.md）：对话由看看起的 `claude -p` 进程驱动，终端里是 shell。
+    pub fn claude_sdk_mode(&self, row: &InstanceRow) -> bool {
+        let o = self.opts(&row.id);
+        row.launch == "claude" && o.chat_ui && o.sdk && matches!(self.backend, Backend::Tmux(_)) && self.container(&row.id).is_none()
     }
 
     /// 带对话界面的 Claude Code：hooks 配置文件（`--settings` 用；顺便确保它已经写好）。不是这类终端时为 None。
@@ -2437,7 +2493,7 @@ mod tests {
     #[test]
     fn full_access_flags() {
         let mut r = row();
-        let on = Opts { full_access: true, root_confirmed: true, web_port: None, chat_ui: false, name_custom: false };
+        let on = Opts { full_access: true, root_confirmed: true, web_port: None, chat_ui: false, name_custom: false, sdk: false };
         assert_eq!(launch_command_line(&r, Opts::default(), false), None);
         r.launch = "codex".into();
         assert_eq!(launch_command_line(&r, Opts::default(), false).as_deref(), Some("codex"));
@@ -2460,23 +2516,23 @@ mod tests {
     #[test]
     fn opts_validation() {
         let mut r = row();
-        let mut o = Opts { full_access: true, root_confirmed: true, web_port: None, chat_ui: false, name_custom: false };
+        let mut o = Opts { full_access: true, root_confirmed: true, web_port: None, chat_ui: false, name_custom: false, sdk: false };
         Instances::validate_opts(&r, &mut o).unwrap();
         assert!(o == Opts::default(), "shell 终端忽略全部权限选项");
         r.launch = "claude".into();
-        let mut o = Opts { full_access: false, root_confirmed: true, web_port: None, chat_ui: false, name_custom: false };
+        let mut o = Opts { full_access: false, root_confirmed: true, web_port: None, chat_ui: false, name_custom: false, sdk: false };
         Instances::validate_opts(&r, &mut o).unwrap();
         assert!(!o.root_confirmed);
-        let mut o = Opts { full_access: true, root_confirmed: false, web_port: None, chat_ui: false, name_custom: false };
+        let mut o = Opts { full_access: true, root_confirmed: false, web_port: None, chat_ui: false, name_custom: false, sdk: false };
         Instances::validate_opts(&r, &mut o).unwrap();
         assert!(o.root_confirmed, "全部权限就是确认，root 下不用再确认");
         r.launch = "dsh".into();
-        let mut o = Opts { full_access: true, root_confirmed: true, web_port: None, chat_ui: false, name_custom: false };
+        let mut o = Opts { full_access: true, root_confirmed: true, web_port: None, chat_ui: false, name_custom: false, sdk: false };
         assert!(Instances::validate_opts(&r, &mut o).is_err(), "DSH 必须有网页端口");
-        let mut o = Opts { full_access: true, root_confirmed: true, web_port: Some(3080), chat_ui: false, name_custom: false };
+        let mut o = Opts { full_access: true, root_confirmed: true, web_port: Some(3080), chat_ui: false, name_custom: false, sdk: false };
         Instances::validate_opts(&r, &mut o).unwrap();
         assert!(o == Opts { web_port: Some(3080), ..Opts::default() }, "DSH 没有全部权限选项");
-        let mut o = Opts { full_access: true, root_confirmed: false, web_port: Some(3080), chat_ui: true, name_custom: false };
+        let mut o = Opts { full_access: true, root_confirmed: false, web_port: Some(3080), chat_ui: true, name_custom: false, sdk: false };
         Instances::validate_opts(&r, &mut o).unwrap();
         assert!(o == Opts { chat_ui: true, ..Opts::default() }, "对话模式的 DSH 不要网页端口");
     }

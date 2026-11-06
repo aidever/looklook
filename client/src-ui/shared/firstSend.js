@@ -36,9 +36,9 @@ export function useFirstSend(id) {
   return useSyncExternalStore(subscribe, () => items.get(id) ?? null);
 }
 
-/** 排上第一句（files 是 File），马上开始等会话起来。 */
-export function queueFirst(id, text, files = []) {
-  items.set(id, { text, files: files.map((file) => ({ file, url: URL.createObjectURL(file) })), state: 'waiting', fail: null });
+/** 排上第一句（files 是 File），马上开始等会话起来。`set`：草稿页选的模型、思考强度（{ model, effort }），先设好再发 */
+export function queueFirst(id, text, files = [], set = null) {
+  items.set(id, { text, files: files.map((file) => ({ file, url: URL.createObjectURL(file) })), set, state: 'waiting', fail: null });
   emit();
   deliver(id);
 }
@@ -98,6 +98,16 @@ async function deliver(id) {
   }
   const x = items.get(id);
   set(id, { state: 'sending' });
+  // 草稿页选了模型、思考强度：先设上（设不上不挡着发第一句，对话页里还能再选）
+  for (const kind of ['model', 'effort']) {
+    const value = x.set?.[kind];
+    if (value) await api.post(`/instances/${id}/chat/setting`, { kind, value }).catch(() => {});
+  }
+  // 只选了模型、没写字：设好就完了
+  if (!x.text.trim() && !x.files.length) {
+    dropFirst(id);
+    return;
+  }
   try {
     const images = [];
     for (const f of x.files) images.push(await runUpload({ file: f.file, dest: 'attach' }, { instanceId: id }));

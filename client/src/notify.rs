@@ -1,7 +1,9 @@
 //! 通知（docs/TASK_BOARD.md §3.3、§6）：人不在电脑前，也能在飞书里收到“等你处理 / 做完了 / 出错了”并直接处理。
 //!
 //! - **配置**放在同步集合 `notify`（`feishu`：应用凭证和绑定的人；`rules`：规则），经“设置同步”在用户自己的电脑之间传；
-//! - **发**：每台电脑只管自己的会话，每 2 秒看一遍各会话的状态（`Chat::brief`），按规则发卡片；
+//! - **发**：每台电脑只管自己的会话，每 2 秒看一遍各会话的状态（`Chat::brief`），按规则发卡片。
+//!   配置虽然同步，默认只有配飞书的那台电脑（`Feishu::home`）往外发自己会话的提醒，别的电脑在设置里自己打开（本机开关 [`sends_here`]）；
+//!   在飞书里对话的会话（有话题）不管这个开关；
 //!   “等你处理”解除时把卡片改成灰色（§6.4），同一个会话只留一张能点的卡片；
 //! - **收**：每台电脑都连长连接，飞书把每个回调随机给其中一台（集群模式）。会话在本机就直接处理；
 //!   在别的电脑上就先回一个 toast，再经 WebRTC 用设备签名转给那台（`POST /api/notify/action`），由它处理并更新卡片；
@@ -58,6 +60,29 @@ pub struct Feishu {
     /// 测试卡片上的按钮点通过：回调配好了
     #[serde(default)]
     pub callback_ok: bool,
+    /// 在哪台电脑上配的（设备 id）。飞书配置会同步到用户的每台电脑，但默认只有这台把自己会话的提醒发到飞书，
+    /// 别的电脑要在设置里自己打开（[`sends_here`]），免得一台电脑配了飞书，别的电脑的会话也都经这个机器人发过来
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub home: String,
+}
+
+/// 本机的开关（不同步）：这台电脑的会话提醒发不发到飞书等外部渠道
+const HERE_KEY: &str = "notify.here";
+
+/// 这台电脑的会话提醒发不发：自己设过的按设的；没设过时，飞书是在这台电脑上配的（或旧配置没记是哪台）才发
+pub fn sends_here(store: &crate::store::Store, f: Option<&Feishu>, own: &str) -> bool {
+    if let Ok(Some(v)) = store.get::<bool>(HERE_KEY) {
+        return v;
+    }
+    f.is_none_or(|f| f.home.is_empty() || f.home == own)
+}
+
+pub fn set_here(store: &crate::store::Store, on: Option<bool>) -> Result<(), LocalError> {
+    match on {
+        Some(v) => store.set(HERE_KEY, &v)?,
+        None => store.remove(HERE_KEY)?,
+    }
+    Ok(())
 }
 
 /// 规则（同步项 `notify/rules`，§6.5）
@@ -576,6 +601,8 @@ impl Notifier {
         let quiet = quiet_now(&rules);
         // 看看开着：外部通知先不发（看看里有提醒）。在飞书里对话的会话照常发
         let fg = rules.fg_quiet && self.fg_until.load(Ordering::SeqCst) > now;
+        // 这台电脑的会话不往外发（飞书是别的电脑配的、同步过来的）：只发在飞书里对话的会话（有话题的）
+        let here = sends_here(&app.store, load_feishu(&app.store).as_ref(), &own);
         let ids = app.chat.ids();
         for id in &ids {
             let Some(brief) = app.chat.brief(id) else { continue };
@@ -594,7 +621,7 @@ impl Notifier {
             let anchor = self.agent.anchor(app, id);
             if let Some(k) = key.as_ref().filter(|_| !busy) {
                 let fresh = live.as_ref().is_none_or(|s| s.key.as_ref() != Some(k));
-                if fresh && !quiet && !(fg && anchor.is_none()) && attn_due(&brief, now, muted, self.agent.following(id)) {
+                if fresh && !quiet && !(fg && anchor.is_none()) && (here || anchor.is_some()) && attn_due(&brief, now, muted, self.agent.following(id)) {
                     if let Some(info) = self.info(app, id, &brief, &rules) {
                         let to = self.target(app, out, id, anchor.clone(), &rules).await;
                         self.send_attn(app, out, &own, id, k, &brief, info, to).await;
@@ -610,7 +637,7 @@ impl Notifier {
             if matches!(notice, EndNotice::Send { .. } | EndNotice::Wait) && turn["ended_at"].as_i64().is_some_and(|e| self.agent.covers(id, e)) {
                 notice = EndNotice::Record;
             }
-            if fg && anchor.is_none() && matches!(notice, EndNotice::Send { .. }) {
+            if (fg || !here) && anchor.is_none() && matches!(notice, EndNotice::Send { .. }) {
                 notice = EndNotice::Record;
             }
             if let (EndNotice::Record | EndNotice::Send { .. }, Some(end)) = (&notice, turn["ended_at"].as_i64()) {
@@ -637,7 +664,7 @@ impl Notifier {
         if !quiet && rules.stall_min > 0 {
             for id in &ids {
                 let anchor = self.agent.anchor(app, id);
-                if fg && anchor.is_none() {
+                if (fg || !here) && anchor.is_none() {
                     continue;
                 }
                 self.check_stall(app, out, &own, id, &rules, now, anchor).await;
@@ -961,7 +988,7 @@ impl Notifier {
             "dialog" => {
                 let label = option(act.i)?;
                 let title = a["title"].as_str().unwrap_or_default().to_string();
-                app.chat.dialog_choose(&act.inst, &title, &label, act.i.unwrap_or(0)).await?;
+                app.chat.dialog_choose(&act.inst, &title, &label, act.i.unwrap_or(0), None).await?;
                 tr(en, &format!("已选「{label}」· 在飞书上"), &format!("Chose “{label}” · in Feishu"))
             }
             _ => return Err(LocalError::invalid("a", "invalid")),
@@ -1223,7 +1250,15 @@ impl Notifier {
         let f = match (old, open_id) {
             (Some(o), None) => Feishu { app_secret, ..o },
             (Some(o), Some(id)) if o.open_id.as_deref() == Some(&id) => Feishu { app_secret, ..o },
-            (_, id) => Feishu { app_id, app_secret, domain, bound_at: id.as_ref().map(|_| crate::util::system_ms()), open_id: id, callback_ok: false },
+            (_, id) => Feishu {
+                app_id,
+                app_secret,
+                domain,
+                bound_at: id.as_ref().map(|_| crate::util::system_ms()),
+                open_id: id,
+                callback_ok: false,
+                home: app.account.session().map(|s| s.device_id).unwrap_or_default(),
+            },
         };
         save_feishu(app, Some(&f))?;
         self.reset();

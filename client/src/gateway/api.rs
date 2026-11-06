@@ -2,7 +2,7 @@
 //! 跨站页面既带不上自定义头（需要预检，本服务不响应 CORS），也伪造不了来源。
 
 use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
-use axum::http::{Method, StatusCode};
+use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post, put};
@@ -82,6 +82,7 @@ pub fn routes(app: App) -> Router<App> {
         .route("/instances/{id}/chat/mentions", get(super::chat::mentions))
         .route("/instances/{id}/chat/prompts", get(super::chat::prompts))
         .route("/instances/{id}/chat/input", post(super::chat::input))
+        .route("/instances/{id}/chat/edit", post(super::chat::edit))
         .route("/instances/{id}/chat/later/take", post(super::chat::later_take))
         .route("/instances/{id}/chat/interrupt", post(super::chat::interrupt))
         .route("/instances/{id}/chat/permission", post(super::chat::permission))
@@ -154,6 +155,14 @@ pub fn routes(app: App) -> Router<App> {
         // 对话宠物（docs/PET_PACK.md §6.2）
         .route("/pets", get(pets_list))
         .route("/pets/settings", get(pets_settings).put(put_pets_settings))
+        .route("/pets/current", get(pets_current))
+        .route("/pets/version", get(pets_version))
+        .route("/pets/gen-models", get(pets_gen_models))
+        .route("/draft/models", get(draft_models))
+        .route("/draft/commands", get(draft_commands))
+        .route("/draft/mentions", get(draft_mentions))
+        .route("/pets/devices", get(pets_devices))
+        .route("/pets/devices/{device}", get(pets_device_list))
         .route("/pets/import", post(pets_import).layer(DefaultBodyLimit::max(crate::pets::MAX_PACK as usize + (1 << 20))))
         .route("/pets/import-path", post(pets_import_path))
         .route("/pets/from-github", post(pets_github_scan))
@@ -180,6 +189,7 @@ pub fn routes(app: App) -> Router<App> {
         .route("/notify/feishu", put(super::notify::put_feishu).delete(super::notify::delete_feishu))
         .route("/notify/feishu/register", post(super::notify::register).delete(super::notify::register_cancel))
         .route("/notify/unbind", post(super::notify::unbind))
+        .route("/notify/here", put(super::notify::put_here))
         .route("/notify/rules", put(super::notify::put_rules))
         .route("/notify/test", post(super::notify::test))
         .route("/notify/foreground", post(super::notify::foreground))
@@ -524,6 +534,17 @@ pub async fn create_session(app: &App, input: Input, start: bool) -> R<crate::in
         require_dsh(app).await?;
     }
     let v = if dsh_web { create_dsh(app, input).await? } else { app.instances.create(input).await? };
+    // stream-json 的 Claude Code：第一句话、接着哪段对话交给对话界面起的进程（终端里是 shell）
+    if app.instances.claude_sdk_mode(&v.row) && (prompt.is_some() || resume.is_some()) {
+        app.instances.forget_first(&v.row.id);
+        let (chat, id) = (app.chat.clone(), v.row.id.clone());
+        let (prompt, resume) = (prompt.clone(), resume.clone());
+        if prompt.is_some() {
+            tokio::spawn(async move { chat.sdk_first(&id, prompt, resume).await });
+        } else {
+            chat.sdk_first(&id, None, resume).await;
+        }
+    }
     // 对话模式的 Codex：第一句话、接着以前的对话都交给 app-server。接着哪段对话要在终端启动之前记好：
     // 终端里的 TUI 按它接上同一段，不然会自己新开一段空的
     if app.instances.codex_app_mode(&v.row) && resume.is_some() {
@@ -1031,9 +1052,9 @@ struct PathQ {
 }
 
 /// 能用管理台的人本来就有完整的 shell，不另加路径限制（§4.3）。
-async fn download(State(app): State<App>, Path(id): Path<String>, Query(q): Query<PathQ>) -> R<Response> {
+async fn download(State(app): State<App>, Path(id): Path<String>, Query(q): Query<PathQ>, headers: HeaderMap) -> R<Response> {
     app.instances.get(&id).await?;
-    transfer::download(&q.path).await
+    transfer::download(&q.path, &headers).await
 }
 
 /// 结束本机的 rz / sz（传完、或用户关掉面板）。
@@ -1069,8 +1090,8 @@ async fn clear_attachments(State(app): State<App>, Query(q): Query<AttachQ>) -> 
     Ok(Json(json!({ "removed": removed })))
 }
 
-async fn get_attachment(State(app): State<App>, Path((inst, name)): Path<(String, String)>) -> R<Response> {
-    transfer::serve_attachment(&app.paths, &inst, &name).await
+async fn get_attachment(State(app): State<App>, Path((inst, name)): Path<(String, String)>, headers: HeaderMap) -> R<Response> {
+    transfer::serve_attachment(&app.paths, &inst, &name, &headers).await
 }
 
 async fn delete_attachment(State(app): State<App>, Path((inst, name)): Path<(String, String)>) -> R<StatusCode> {
@@ -1566,8 +1587,8 @@ async fn ssh_allow_ai(State(app): State<App>, Path(id): Path<String>, Json(req):
 
 // ---------------- 管理台“文件”页（不属于某个终端；多台电脑时按 X-LL-Device 发给选中的那台） ----------------
 
-async fn fs_download(Query(q): Query<PathQ>) -> R<Response> {
-    transfer::download(&q.path).await
+async fn fs_download(Query(q): Query<PathQ>, headers: HeaderMap) -> R<Response> {
+    transfer::download(&q.path, &headers).await
 }
 
 /// 同 [`preview`]：只给几种位图类型，其余是加了 `sandbox` CSP 的纯文本。
@@ -3135,31 +3156,54 @@ async fn pets_bond(State(app): State<App>, Path((source, id)): Path<(String, Str
 }
 
 async fn pets_lines(State(app): State<App>, Path((source, id)): Path<(String, String)>) -> Json<Value> {
-    Json(crate::pets::gen_lines(&app.store, &format!("{source}:{id}")))
+    let key = format!("{source}:{id}");
+    let mut v = crate::pets::gen_lines(&app.store, &key);
+    if !v.is_object() {
+        v = json!({});
+    }
+    v["job"] = json!(crate::pet_lines::job(&key));
+    Json(v)
 }
 
 #[derive(Deserialize)]
 struct GenQ {
     #[serde(default)]
     via: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
+    #[serde(default)]
+    style: Option<String>,
 }
 
-/// 按人设生成一批碎碎念文案（中英两套，花一次 token），存起来替换原来的
-async fn pets_lines_generate(State(app): State<App>, Path((source, id)): Path<(String, String)>, Json(q): Json<GenQ>) -> R<Json<Value>> {
+/// 按人设生成一批碎碎念文案（中英两套，花一次 token）：在后台跑，马上返回进度；做完存起来替换原来的、通知页面。
+/// 这次的选择（用哪个、模型、思考等级、风格）记进设置，下次打开还是它。
+async fn pets_lines_generate(State(app): State<App>, Path((source, id)): Path<(String, String)>, Json(q): Json<GenQ>) -> R<Json<crate::pet_lines::Job>> {
     let home = app.paths.home.clone();
     let (s2, i2) = (source.clone(), id.clone());
     let pack = tokio::task::spawn_blocking(move || crate::pets::find(&home, &s2, &i2)).await.ok().flatten().ok_or_else(LocalError::not_found)?;
-    let via = q.via.unwrap_or_else(|| "auto".into());
-    if !matches!(via.as_str(), "auto" | "api" | "claude" | "codex") {
+    let mut settings = crate::pets::PetSettings::load(&app.store);
+    let g = &mut settings.gen;
+    if let Some(v) = q.via {
+        g.via = v;
+    }
+    if let Some(v) = q.model {
+        g.model = v.trim().to_string();
+    }
+    if let Some(v) = q.effort {
+        g.effort = v.trim().to_string();
+    }
+    if let Some(v) = q.style {
+        g.style = v.trim().to_string();
+    }
+    if !matches!(g.via.as_str(), "" | "auto" | "api" | "claude" | "codex") {
         return Err(LocalError::invalid("via", "one_of"));
     }
-    let settings = crate::pets::PetSettings::load(&app.store);
-    let (used, langs) = crate::pet_lines::generate(&pack, &via, settings.api.as_ref(), app.instances.shell()).await?;
-    let mut all = json!(langs);
-    all["at"] = json!(crate::util::system_ms());
-    all["via"] = json!(used);
-    crate::pets::set_gen_lines(&app.store, &pack.key(), Some(&all))?;
-    Ok(Json(all))
+    let cfg = g.clone();
+    let api = settings.api.clone();
+    settings.save(&app.store)?;
+    Ok(Json(crate::pet_lines::start(app.store.clone(), pack, cfg, api, app.instances.shell().to_string())))
 }
 
 async fn pets_lines_clear(State(app): State<App>, Path((source, id)): Path<(String, String)>) -> R<StatusCode> {
@@ -3167,10 +3211,140 @@ async fn pets_lines_clear(State(app): State<App>, Path((source, id)): Path<(Stri
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// 桌面宠物（`desk_pet`）：桌面应用开着宠物窗口没有、主窗口在看哪个对话
-async fn desk_pet_get() -> Json<Value> {
-    let s = crate::desk_pet::get();
-    Json(json!({ "running": crate::desk_pet::running(), "focus": s.focus }))
+/// 现在用的那只宠物（全局一只）：清单、大小、开关、生成的台词
+async fn pets_current(State(app): State<App>) -> Json<Value> {
+    let home = app.paths.home.clone();
+    let store = app.store.clone();
+    Json(tokio::task::spawn_blocking(move || crate::pets::current(&home, &store)).await.unwrap_or_default())
+}
+
+#[derive(Deserialize)]
+struct VersionQ {
+    #[serde(default)]
+    since: Option<u64>,
+}
+
+/// 宠物相关的东西变了没有：带 `since` 时等到变了（最多 25 秒）再回。页面据此马上换上新设置、新宠物、新台词
+async fn pets_version(Query(q): Query<VersionQ>) -> Json<Value> {
+    let v = match q.since {
+        Some(since) if since == crate::pets::ver() => crate::pets::wait_change(since, std::time::Duration::from_secs(25)).await,
+        _ => crate::pets::ver(),
+    };
+    Json(json!({ "ver": v }))
+}
+
+#[derive(Deserialize)]
+struct GenModelsQ {
+    via: String,
+}
+
+/// 生成台词能选的模型：Claude Code / Codex 当前登录（或配置的服务商）给的列表和各自的思考等级
+async fn pets_gen_models(State(app): State<App>, Query(q): Query<GenModelsQ>) -> R<Json<Value>> {
+    Ok(Json(app.chat.tool_models(&q.via).await?))
+}
+
+#[derive(Deserialize)]
+struct DraftQ {
+    #[serde(default)]
+    agent: String,
+    #[serde(default)]
+    workdir: String,
+    #[serde(default)]
+    q: String,
+}
+
+/// 草稿页（新会话还没建）：选模型用的列表（那台电脑上的 Claude Code / Codex 自己的）
+async fn draft_models(State(app): State<App>, Query(q): Query<DraftQ>) -> R<Json<Value>> {
+    Ok(Json(app.chat.tool_models(&q.agent).await?))
+}
+
+/// 草稿页：`/`、`$` 提示的命令、技能
+async fn draft_commands(State(app): State<App>, Query(q): Query<DraftQ>) -> R<Json<Value>> {
+    Ok(Json(app.chat.draft_commands(&q.agent, &q.workdir).await?))
+}
+
+/// 草稿页：`@` 提示的文件
+async fn draft_mentions(State(app): State<App>, Query(q): Query<DraftQ>) -> R<Json<Value>> {
+    Ok(Json(app.chat.draft_mentions(&q.workdir, &q.q).await?))
+}
+
+/// 同一账户的其他电脑（“从其他电脑导入”宠物用）。“只看本机”时界面不显示其他电脑，但导入宠物是自己点的，照样列出来
+async fn pets_devices(State(app): State<App>) -> R<Json<Value>> {
+    let Some(me) = app.account.session().map(|s| s.device_id) else {
+        return Ok(Json(json!({ "items": [] })));
+    };
+    let d = app.outbound.devices(&app.account, false).await?;
+    let v = serde_json::to_value(&d).unwrap_or_default();
+    let items: Vec<Value> = v["items"].as_array().into_iter().flatten().filter(|x| x["id"].as_str() != Some(me.as_str())).cloned().collect();
+    Ok(Json(json!({ "items": items })))
+}
+
+/// 另一台电脑上装了哪些宠物：经这台电脑到那台的连接去问（只看本机时页面的请求不会转给别的电脑）
+async fn pets_device_list(State(app): State<App>, Path(device): Path<String>) -> R<Json<Value>> {
+    Ok(Json(crate::pet_transfer::remote_list(&app, &device).await?))
+}
+
+/// 桌面宠物（`desk_pet`）：桌面应用开着宠物窗口没有、主窗口在看哪个对话、宠物在哪块屏幕。
+/// `?since=<seq>`：等到变了（最多 25 秒）再回——宠物换屏幕、网页宠物来打招呼要马上反应
+async fn desk_pet_get(Extension(access): Extension<Access>, Query(q): Query<VersionQ>) -> Json<Value> {
+    let s = match q.since {
+        Some(since) if since == crate::desk_pet::get().seq => crate::desk_pet::wait_change(since, std::time::Duration::from_secs(25)).await,
+        _ => crate::desk_pet::get(),
+    };
+    let mut v = desk_view(&s);
+    // 是不是这台电脑上打开的（网页宠物只和同一台电脑上的桌面宠物互动）
+    v["here"] = json!(access.is_local());
+    Json(v)
+}
+
+fn desk_view(s: &crate::desk_pet::State) -> Value {
+    let k = |i: usize| s.screens.get(i).map(|x| if x.scale > 0.0 { x.scale } else { 1.0 }).unwrap_or(1.0);
+    // 每块屏幕左右还有没有屏幕（宠物能不能走过去）
+    let edges: Vec<Value> = s
+        .screens
+        .iter()
+        .enumerate()
+        .map(|(i, a)| {
+            let near = |right: bool| s.screens.iter().enumerate().any(|(j, b)| j != i && b.y < a.y + a.h && b.y + b.h > a.y && if right { (b.x - (a.x + a.w)).abs() < 8.0 } else { (b.x + b.w - a.x).abs() < 8.0 });
+            json!({ "left": near(false), "right": near(true), "w": a.w / k(i), "h": a.h / k(i) })
+        })
+        .collect();
+    let now = crate::util::system_ms();
+    let peer = s.peer.as_ref().filter(|p| now - p.at < 15_000);
+    // 桌面宠物在屏幕上的位置（物理像素，人物中心）：网页宠物转过去看它
+    let me = s.hit.zip(s.screens.get(s.owner)).map(|([x, y, w, h], a)| {
+        let k = k(s.owner);
+        json!({ "x": a.x + (x + w / 2.0) * k, "y": a.y + (y + h / 2.0) * k })
+    });
+    json!({ "running": crate::desk_pet::running(), "focus": s.focus, "owner": s.owner, "entry": s.entry, "screens": edges, "peer": peer, "chat": s.chat, "note": s.note, "open": s.open, "pos": me, "seq": s.seq })
+}
+
+#[derive(Deserialize)]
+struct DeskExit {
+    screen: usize,
+    x: f64,
+    y: f64,
+    /// 走出去的那边；拖过去放下的没有
+    side: Option<String>,
+    /// 离底边多高（CSS 像素）：拖过去放下的按松手的位置，走过去的保持原来的高度
+    bottom: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct DeskPeerQ {
+    /// 网页宠物在屏幕上的位置（物理像素）
+    x: f64,
+    y: f64,
+    #[serde(default)]
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct DeskChatQ {
+    from: String,
+    key: String,
+    #[serde(default)]
+    reply: bool,
 }
 
 #[derive(Deserialize)]
@@ -3180,6 +3354,24 @@ struct DeskPetQ {
     hit: Option<Option<[f64; 4]>>,
     focus: Option<String>,
     grab: Option<bool>,
+    /// 宠物走出 / 被拖出了它所在的屏幕
+    exit: Option<DeskExit>,
+    /// 网页里的宠物报到（同一台电脑上、页面在前台）
+    peer: Option<DeskPeerQ>,
+    /// 宠物之间说了一句
+    chat: Option<DeskChatQ>,
+    /// 主窗口：让桌面宠物报一条会话提醒
+    note: Option<DeskNoteQ>,
+    /// 桌面宠物：点了提醒气泡，打开这个会话
+    open: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DeskNoteQ {
+    kind: String,
+    #[serde(default)]
+    title: String,
+    id: String,
 }
 
 fn some_value<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
@@ -3189,7 +3381,7 @@ fn some_value<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Re
 async fn desk_pet_put(Extension(access): Extension<Access>, Json(q): Json<DeskPetQ>) -> Json<Value> {
     // 只有这台电脑上的窗口能改（远程打开的页面不该挪桌面上的宠物）
     if !access.is_local() {
-        return desk_pet_get().await;
+        return Json(desk_view(&crate::desk_pet::get()));
     }
     let s = crate::desk_pet::update(|s| {
         if let Some(h) = q.hit {
@@ -3201,15 +3393,55 @@ async fn desk_pet_put(Extension(access): Extension<Access>, Json(q): Json<DeskPe
         if let Some(g) = q.grab {
             s.grab = g;
         }
+        if let Some(e) = q.exit.filter(|e| e.screen == s.owner && e.x.is_finite() && e.y.is_finite()) {
+            let seq = s.entry.as_ref().map_or(0, |x| x.seq) + 1;
+            match crate::desk_pet::handoff(&s.screens, e.screen, e.x, e.y, e.side.as_deref()) {
+                Some((i, x, y)) => {
+                    s.owner = i;
+                    s.hit = None;
+                    let y = if e.side.is_some() { e.bottom.unwrap_or(y) } else { y };
+                    // 走过来的接着往里走
+                    let walk = e.side.as_deref().map(|d| d.to_string());
+                    s.entry = Some(crate::desk_pet::Entry { x, y, walk, seq });
+                }
+                None => {
+                    // 那边没有屏幕：贴着边放回来，往回走
+                    let w = s.screens.get(e.screen).map(|a| a.w / if a.scale > 0.0 { a.scale } else { 1.0 }).unwrap_or(0.0);
+                    let x = e.x.clamp(40.0, (w - 40.0).max(40.0));
+                    let back = e.side.as_deref().map(|d| if d == "left" { "right" } else { "left" }.to_string());
+                    s.entry = Some(crate::desk_pet::Entry { x, y: e.bottom.unwrap_or(0.0), walk: back, seq });
+                }
+            }
+        }
+        if let Some(p) = q.peer.filter(|p| p.x.is_finite() && p.y.is_finite()) {
+            s.peer = Some(crate::desk_pet::Peer { x: p.x, y: p.y, name: p.name.chars().take(40).collect(), at: crate::util::system_ms() });
+        }
+        if let Some(c) = q.chat.filter(|c| matches!(c.from.as_str(), "web" | "desk") && c.key.len() <= 40) {
+            let seq = s.chat.as_ref().map_or(0, |x| x.seq) + 1;
+            s.chat = Some(crate::desk_pet::Chat { from: c.from, key: c.key, reply: c.reply, seq });
+        }
+        if let Some(n) = q.note.filter(|n| matches!(n.kind.as_str(), "done" | "failed" | "attn") && n.id.len() <= 100) {
+            let seq = s.note.as_ref().map_or(0, |x| x.seq) + 1;
+            s.note = Some(crate::desk_pet::Note { kind: n.kind, title: n.title.chars().take(80).collect(), id: n.id, seq, at: crate::util::system_ms() });
+        }
+        if let Some(id) = q.open.as_ref().filter(|id| id.len() <= 100) {
+            let seq = s.open.as_ref().map_or(0, |x| x.seq) + 1;
+            s.open = Some(crate::desk_pet::Note { id: id.clone(), seq, at: crate::util::system_ms(), ..Default::default() });
+        }
     });
-    Json(json!({ "running": crate::desk_pet::running(), "focus": s.focus }))
+    if q.open.is_some() {
+        crate::desk_pet::opened();
+    }
+    let mut v = desk_view(&s);
+    v["here"] = json!(true);
+    Json(v)
 }
 
 async fn instance_pet(State(app): State<App>, Path(id): Path<String>) -> R<Json<Value>> {
     let row = app.store.instance(&id)?.ok_or_else(LocalError::not_found)?;
     let home = app.paths.home.clone();
     let store = app.store.clone();
-    Ok(Json(tokio::task::spawn_blocking(move || crate::pets::for_agent(&home, &store, &row.launch)).await.unwrap_or_default()))
+    Ok(Json(tokio::task::spawn_blocking(move || { let _ = &row; crate::pets::current(&home, &store) }).await.unwrap_or_default()))
 }
 
 async fn instance_pet_file(State(app): State<App>, Path((id, source, pid, name)): Path<(String, String, String, String)>) -> R<Response> {

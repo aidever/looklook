@@ -8,13 +8,13 @@
 
 关掉网页任务照样运行。不用公网 IP，不改路由器，手机不用装 App。
 
-[![GitHub stars](https://img.shields.io/github/stars/imythu/looklook?style=flat&logo=github&color=6366f1)](https://github.com/imythu/looklook/stargazers)
-[![Release](https://img.shields.io/github/v/release/imythu/looklook?label=release&color=0ea5e9)](https://github.com/imythu/looklook/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/imythu/looklook/total?color=10b981)](https://github.com/imythu/looklook/releases)
+[![GitHub stars](https://img.shields.io/github/stars/aidever/looklook?style=flat&logo=github&color=6366f1)](https://github.com/aidever/looklook/stargazers)
+[![Release](https://img.shields.io/github/v/release/aidever/looklook?label=release&color=0ea5e9)](https://github.com/aidever/looklook/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/aidever/looklook/total?color=10b981)](https://github.com/aidever/looklook/releases)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
 [![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](#支持的平台)
 
-[官网](https://looklook.dev) · [下载](https://looklook.dev/download) · [文档](https://looklook.dev/docs) · [路线图](https://looklook.dev/roadmap) · [版本发布](https://github.com/imythu/looklook/releases)
+[官网](https://looklook.dev) · [下载](https://looklook.dev/download) · [文档](https://looklook.dev/docs) · [路线图](https://looklook.dev/roadmap) · [版本发布](https://github.com/aidever/looklook/releases)
 
 **简体中文** · [English](README.en.md)
 
@@ -132,15 +132,15 @@ looklook login                                    # 可选：开通远程访问�
 
 ## 路线图
 
-接下来：本机网页的端到端加密、签名更新、更多通知渠道（浏览器推送、邮件…）、手机上发起任务和审阅 diff、可分享的预览、更多中转地区。详见[完整路线图](https://looklook.dev/roadmap)。在 [Issues](https://github.com/imythu/looklook/issues) 提需求或点 👍，会影响开发顺序。
+接下来：本机网页的端到端加密、签名更新、更多通知渠道（浏览器推送、邮件…）、手机上发起任务和审阅 diff、可分享的预览、更多中转地区。详见[完整路线图](https://looklook.dev/roadmap)。在 [Issues](https://github.com/aidever/looklook/issues) 提需求或点 👍，会影响开发顺序。
 
 ## 支持一下
 
-如果看看帮你省了几趟跑回电脑前的路，**[点个 ⭐ Star](https://github.com/imythu/looklook/stargazers)** 吧，这是其他开发者发现它的主要途径。也欢迎推荐给整天跑 AI 助手的朋友。
+如果看看帮你省了几趟跑回电脑前的路，**[点个 ⭐ Star](https://github.com/aidever/looklook/stargazers)** 吧，这是其他开发者发现它的主要途径。也欢迎推荐给整天跑 AI 助手的朋友。
 
-交流反馈：QQ 群 1029871265，或在 [Issues](https://github.com/imythu/looklook/issues) 提建议。
+交流反馈：QQ 群 1029871265，或在 [Issues](https://github.com/aidever/looklook/issues) 提建议。
 
-[![Star History Chart](https://api.star-history.com/svg?repos=imythu/looklook&type=Date)](https://star-history.com/#imythu/looklook&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=aidever/looklook&type=Date)](https://star-history.com/#aidever/looklook&Date)
 
 ## 从源码构建
 

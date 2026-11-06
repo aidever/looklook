@@ -46,4 +46,4 @@ jobs:
           VERSION: ${{ inputs.version }}
           MIN_SUPPORTED: ${{ inputs.min_supported_version }}
           ALLOW_MIXED: ${{ inputs.allow_mixed }}
-        run: scripts/release-stage.sh promote "$VERSION" "$MIN_SUPPORTED" "$ALLOW_MIXED"
+        run: bash scripts/release-stage.sh promote "$VERSION" "$MIN_SUPPORTED" "$ALLOW_MIXED"

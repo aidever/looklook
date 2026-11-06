@@ -35,7 +35,7 @@ jobs:
       - name: 版本、更新说明、还没转正式版
         env:
           GH_TOKEN: ${{ github.token }}
-        run: scripts/release-stage.sh preflight
+        run: bash scripts/release-stage.sh preflight
 
   build:
     needs: prepare
@@ -139,7 +139,7 @@ jobs:
       - name: 上传到 beta Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: scripts/release-stage.sh upload macos
+        run: bash scripts/release-stage.sh upload macos
 
   # 按已上传的平台重新生成 release.json（beta 通道）：各平台的合并串行执行（concurrency 组 client-stage）。
   merge:
@@ -156,4 +156,4 @@ jobs:
       - name: 合并 release.json
         env:
           GH_TOKEN: ${{ github.token }}
-        run: scripts/release-stage.sh merge
+        run: bash scripts/release-stage.sh merge

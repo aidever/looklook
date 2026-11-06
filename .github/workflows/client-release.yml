@@ -163,7 +163,7 @@ jobs:
   # macOS（Apple 芯片）：在 macOS runner 上原生编译客户端；随包的 ttyd 用 zig 编译（脚本只依赖系统自带的 libSystem）。
   macos:
     needs: prepare
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
     defaults:
       run:

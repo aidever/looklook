@@ -68,6 +68,7 @@ import {
   MessageSquarePlus,
   MessageCircle,
   UserRound,
+  FolderSearch,
 } from 'lucide-react';
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -685,7 +686,7 @@ function ReadBody({ id, block, result }) {
         <ReadImage id={id} path={path} />
       ) : whole ? (
         <div className="chat-read-preview">
-          <FilePreview ep={ep} entry={{ name: fileName(path), path }} sep={pathSep(path)} numbered focus={focus} onClose={() => (text ? setWhole(false) : open())} />
+          <FilePreview ep={ep} entry={{ name: fileName(path), path }} sep={pathSep(path)} focus={focus} onClose={() => (text ? setWhole(false) : open())} />
         </div>
       ) : numbered ? (
         <ReadLines id={id} result={result} read={numbered} onLine={openFile ? open : null} />
@@ -1371,11 +1372,26 @@ function FileViewer({ target, onTarget, onClose }) {
         </span>
       )}
       <CopyPath path={path} />
+      {ep.id && (
+        // 会话的“文件”标签里打开它所在的文件夹并预览（TerminalView 的 useSideTabs）
+        <button
+          type="button"
+          className="btn btn-plain btn-icon"
+          onClick={() => {
+            onClose();
+            window.dispatchEvent(new CustomEvent(`ll-files-reveal:${ep.id}`, { detail: { path } }));
+          }}
+          aria-label={t('chat.reveal_file')}
+          title={t('chat.reveal_file')}
+        >
+          <FolderSearch size={16} />
+        </button>
+      )}
     </>
   );
   return createPortal(
     <div className="chat-file-viewer" role="dialog" aria-modal="true" aria-label={name} onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <FilePreview key={`${path}:${focus?.from ?? ''}`} ep={ep} entry={{ name, path }} sep={sep} onClose={onClose} numbered focus={focus} extra={extra} />
+      <FilePreview key={`${path}:${focus?.from ?? ''}`} ep={ep} entry={{ name, path }} sep={sep} onClose={onClose} focus={focus} extra={extra} />
     </div>,
     document.body,
   );
@@ -2908,6 +2924,22 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
     seenSid.current = sid;
     if (was && !touch) requestAnimationFrame(() => area.current?.focus());
   }, [sid, disabled]);
+  // “文件”标签里点了“填进输入框”：接在已经写的后面（中间空一格），光标放到最后
+  useEffect(() => {
+    const ins = (e) => {
+      const add = e.detail ?? '';
+      if (!add) return;
+      setText((cur) => (cur && !/\s$/.test(cur) ? `${cur} ${add}` : `${cur}${add}`));
+      requestAnimationFrame(() => {
+        const el = area.current;
+        if (!el) return;
+        el.focus();
+        el.setSelectionRange(el.value.length, el.value.length);
+      });
+    };
+    window.addEventListener(`ll-chat-insert:${id}`, ins);
+    return () => window.removeEventListener(`ll-chat-insert:${id}`, ins);
+  }, [id]);
   // 外面（空白对话里的常用开头）要把一句话填进输入框
   useEffect(() => {
     const fill = (e) => {
@@ -4732,7 +4764,8 @@ function Live({ status, items, since }) {
   const act = status?.agent === 'claude' || !status?.agent ? spinnerText(status?.activity, i18n.language) : codexActivity(t, status?.activity, status?.tool);
   return (
     <>
-      {shown && <div className="chat-preview">{preview}</div>}
+      {/* stream-json、Codex 的预览是 Markdown 原文：和写完的回复一样排版（换成正式消息时不跳）；TUI 抓屏的已经排过版，照原样 */}
+      {shown && (status?.preview_md ? <Markdown text={preview} /> : <div className="chat-preview">{preview}</div>)}
       <p className="chat-working">
         {agent === 'claude' ? <SpinGlyph /> : <CodexGlyph launch={agent} />}
         <span className="ellipsis">{act.text || (status?.tool ? t('chat.running_tool', { tool: status.tool }) : t('chat.working'))}</span>

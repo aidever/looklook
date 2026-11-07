@@ -55,6 +55,9 @@ pub struct Conv {
     /// 搜对话全文时命中的那一段
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snippet: Option<String>,
+    /// Claude Code 的程序调用（`claude -p`、SDK）记下的：只列看看对话模式自己起的（见 [`mark_own`]）
+    #[serde(skip)]
+    pub sdk: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -91,6 +94,43 @@ struct Cached {
 }
 
 static CACHE: Mutex<Option<HashMap<PathBuf, Cached>>> = Mutex::new(None);
+
+/// 看看对话模式（stream-json）起的 Claude Code 对话：记录里的 entrypoint 也是 `sdk-cli`，和别的程序调用分不开，
+/// 由对话模式在绑定会话时记下（kv [`OWN_KEY`]，启动时读回来）
+static OWN: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
+const OWN_KEY: &str = "history.own_sdk_convs";
+/// 最多记这么多个（最早的先丢）
+const OWN_MAX: usize = 5000;
+
+/// 启动时读回记下的
+pub fn load_own(store: &crate::store::Store) {
+    let v: Vec<String> = store.get(OWN_KEY).ok().flatten().unwrap_or_default();
+    *OWN.lock().unwrap_or_else(|e| e.into_inner()) = Some(v.into_iter().collect());
+}
+
+/// 记下一段对话模式自己起的对话（历史里列出来、会话名取它的标题）
+pub fn mark_own(store: &crate::store::Store, id: &str) {
+    {
+        let mut g = OWN.lock().unwrap_or_else(|e| e.into_inner());
+        if !g.get_or_insert_with(Default::default).insert(id.to_string()) {
+            return;
+        }
+    }
+    let mut v: Vec<String> = store.get(OWN_KEY).ok().flatten().unwrap_or_default();
+    if !v.iter().any(|x| x == id) {
+        v.push(id.to_string());
+        if v.len() > OWN_MAX {
+            v.drain(..v.len() - OWN_MAX);
+        }
+        if let Err(e) = store.set(OWN_KEY, &v) {
+            tracing::debug!(error = %e, "没记下对话模式的对话");
+        }
+    }
+}
+
+fn is_own(id: &str) -> bool {
+    OWN.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|s| s.contains(id))
+}
 
 fn env_dir(k: &str) -> Option<PathBuf> {
     std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from)
@@ -198,6 +238,9 @@ fn list_blocking(q: &Query) -> Vec<Conv> {
                 }
             };
             if let Some(c) = conv.as_mut() {
+                if c.sdk && !is_own(&c.id) {
+                    continue;
+                }
                 c.live = now.duration_since(mtime).map_or(true, |d| d < Duration::from_secs(LIVE_SECS));
                 if let Some(t) = titles.get(&c.id) {
                     c.title = t.clone();
@@ -501,10 +544,8 @@ fn parse_claude(path: &Path) -> Option<Conv> {
     }
     let head = head_lines(path, HEAD_BYTES, CLAUDE_LIST);
     let tail = tail_lines(path, TAIL_BYTES, CLAUDE_LIST);
-    // 程序调用（`claude -p`、SDK）的对话不是你聊的，不列
-    if head.iter().chain(tail.iter()).find_map(|v| v["entrypoint"].as_str()).is_some_and(|e| e.starts_with("sdk")) {
-        return None;
-    }
+    // 程序调用（`claude -p`、SDK）的对话不是你聊的，不列（看看对话模式自己起的除外，列表时再看，见 mark_own）
+    let sdk = head.iter().chain(tail.iter()).find_map(|v| v["entrypoint"].as_str()).is_some_and(|e| e.starts_with("sdk"));
     let all = || head.iter().chain(tail.iter());
     let workdir = all().find_map(|v| v["cwd"].as_str())?.to_string();
     let first = head.iter().filter_map(claude_msg).find(|(r, _)| *r == "user").map(|(_, t)| t);
@@ -527,6 +568,7 @@ fn parse_claude(path: &Path) -> Option<Conv> {
         instance_id: None,
         started_at: head.iter().find_map(|v| v["timestamp"].as_str()).map(String::from),
         snippet: None,
+        sdk,
     })
 }
 
@@ -585,6 +627,7 @@ fn parse_codex(path: &Path) -> Option<Conv> {
         instance_id: None,
         started_at: p["timestamp"].as_str().or_else(|| meta["timestamp"].as_str()).map(String::from),
         snippet: None,
+        sdk: false,
     })
 }
 
@@ -613,6 +656,7 @@ fn opencode_conv(id: &str, title: &str, dir: &str, updated_ms: i64) -> Option<Co
         instance_id: None,
         started_at: None,
         snippet: None,
+        sdk: false,
     })
 }
 
@@ -728,6 +772,7 @@ mod tests {
             instance_id: None,
             started_at: None,
             snippet: None,
+            sdk: false,
         };
         let all = vec![conv("claude", "a", "/w/app", 5), conv("codex", "b", "/w/lib/", 4), conv("codex", "c", "/w/app/", 3), conv("claude", "d", "/w/app", 2), conv("claude", "e", "", 1)];
         let f = group_folders(all.into_iter(), 2);
@@ -764,10 +809,12 @@ mod tests {
     }
 
     #[test]
-    fn claude_sdk_and_empty_are_skipped() {
+    fn claude_sdk_marked_and_empty_skipped() {
         let dir = tempfile::tempdir().unwrap();
         let sdk = write(dir.path(), "a.jsonl", &[serde_json::json!({"type":"user","cwd":"/w","entrypoint":"sdk-cli","message":{"content":"hi"}})]);
-        assert!(parse_claude(&sdk).is_none());
+        // 程序调用的记下来是 sdk，列表时只留看看对话模式自己起的
+        assert!(parse_claude(&sdk).is_some_and(|c| c.sdk));
+        assert!(!is_own("a"));
         let empty = write(dir.path(), "b.jsonl", &[serde_json::json!({"type":"mode","mode":"normal"})]);
         assert!(parse_claude(&empty).is_none());
     }

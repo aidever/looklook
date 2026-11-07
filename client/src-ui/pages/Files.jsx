@@ -6,15 +6,17 @@ import { useTranslation } from 'react-i18next';
 import { selectedDevice } from '../shared/api.js';
 import { PageHead } from '../shared/page.jsx';
 import FileBrowser from './FileBrowser.jsx';
+import { useSessionUi } from './Sessions.jsx';
 
 export default function Files() {
   const { t } = useTranslation();
   const device = selectedDevice();
+  const ui = useSessionUi();
   return (
     <>
       <PageHead title={t('fb.page_title')} sub={t('fb.page_sub')} help="files" perDevice />
       <div className="files-page">
-        <FileBrowser key={device ?? 'local'} />
+        <FileBrowser key={device ?? 'local'} onNewHere={ui ? (dir) => ui.newSession({ device, workdir: dir }) : undefined} />
       </div>
     </>
   );

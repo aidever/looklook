@@ -233,7 +233,7 @@ impl Proc {
 }
 
 /// Windows 上 npm 装的是 `claude.cmd`：要经 cmd 运行
-fn command(program: &std::path::Path) -> tokio::process::Command {
+pub(super) fn command(program: &std::path::Path) -> tokio::process::Command {
     let ext = program.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
     if cfg!(windows) && matches!(ext.as_deref(), Some("cmd" | "bat")) {
         let mut c = tokio::process::Command::new("cmd");

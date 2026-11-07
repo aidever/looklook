@@ -11,6 +11,14 @@
     "test": "node --test src-ui/shared/xfer.test.mjs src-ui/shared/chat.test.mjs src-ui/shared/inputHistory.test.mjs src-ui/shared/chatCopy.test.mjs src-ui/shared/office.test.mjs src-ui/shared/selectAt.test.mjs src-ui/shared/pet/brain.test.mjs src-ui/shared/pet/events.test.mjs"
   },
   "dependencies": {
+    "@codemirror/commands": "6.11.1",
+    "@codemirror/language": "6.13.1",
+    "@codemirror/language-data": "6.5.2",
+    "@codemirror/search": "6.7.2",
+    "@codemirror/state": "6.7.6",
+    "@codemirror/view": "6.43.15",
+    "@lezer/highlight": "1.2.5",
+    "@vidstack/react": "1.15.7",
     "@xterm/addon-fit": "0.11.0",
     "@xterm/addon-progress": "0.2.0",
     "@xterm/addon-unicode11": "0.9.0",
@@ -35,5 +43,9 @@
     "@tauri-apps/cli": "^2.12.1",
     "@vitejs/plugin-react": "^5.0.0",
     "vite": "^7.0.0"
+  },
+  "overrides": {
+    "@lezer/common": "1.5.3",
+    "@lezer/lr": "1.4.11"
   }
 }

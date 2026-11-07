@@ -1,13 +1,17 @@
 // 文件浏览：终端页的“文件”标签（传 id：从终端的当前目录开始）和管理台的“文件”页（不传 id：从主目录开始）。
-// 浏览这台电脑上的文件，预览文本、图片、Markdown 和办公文件（PDF、Word、Excel、CSV，OfficePreview.jsx），下载、把路径填进终端；新建文件夹、重命名、删除、上传（拖进列表也行）。
+// 浏览这台电脑上的文件，预览代码和文字（CodeMirror，CodeView.jsx）、图片（点开看大图）、音视频（Vidstack，MediaPlayer.jsx）、Markdown
+// 和办公文件（PDF、Word、Excel、CSV，OfficePreview.jsx），下载、把路径填进终端 / 对话输入框；新建文件夹、重命名、删除、上传（拖进列表也行）。
+// 和会话联动（docs/FILES_LINKAGE_2026-11-07.md）：每个会话的文件标签记住看到哪（文件夹、打开的文件、隐藏文件开关），
+// 会话里 Git 改过的文件标出来，对话里点开的文件能“在文件中显示”，文件夹上能直接开新会话。
 // 终端标签的浏览、预览、下载挂在 /api/instances/{id}/… 下面，多台电脑时按终端路由到它所在的电脑（服务端 edge/route.rs）；
 // “文件”页与文件管理用 /api/fs/…，多台电脑时发给选中的那台（X-LL-Device）。
-import { ArrowUp, ArrowUpDown, BookOpen, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Code2, Copy, Download, Eye, EyeOff, File, FileArchive, FileAudio, FileCode, FileSpreadsheet, FileText, FileVideo, Folder, FolderPlus, Home, Image as ImageIcon, Link2, LocateFixed, PenLine, RefreshCw, Search, TextCursorInput, Trash2, Upload, WrapText, X } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { ArrowUp, ArrowUpDown, BookOpen, CirclePlay, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Code2, Copy, Download, Eye, EyeOff, File, FileArchive, FileAudio, FileCode, FileSpreadsheet, FileText, FileVideo, Folder, FolderPlus, Home, Image as ImageIcon, Link2, LocateFixed, Maximize2, MessageSquarePlus, PenLine, RefreshCw, Search, TextCursorInput, Trash2, Upload, WrapText, X } from 'lucide-react';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { deviceApi, fetchRaw, plainLinksWork, rtcMode, saveViaFrame, selectedDevice, terminalDevice } from '../shared/api.js';
 import { errorText } from '../shared/i18n.js';
+import ImageViewer from '../shared/ImageViewer.jsx';
 import Markdown, { isMarkdown } from '../shared/Markdown.jsx';
 import { OFFICE_MAX, officeKind, parseCsv, WHOLE } from '../shared/office.js';
 import { relativeTime } from '../shared/time.js';
@@ -17,6 +21,12 @@ import { formatBytes, quotePath } from '../shared/xfer.js';
 import { renderOffice, SheetView } from './OfficePreview.jsx';
 
 const IMAGE = /\.(png|jpe?g|gif|webp|bmp|ico|avif)$/i;
+export const VIDEO = /\.(mp4|m4v|webm|mov|mkv|ogv)$/i;
+export const AUDIO = /\.(mp3|m4a|aac|wav|flac|ogg|oga|opus)$/i;
+/** 远程又不能用普通链接时（多台电脑、不经 WebRTC）音视频只能整个取回来再放：太大就不放了 */
+const MEDIA_FETCH_MAX = 512 * 1024 * 1024;
+const Player = lazy(() => import('../shared/MediaPlayer.jsx'));
+const CodeView = lazy(() => import('../shared/CodeView.jsx'));
 const PREVIEW_MAX = 1024 * 1024; // 与 transfer::PREVIEW_MAX 一致
 const ACTIVE = ['queued', 'uploading', 'retrying'];
 
@@ -24,7 +34,7 @@ const ACTIVE = ['queued', 'uploading', 'retrying'];
 export function endpoints(id) {
   const q = (path) => `?path=${encodeURIComponent(path)}`;
   return id
-    ? { list: (path, hidden) => `/instances/${id}/fs${q(path)}&hidden=${hidden ? 1 : 0}`, preview: (p) => `/instances/${id}/preview${q(p)}`, download: (p) => `/instances/${id}/download${q(p)}`, plain: true }
+    ? { id, list: (path, hidden) => `/instances/${id}/fs${q(path)}&hidden=${hidden ? 1 : 0}`, preview: (p) => `/instances/${id}/preview${q(p)}`, download: (p) => `/instances/${id}/download${q(p)}`, plain: true }
     : { list: (path, hidden) => `/fs/list${q(path)}&files=1&hidden=${hidden ? 1 : 0}`, preview: (p) => `/fs/preview${q(p)}`, download: (p) => `/fs/download${q(p)}`, plain: plainLinksWork() };
 }
 
@@ -44,6 +54,25 @@ export function crumbs(path, sep) {
 }
 
 const join = (dir, name, sep) => (dir.endsWith(sep) ? `${dir}${name}` : `${dir}${sep}${name}`);
+
+/** 文件所在的文件夹：`/a/b.txt` → `/a`，`C:\\a\\b.txt` → `C:\\a`，`/b.txt` → `/` */
+export function parentDir(path) {
+  const sep = !path.includes('/') && path.includes('\\') ? '\\' : '/';
+  const i = path.lastIndexOf(sep);
+  if (i < 0) return '';
+  const dir = path.slice(0, i);
+  return !dir ? sep : /^[A-Za-z]:$/.test(dir) ? `${dir}\\` : dir;
+}
+
+/**
+ * 音视频的播放地址：能用普通链接时直接指向下载接口（`inline=1`，边下边播）；远程经 WebRTC 时同样，
+ * 用 `__lldev` 指定电脑（Service Worker 转发，Range 照常）。都不行时返回 null（只能取回来再放）。
+ */
+export function mediaSrc(ep, path, device) {
+  const href = `/api${ep.download(path)}&inline=1`;
+  if (rtcMode) return device ? `${href}&__lldev=${encodeURIComponent(device)}` : href;
+  return ep.plain ? href : null;
+}
 
 /** 文本预览：按 UTF-8 解码，含 NUL 或解不出来就当二进制。 */
 function decodeText(buf) {
@@ -96,45 +125,13 @@ function DownloadLink({ ep, entry, size = 15 }) {
   );
 }
 
-/** 带行号显示的最多这么多行（再多一行一个元素太慢，照旧整段显示） */
-const NUMBER_MAX = 20000;
-
-/** 带行号的文字：`focus`（{ from, to }，从 1 开始）那几行标出来，打开时滚到那里 */
-function NumberedText({ text, wrap, focus }) {
-  const box = useRef(null);
-  const lines = useMemo(() => {
-    const l = text.split('\n');
-    if (l.length > 1 && l[l.length - 1] === '') l.pop();
-    return l;
-  }, [text]);
-  const from = focus?.from ?? 0;
-  const to = focus?.to ?? from;
-  useEffect(() => {
-    if (!from) return;
-    const el = box.current?.children[from - 1];
-    // 标出的几行放在上面三分之一，前面留几行看上下文
-    el?.scrollIntoView({ block: 'start' });
-    const body = box.current?.closest('.fb-preview-body');
-    if (el && body) body.scrollTop = Math.max(0, body.scrollTop - body.clientHeight / 4);
-  }, [text, from]);
-  return (
-    <div ref={box} className={`fb-text fb-lines ${wrap ? 'fb-wrap' : ''}`}>
-      {lines.map((l, n) => (
-        // eslint-disable-next-line react/no-array-index-key -- 行没有别的标识
-        <div key={n} className={from && n + 1 >= from && n + 1 <= to ? 'on' : undefined}>
-          <span className="fb-no" aria-hidden="true">{n + 1}</span>
-          <span>{l || ' '}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 /**
  * 一个文件的预览（“文件”页右边；对话页里点到的文件也用它，见 ChatView 的 FileViewer）。
- * 对话页另外传：numbered（文字带行号）、focus（{ from, to }：标出这几行并滚过去）、extra（标题栏关闭按钮前的按钮）。
+ * 对话页另外传：focus（{ from, to }：标出这几行并滚过去）、extra（标题栏关闭按钮前的按钮）。
+ * `device`：文件在哪台电脑（远程播放音视频时用）；`active`：看不见时（切到别的标签、别的会话）把正在放的停下。
+ * `insertLabel`：填路径按钮的说明（对话会话里填进输入框，其他填进终端）。
  */
-export function Preview({ ep, entry, onClose, onInsert, sep, numbered = false, focus = null, extra = null }) {
+export function Preview({ ep, entry, onClose, onInsert, insertLabel, sep, focus = null, extra = null, device = null, active = true }) {
   const { t } = useTranslation();
   const [state, setState] = useState({ loading: true });
   const [wrap, setWrap] = useState(true);
@@ -144,10 +141,33 @@ export function Preview({ ep, entry, onClose, onInsert, sep, numbered = false, f
   // Markdown 看排版效果 / 源码，CSV 看表格 / 源码；要标出某几行时先看源码
   const [rendered, setRendered] = useState(!focus?.from);
   const image = IMAGE.test(entry.name);
+  const video = VIDEO.test(entry.name);
+  const audio = !video && AUDIO.test(entry.name);
+  const media = video || audio;
   const whole = WHOLE.includes(office);
+  const [zoom, setZoom] = useState(false);
   useEffect(() => {
     let alive = true;
     let url = null;
+    if (media) {
+      const src = mediaSrc(ep, entry.path, device);
+      if (src) setState({ media: src });
+      else if ((entry.size ?? 0) > MEDIA_FETCH_MAX) setState({ office: 'media_big' });
+      else {
+        setState({ loading: true });
+        fetchRaw(ep.download(entry.path))
+          .then((r) => r.blob())
+          .then((b) => {
+            url = URL.createObjectURL(b);
+            if (alive) setState({ media: url });
+          })
+          .catch((error) => alive && setState({ error }));
+      }
+      return () => {
+        alive = false;
+        if (url) URL.revokeObjectURL(url);
+      };
+    }
     // 浏览器不能在页面里显示 PDF（安卓上的 Chrome 等）时不取回来，提示下载
     const noPdf = office === 'pdf' && navigator.pdfViewerEnabled === false;
     if (office === 'other' || noPdf || (whole && entry.size > OFFICE_MAX)) {
@@ -183,10 +203,11 @@ export function Preview({ ep, entry, onClose, onInsert, sep, numbered = false, f
   const showMd = md && rendered && state.text != null;
   const showSheet = csv && rendered && state.text != null;
   const csvSheets = useMemo(() => (showSheet ? parseCsv(state.text, entry.name) : null), [showSheet, state.text, entry.name]);
+  const insertText = insertLabel ?? t('fb.insert');
   return (
     <div className="fb-preview" role="region" aria-label={entry.name}>
       <div className="fb-preview-head">
-        {image ? <ImageIcon size={16} aria-hidden="true" /> : office === 'xlsx' || csv ? <FileSpreadsheet size={16} aria-hidden="true" /> : <FileText size={16} aria-hidden="true" />}
+        {media ? <CirclePlay size={16} aria-hidden="true" /> : image ? <ImageIcon size={16} aria-hidden="true" /> : office === 'xlsx' || csv ? <FileSpreadsheet size={16} aria-hidden="true" /> : <FileText size={16} aria-hidden="true" />}
         <b className="ellipsis grow" title={entry.path}>{entry.name}</b>
         {entry.size != null && <span className="muted small">{formatBytes(entry.size)}</span>}
         {(md || csv) && state.text != null && (
@@ -201,13 +222,18 @@ export function Preview({ ep, entry, onClose, onInsert, sep, numbered = false, f
             {rendered ? <Code2 size={16} /> : csv ? <FileSpreadsheet size={16} /> : <BookOpen size={16} />}
           </button>
         )}
+        {image && state.url && (
+          <button type="button" className="btn btn-plain btn-icon" onClick={() => setZoom(true)} aria-label={t('fb.zoom')} title={t('fb.zoom')}>
+            <Maximize2 size={16} />
+          </button>
+        )}
         {!image && !showMd && !showSheet && state.text != null && (
           <button type="button" className={`btn btn-plain btn-icon ${wrap ? 'on' : ''}`} onClick={() => setWrap(!wrap)} aria-pressed={wrap} aria-label={t('fb.wrap')} title={t('fb.wrap')}>
             <WrapText size={16} />
           </button>
         )}
         {onInsert && (
-          <button type="button" className="btn btn-plain btn-icon" onClick={() => onInsert(entry.path)} aria-label={t('fb.insert')} title={t('fb.insert')}>
+          <button type="button" className="btn btn-plain btn-icon" onClick={() => onInsert(entry.path)} aria-label={insertText} title={insertText}>
             <TextCursorInput size={16} />
           </button>
         )}
@@ -222,8 +248,17 @@ export function Preview({ ep, entry, onClose, onInsert, sep, numbered = false, f
           <p className="muted small fb-pad">{t('fb.loading')}</p>
         ) : state.error ? (
           <p className="fb-pad small" style={{ color: 'var(--danger)' }}>{t(`files.err.${state.error.code}`, { defaultValue: errorText(t, state.error) })}</p>
+        ) : state.media ? (
+          <Suspense fallback={<p className="muted small fb-pad">{t('fb.loading')}</p>}>
+            {active ? <Player key={state.media} src={state.media} name={entry.name} audio={audio} onError={() => setState({ office: 'media_failed' })} /> : <p className="muted small fb-pad">{t('fb.media_paused')}</p>}
+          </Suspense>
         ) : image ? (
-          <img src={state.url} alt={entry.name} />
+          <>
+            <button type="button" className="fb-img" onClick={() => setZoom(true)} aria-label={t('fb.zoom')}>
+              <img src={state.url} alt={entry.name} />
+            </button>
+            {zoom && <ImageViewer images={[{ url: state.url, name: entry.name }]} onClose={() => setZoom(false)} />}
+          </>
         ) : state.office ? (
           <p className="muted small fb-pad">{t(`fb.office_${state.office}`, { size: formatBytes(OFFICE_MAX) })}</p>
         ) : state.view?.url ? (
@@ -244,10 +279,12 @@ export function Preview({ ep, entry, onClose, onInsert, sep, numbered = false, f
               <SheetView sheets={csvSheets} />
             ) : showMd ? (
               <Markdown text={state.text} imageUrl={ep.plain ? (src) => `/api${ep.preview(resolve(dir, src, sep))}` : null} />
-            ) : numbered && state.text && state.text.length < NUMBER_MAX * 200 && state.text.split('\n', NUMBER_MAX + 1).length <= NUMBER_MAX ? (
-              <NumberedText text={state.text} wrap={wrap} focus={focus} />
+            ) : !state.text ? (
+              <pre className="fb-text">{t('fb.empty_file')}</pre>
             ) : (
-              <pre className={`fb-text ${wrap ? 'fb-wrap' : ''}`}>{state.text || t('fb.empty_file')}</pre>
+              <Suspense fallback={<pre className={`fb-text ${wrap ? 'fb-wrap' : ''}`}>{state.text}</pre>}>
+                <CodeView text={state.text} name={entry.name} wrap={wrap} focus={focus} />
+              </Suspense>
             )}
           </>
         )}
@@ -451,6 +488,68 @@ function useBatchDownload(ep) {
   return { run, busy };
 }
 
+// ---------------- 记住看到哪（每个会话的文件标签、每台电脑的“文件”页各记一份） ----------------
+
+const VIEWS_KEY = 'll-fb-views';
+const VIEWS_MAX = 60;
+const views = new Map(Object.entries(readStore(VIEWS_KEY, {})));
+/** 文件夹、打开的文件、隐藏文件开关；切标签、切会话、刷新页面后接着看 */
+export function readView(key) {
+  return views.get(key) ?? null;
+}
+function writeView(key, v) {
+  views.delete(key);
+  views.set(key, v);
+  // 只留最近的几十个（会话删了也不会一直攒着）
+  while (views.size > VIEWS_MAX) views.delete(views.keys().next().value);
+  writeStore(VIEWS_KEY, Object.fromEntries(views));
+}
+
+// ---------------- Git 改动标记（会话的文件标签：这个仓库里改过的文件、里面有改动的文件夹） ----------------
+
+const GIT_TTL_MS = 10_000;
+/** `{ root, files }` → 绝对路径 → 标记（M 改了、A 新加、U 没跟踪、R 改名、! 冲突）；有改动的上级文件夹记 `dir` */
+export function gitMarks(st, sep) {
+  const out = new Map();
+  if (!st?.repo || !st.root) return out;
+  for (const f of st.files ?? []) {
+    const code = f.conflict ? '!' : f.worktree === '?' ? 'U' : f.worktree !== '.' ? f.worktree : f.index;
+    if (code === 'D') continue;
+    const rel = sep === '\\' ? f.path.replaceAll('/', '\\') : f.path;
+    const abs = join(st.root, rel, sep);
+    out.set(abs, code === 'C' ? 'A' : code === 'T' ? 'M' : code);
+    for (let d = parentDir(abs); d && d.length > st.root.length && !out.has(d); d = parentDir(d)) out.set(d, 'dir');
+  }
+  return out;
+}
+
+function useGitMarks(id, ops, dir, sep, tick, active) {
+  const cache = useRef(null); // { root, st, at }
+  const [marks, setMarks] = useState(() => new Map());
+  useEffect(() => {
+    if (!id || !dir || !active) return undefined;
+    const c = cache.current;
+    const inside = c?.st?.root && (dir === c.st.root || dir.startsWith(c.st.root + sep));
+    if (inside && Date.now() - c.at < GIT_TTL_MS && c.tick === tick) {
+      setMarks(gitMarks(c.st, sep));
+      return undefined;
+    }
+    let alive = true;
+    ops
+      .get(`/instances/${id}/git?path=${encodeURIComponent(dir)}`)
+      .then((st) => {
+        if (!alive) return;
+        cache.current = { st, at: Date.now(), tick };
+        setMarks(gitMarks(st, sep));
+      })
+      .catch(() => alive && setMarks(new Map()));
+    return () => {
+      alive = false;
+    };
+  }, [id, dir, tick, active]);
+  return marks;
+}
+
 /** 可以拖的分隔条：调预览的宽度（记住） */
 function Splitter({ box, width, onWidth }) {
   const { t } = useTranslation();
@@ -491,17 +590,23 @@ function Splitter({ box, width, onWidth }) {
 
 /**
  * `id` 终端（不传 = 管理台“文件”页，浏览选中的那台电脑）；`active` 是否可见（不可见时不刷新）；
- * `onInsert(text)` 把路径填进终端（没有时不显示这个按钮）。
+ * `onInsert(text)` 把路径填进终端或对话输入框（没有时不显示这个按钮），`insertTo`：'chat' | 'term'（按钮上怎么说）；
+ * `reveal`（{ path, n }）：打开这个文件所在的文件夹并预览它（对话里点开的文件“在文件中显示”）；
+ * `onNewHere(dir)`：在这个文件夹里开新会话（没有时不显示）。
  */
-export default function FileBrowser({ id, active = true, onInsert }) {
+export default function FileBrowser({ id, active = true, onInsert, insertTo = 'term', reveal = null, onNewHere }) {
   const { t } = useTranslation();
   const toast = useToast();
   const confirm = useConfirm();
-  const [path, setPath] = useState(''); // 空 = 终端的当前目录（“文件”页：主目录）
-  const [hidden, setHidden] = useState(false);
+  const device = id ? terminalDevice(id) : selectedDevice();
+  const viewKey = id ? `i:${id}` : `fs:${device ?? ''}`;
+  const saved = useMemo(() => readView(viewKey), [viewKey]);
+  const [path, setPath] = useState(saved?.path ?? ''); // 空 = 终端的当前目录（“文件”页：主目录）
+  const [hidden, setHidden] = useState(Boolean(saved?.hidden));
   const [tick, setTick] = useState(0);
   const [state, setState] = useState({ loading: true });
-  const [open, setOpen] = useState(null);
+  const [open, setOpen] = useState(saved?.open ?? null);
+  const [pending, setPending] = useState(null); // 要打开的文件（“在文件中显示”：等列表到了再开）
   const [dialog, setDialog] = useState(null);
   const [dropping, setDropping] = useState(false);
   const [sort, setSortState] = useState(() => readStore(SORT_KEY, { key: 'name', dir: 1 }));
@@ -515,7 +620,6 @@ export default function FileBrowser({ id, active = true, onInsert }) {
   const mainRef = useRef(null);
   const searchRef = useRef(null);
   const ep = endpoints(id);
-  const device = id ? terminalDevice(id) : selectedDevice();
   const ops = deviceApi(device ?? undefined);
   const store = dirUploadStore(device);
   const tasks = useSyncExternalStore(store.subscribe, store.getSnapshot);
@@ -535,6 +639,38 @@ export default function FileBrowser({ id, active = true, onInsert }) {
   }, [id, device, path, hidden, tick, active]);
   const data = state.data;
   const sep = data?.os === 'windows' ? '\\' : '/';
+  const marks = useGitMarks(id, ops, data?.path, sep, tick, active);
+  // 记住看到哪：真正到了的文件夹（不是“空 = 当前目录”），打开的文件
+  useEffect(() => {
+    if (!data?.path) return;
+    const o = open && { name: open.name, path: open.path, size: open.size, mtime_ms: open.mtime_ms };
+    writeView(viewKey, { path: data.path, hidden, open: o });
+  }, [viewKey, data?.path, hidden, open?.path]);
+  // “在文件中显示”：去它所在的文件夹，列表到了再打开它（是隐藏文件就把隐藏文件打开）
+  useEffect(() => {
+    if (!reveal?.path) return;
+    const dir = parentDir(reveal.path);
+    if (!dir) return;
+    const name = reveal.path.slice(dir.length).replace(/^[\\/]/, '');
+    if (name.startsWith('.')) setHidden(true);
+    setPending(reveal.path);
+    setOpen(null);
+    setPath(dir);
+    if (data?.path === dir) reload();
+  }, [reveal?.n]);
+  useEffect(() => {
+    if (!pending || !data?.entries || state.loading) return;
+    if (data.path !== parentDir(pending)) return;
+    setPending(null);
+    const name = pending.slice(data.path.length).replace(/^[\\/]/, '');
+    const e = data.entries.find((x) => x.name === name);
+    if (!e) {
+      toast(t('fb.reveal_gone', { name }), 'error');
+      return;
+    }
+    setOpen({ ...e, path: pending });
+    requestAnimationFrame(() => listRef.current?.querySelector(`[data-name="${CSS.escape(name)}"]`)?.scrollIntoView({ block: 'center' }));
+  }, [pending, data, state.loading]);
   // 换了文件夹：清掉勾选、筛选、光标
   useEffect(() => {
     setChecked(new Set());
@@ -567,6 +703,7 @@ export default function FileBrowser({ id, active = true, onInsert }) {
     setPath(p);
   };
   const insert = onInsert && ((p) => onInsert(`${quotePath(p, data?.os)} `));
+  const insertLabel = t(insertTo === 'chat' ? 'fb.insert_chat' : 'fb.insert');
   const copyPaths = (paths) =>
     navigator.clipboard?.writeText(paths.join('\n')).then(
       () => toast(t(paths.length > 1 ? 'fb.copied_n' : 'fb.copied', { n: paths.length })),
@@ -746,6 +883,11 @@ export default function FileBrowser({ id, active = true, onInsert }) {
             <Copy size={16} />
           </button>
         )}
+        {onNewHere && canWrite && (
+          <button type="button" className="btn btn-plain btn-icon" onClick={() => onNewHere(data.path)} aria-label={t('fb.new_here')} title={t('fb.new_here')}>
+            <MessageSquarePlus size={17} />
+          </button>
+        )}
         {id && (
           <button type="button" className="btn btn-plain btn-icon" onClick={() => go('')} aria-label={t('fb.cwd')} title={t('fb.cwd')}>
             <LocateFixed size={17} />
@@ -849,9 +991,9 @@ export default function FileBrowser({ id, active = true, onInsert }) {
             <span className="fb-act-label">{t('fb.copy_paths_short')}</span>
           </button>
           {insert && (
-            <button type="button" className="btn btn-plain fb-act" onClick={() => onInsert(`${picked.map((e) => quotePath(e.path, data?.os)).join(' ')} `)} title={t('fb.insert')}>
+            <button type="button" className="btn btn-plain fb-act" onClick={() => onInsert(`${picked.map((e) => quotePath(e.path, data?.os)).join(' ')} `)} title={insertLabel}>
               <TextCursorInput size={16} aria-hidden="true" />
-              <span className="fb-act-label">{t('fb.insert_short')}</span>
+              <span className="fb-act-label">{t(insertTo === 'chat' ? 'fb.insert_chat_short' : 'fb.insert_short')}</span>
             </button>
           )}
           <button type="button" className="btn btn-plain fb-act fb-danger" onClick={() => remove(picked)} title={t('fb.delete')}>
@@ -884,8 +1026,9 @@ export default function FileBrowser({ id, active = true, onInsert }) {
             const on = checked.has(e.name);
             const time = fileTime(t, e.mtime_ms, now);
             const size = e.is_dir ? '' : formatBytes(e.size ?? NaN);
+            const mark = marks.get(e.path);
             return (
-              <div key={e.name} role="row" data-idx={idx} aria-selected={selected || on} className={`fb-row ${selected ? 'selected' : ''} ${on ? 'picked' : ''} ${cursor === idx ? 'cursor' : ''}`}>
+              <div key={e.name} role="row" data-idx={idx} data-name={e.name} aria-selected={selected || on} className={`fb-row ${selected ? 'selected' : ''} ${on ? 'picked' : ''} ${cursor === idx ? 'cursor' : ''}`}>
                 <span className="fb-c-check">
                   <input type="checkbox" checked={on} onChange={() => toggle(e.name)} aria-label={t('fb.pick', { name: e.name })} />
                 </span>
@@ -903,6 +1046,7 @@ export default function FileBrowser({ id, active = true, onInsert }) {
                     <span className="fb-name-main">
                       {e.name}
                       {e.link && <Link2 size={12} aria-label={t('fb.link')} className="muted fb-link" />}
+                      {mark && (mark === 'dir' ? <i className="fb-git-dot" title={t('fb.git_dir')} /> : <b className={`fb-git fb-git-${mark === '!' ? 'x' : mark}`} title={t(`fb.git_${mark === '!' ? 'x' : mark}`, { defaultValue: t('fb.git_M') })}>{mark}</b>)}
                     </span>
                     {/* 窄的时候（开着预览、手机）时间和大小挪到名字下面 */}
                     <span className="fb-sub muted" title={fullTime(e.mtime_ms)}>{[time, size].filter(Boolean).join(' · ')}</span>
@@ -912,8 +1056,13 @@ export default function FileBrowser({ id, active = true, onInsert }) {
                 <span className="fb-c-size muted small">{size}</span>
                 <span className="fb-acts fb-c-acts">
                   {insert && (
-                    <button type="button" className="btn btn-plain btn-icon fb-more" onClick={() => insert(e.path)} aria-label={t('fb.insert')} title={t('fb.insert')}>
+                    <button type="button" className="btn btn-plain btn-icon fb-more" onClick={() => insert(e.path)} aria-label={insertLabel} title={insertLabel}>
                       <TextCursorInput size={15} />
+                    </button>
+                  )}
+                  {e.is_dir && onNewHere && (
+                    <button type="button" className="btn btn-plain btn-icon fb-more" onClick={() => onNewHere(e.path)} aria-label={`${t('fb.new_here_dir')} ${e.name}`} title={t('fb.new_here_dir')}>
+                      <MessageSquarePlus size={15} />
                     </button>
                   )}
                   {!e.is_dir && (
@@ -935,7 +1084,7 @@ export default function FileBrowser({ id, active = true, onInsert }) {
         {open && <Splitter box={mainRef} width={previewW} onWidth={setWidth} />}
         {open && (
           <div className="fb-preview-wrap" style={{ '--fb-pw': `${previewW}px` }}>
-            <Preview ep={ep} entry={open} sep={sep} onClose={() => setOpen(null)} onInsert={insert} extra={prevNext} />
+            <Preview key={open.path} ep={ep} entry={open} sep={sep} onClose={() => setOpen(null)} onInsert={insert} insertLabel={insertLabel} extra={prevNext} device={device} active={active} />
           </div>
         )}
       </div>

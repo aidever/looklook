@@ -1109,6 +1109,7 @@ function SessionMenu({ inst }) {
  */
 export function SessionStage({ activeId }) {
   const s = useSessions();
+  const ui = useSessionUi();
   const ref = useRef(null);
   const height = useFillHeight(ref, Boolean(activeId));
   const ids = activeId && !s.recent.includes(activeId) ? [activeId, ...s.recent] : s.recent;
@@ -1157,6 +1158,7 @@ export function SessionStage({ activeId }) {
             named={!opensInPage()}
             menu={inst && <SessionMenu inst={inst} />}
             focusN={s.focusReq.id === id ? s.focusReq.n : 0}
+            onNewHere={(dir) => ui.newSession({ device: terminalDevice(id), workdir: dir })}
             onStart={async () => {
               await deviceApi(terminalDevice(id)).post(`/instances/${id}/start`);
               s.reload();

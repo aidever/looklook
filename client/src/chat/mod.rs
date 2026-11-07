@@ -323,6 +323,15 @@ impl Drop for Viewer {
 
 impl Chat {
     pub fn new(store: Arc<Store>, paths: Paths, instances: Arc<Instances>) -> Arc<Self> {
+        // 对话模式（stream-json）起的 Claude Code 对话在历史里列出来：读回记下的，再补上现有会话正绑着的（升级前起的）
+        crate::history::load_own(&store);
+        for row in store.instances().unwrap_or_default() {
+            if instances.claude_sdk_mode(&row) {
+                if let Some(b) = store.get::<Binding>(&binding_key(&row.id)).ok().flatten() {
+                    crate::history::mark_own(&store, &b.session_id);
+                }
+            }
+        }
         Arc::new_cyclic(|me| Self {
             store,
             paths,
@@ -506,6 +515,8 @@ impl Chat {
             "stats": st.stats,
             "activity": st.live.activity,
             "preview": st.live.text,
+            // 正在输出的回复是 Markdown 原文（stream-json、Codex、DSH 的增量）；TUI 的 Claude Code 是从屏幕上抓的、已经排过版的文字
+            "preview_md": inst.agent.launch() != "claude" || st.sdk.proc.is_some(),
             "pending": st.pending.as_ref().map(|p| json!({
                 "id": p.id,
                 "kind": p.kind(),
@@ -752,6 +763,9 @@ impl Chat {
             return false;
         }
         let _ = self.store.set(&binding_key(id), &b);
+        if self.is_sdk(id) {
+            crate::history::mark_own(&self.store, sid);
+        }
         // 换了一段对话（/clear、/resume）：看板上的标题跟着换
         if st.binding.is_some() {
             st.board.title = None;
@@ -1137,8 +1151,10 @@ impl Chat {
                     }
                     // 压缩中（最多算 10 分钟，防止丢了 PostCompact 一直卡着）
                     (Phase::Running, Screen::Input { .. }) if st.compacting.is_some_and(|t| t.elapsed() < COMPACT_MAX) => {}
-                    // 运行中没有 hook 就变回输入框：Esc 中断了（Claude Code 中断没有 hook）
-                    (Phase::Running, Screen::Input { busy, .. }) if quiet && !busy => {
+                    // 运行中没有 hook 就变回输入框：Esc 中断了（Claude Code 中断没有 hook）。
+                    // 正在输出回复时屏幕上没有状态行（回复直接贴着输入框），窄窗口里状态栏的“esc to interrupt”又被截掉，
+                    // 看着像空闲：输入框上面还挂着正在输出的回复（中断、做完时上面是 `⎿ Interrupted`、`✻ … for 9s`）就不算
+                    (Phase::Running, Screen::Input { busy, .. }) if quiet && !busy && !capture.as_deref().is_some_and(|c| inst.agent.live(c).text.is_some()) => {
                         st.end_hint.get_or_insert(board::Outcome::Interrupted);
                         Self::set_phase(inst, &mut st, Phase::Idle, None)
                     }

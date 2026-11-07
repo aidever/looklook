@@ -457,6 +457,8 @@ impl Instances {
         let tool_of = |v: &View| -> Option<&'static str> {
             match probes.get(&v.row.id) {
                 Some(f) => Some(f.tool),
+                // stream-json 的 Claude Code 是看看的子进程，不在终端里：终端里只有普通 shell，对话号看对话界面记下的
+                None if self.claude_sdk_mode(&v.row) => Some("claude"),
                 None if v.container.is_some() || !panes.contains_key(&Self::session_name(&v.row.id)) => {
                     crate::history::AGENTS.iter().chain(["dsh"].iter()).find(|a| **a == v.row.launch).copied()
                 }

@@ -1049,12 +1049,15 @@ async fn cancel_upload(State(app): State<App>, Path(uid): Path<String>) -> Statu
 #[derive(Deserialize)]
 struct PathQ {
     path: String,
+    /// 下载接口：`1` = 在页面里播放（音视频，见 [`transfer::download`]）
+    #[serde(default)]
+    inline: u8,
 }
 
 /// 能用管理台的人本来就有完整的 shell，不另加路径限制（§4.3）。
 async fn download(State(app): State<App>, Path(id): Path<String>, Query(q): Query<PathQ>, headers: HeaderMap) -> R<Response> {
     app.instances.get(&id).await?;
-    transfer::download(&q.path, &headers).await
+    transfer::download(&q.path, &headers, q.inline == 1).await
 }
 
 /// 结束本机的 rz / sz（传完、或用户关掉面板）。
@@ -1588,7 +1591,7 @@ async fn ssh_allow_ai(State(app): State<App>, Path(id): Path<String>, Json(req):
 // ---------------- 管理台“文件”页（不属于某个终端；多台电脑时按 X-LL-Device 发给选中的那台） ----------------
 
 async fn fs_download(Query(q): Query<PathQ>, headers: HeaderMap) -> R<Response> {
-    transfer::download(&q.path, &headers).await
+    transfer::download(&q.path, &headers, q.inline == 1).await
 }
 
 /// 同 [`preview`]：只给几种位图类型，其余是加了 `sandbox` CSP 的纯文本。
@@ -2720,10 +2723,8 @@ async fn update_claude_profile(State(app): State<App>, Path(id): Path<String>, J
 async fn delete_claude_profile(State(app): State<App>, Path(id): Path<String>) -> R<Json<Value>> {
     use crate::claude_profiles as cp;
     let p = cp::get(&app.store, &id).ok_or_else(LocalError::not_found)?;
-    if p.id == cp::OFFICIAL {
-        return Err(LocalError::invalid("id", "builtin"));
-    }
-    if p.kind == cp::Kind::Official {
+    // 本机默认账号只是从列表里去掉，不退出登录（~/.claude 是用户自己的，终端里直接用 claude 也靠它）
+    if p.kind == cp::Kind::Official && p.id != cp::OFFICIAL {
         if let Some(cli) = crate::agents::claude_cli(app.instances.shell()).await {
             let dir = cp::account_dir(&app.paths.home, &id);
             let r = crate::agents::cli_output(app.instances.shell(), &cli, &["auth", "logout"], &[("CLAUDE_CONFIG_DIR", Some(dir.as_os_str()))], std::time::Duration::from_secs(30)).await;

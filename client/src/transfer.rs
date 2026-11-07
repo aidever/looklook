@@ -701,7 +701,7 @@ pub async fn serve_attachment(paths: &Paths, instance: &str, name: &str, req: &a
         Err(e) => return Err(e.into()),
     };
     if !is_image(name) {
-        return download(&p.display().to_string(), req).await;
+        return download(&p.display().to_string(), req, false).await;
     }
     let f = tokio::fs::File::open(&p).await?;
     let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
@@ -772,7 +772,9 @@ fn parse_range(v: &str, len: u64) -> Option<Result<(u64, u64), ()>> {
 /// `GET /api/instances/{id}/download?path=`：流式返回一个普通文件。
 /// 支持断点续传：`Range`（一段）+ `If-Range`（ETag 或修改时间对得上才续，文件变了给整个文件），
 /// 浏览器自己的“继续下载”和远程（WebRTC，sw.js）断了接着下都靠它。
-pub async fn download(path: &str, req: &axum::http::HeaderMap) -> R<Response> {
+/// `inline`：在页面里播放（`<video>` / `<audio>`）——只有音视频按扩展名给真实类型、`inline`，
+/// 别的照旧 `application/octet-stream` + `attachment`（不让同源页面直接渲染 HTML、SVG）；播放器拖进度条靠上面的 Range。
+pub async fn download(path: &str, req: &axum::http::HeaderMap, inline: bool) -> R<Response> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
     let p = PathBuf::from(path);
     if !p.is_absolute() {
@@ -810,9 +812,12 @@ pub async fn download(path: &str, req: &axum::http::HeaderMap) -> R<Response> {
     };
     let range = hv(header::RANGE).filter(|_| fresh).and_then(|v| parse_range(&v, len));
     let mut f = f;
+    let media = if inline { media_type(&name) } else { None };
+    let disposition = content_disposition(&name);
     let mut head = vec![
-        (header::CONTENT_TYPE, "application/octet-stream".to_string()),
-        (header::CONTENT_DISPOSITION, content_disposition(&name)),
+        (header::CONTENT_TYPE, media.unwrap_or("application/octet-stream").to_string()),
+        (header::CONTENT_DISPOSITION, if media.is_some() { disposition.replacen("attachment", "inline", 1) } else { disposition }),
+        (header::X_CONTENT_TYPE_OPTIONS, "nosniff".into()),
         (header::ACCEPT_RANGES, "bytes".into()),
         (header::ETAG, etag),
     ];
@@ -851,6 +856,25 @@ fn head_map(h: Vec<(header::HeaderName, String)>) -> axum::http::HeaderMap {
         }
     }
     m
+}
+
+/// 能在页面里直接播放的音视频：扩展名 → 类型（[`download`] 的 `inline`）。
+pub fn media_type(name: &str) -> Option<&'static str> {
+    let ext = name.rsplit_once('.')?.1.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "mp4" | "m4v" => "video/mp4",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        "mkv" => "video/x-matroska",
+        "ogv" => "video/ogg",
+        "mp3" => "audio/mpeg",
+        "m4a" | "aac" => "audio/mp4",
+        "wav" => "audio/wav",
+        "flac" => "audio/flac",
+        "ogg" | "oga" => "audio/ogg",
+        "opus" => "audio/opus",
+        _ => return None,
+    })
 }
 
 /// 预览最多读这么多字节；更大的文件界面提示下载。
@@ -1010,6 +1034,20 @@ mod tests {
     fn content_disposition_is_rfc5987() {
         assert_eq!(content_disposition("a b.txt"), "attachment; filename=\"a b.txt\"; filename*=UTF-8''a%20b.txt");
         assert_eq!(content_disposition("报告\".pdf"), "attachment; filename=\"___.pdf\"; filename*=UTF-8''%E6%8A%A5%E5%91%8A%22.pdf");
+    }
+
+    #[tokio::test]
+    async fn inline_only_for_media() {
+        let tmp = tempfile::tempdir().unwrap();
+        let none = axum::http::HeaderMap::new();
+        for (name, kind, disp) in [("a.MP4", "video/mp4", "inline"), ("b.html", "application/octet-stream", "attachment"), ("c.svg", "application/octet-stream", "attachment")] {
+            let p = tmp.path().join(name);
+            std::fs::write(&p, b"x").unwrap();
+            let r = download(p.to_str().unwrap(), &none, true).await.unwrap();
+            assert_eq!(r.headers()[header::CONTENT_TYPE], kind, "{name}");
+            assert!(r.headers()[header::CONTENT_DISPOSITION].to_str().unwrap().starts_with(disp), "{name}");
+            assert_eq!(r.headers()[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+        }
     }
 
     #[tokio::test]
@@ -1231,7 +1269,7 @@ mod tests {
         let files = t.files.unwrap();
         assert_eq!(files.iter().map(|f| (f.name.as_str(), f.size)).collect::<Vec<_>>(), [("one.txt", 5), ("two.txt", 6)]);
         let none = axum::http::HeaderMap::new();
-        let r = download(&files[1].path, &none).await.unwrap();
+        let r = download(&files[1].path, &none, false).await.unwrap();
         assert_eq!(r.headers()[header::CONTENT_DISPOSITION], "attachment; filename=\"two.txt\"; filename*=UTF-8''two.txt");
         let etag = r.headers()[header::ETAG].clone();
         let body = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
@@ -1240,12 +1278,12 @@ mod tests {
         let mut h = axum::http::HeaderMap::new();
         h.insert(header::RANGE, "bytes=2-".parse().unwrap());
         h.insert(header::IF_RANGE, etag);
-        let r = download(&files[1].path, &h).await.unwrap();
+        let r = download(&files[1].path, &h, false).await.unwrap();
         assert_eq!((r.status(), r.headers()[header::CONTENT_RANGE].to_str().unwrap()), (StatusCode::PARTIAL_CONTENT, "bytes 2-5/6"));
         assert_eq!(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap()[..], b"rld!");
         h.insert(header::IF_RANGE, "\"other\"".parse().unwrap());
-        assert_eq!(download(&files[1].path, &h).await.unwrap().status(), StatusCode::OK);
-        assert_eq!(download(work.to_str().unwrap(), &none).await.unwrap_err().code, "NOT_A_FILE");
+        assert_eq!(download(&files[1].path, &h, false).await.unwrap().status(), StatusCode::OK);
+        assert_eq!(download(work.to_str().unwrap(), &none, false).await.unwrap_err().code, "NOT_A_FILE");
         end_transfer(&inst, &id).await.unwrap();
         tokio::time::sleep(Duration::from_millis(2500)).await;
         assert_eq!(files_info(&inst, &paths, &id).await.unwrap().transfer.map(|t| t.kind), Some("unknown"), "sz 应该已经结束");

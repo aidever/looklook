@@ -155,6 +155,41 @@ const TABS = [
 const CHAT_TAB = ['chat', MessagesSquare, 'chat.tab'];
 const tabsFor = (chat) => (chat ? [CHAT_TAB, ...TABS] : TABS);
 
+/**
+ * 文件、Git 标签：第一次打开后一直挂着（切走只是藏起来），回来时文件夹、预览、滚动位置都还在。
+ * 对话里点了“在文件中显示”（`ll-files-reveal:{id}`）：切到文件标签并打开那个文件。
+ * 对话会话里“填路径”填进对话输入框（`ll-chat-insert:{id}`），其他填进终端。
+ */
+function useSideTabs(id, tab, setTab, chat, frame, enabled = true) {
+  const [seen, setSeen] = useState(() => new Set());
+  const [reveal, setReveal] = useState(null);
+  useEffect(() => {
+    if (tab !== 'files' && tab !== 'git') return;
+    setSeen((x) => (x.has(tab) ? x : new Set([...x, tab])));
+  }, [tab]);
+  useEffect(() => {
+    if (!enabled) return undefined;
+    const on = (e) => {
+      if (!e.detail?.path) return;
+      setTab('files');
+      setReveal({ path: e.detail.path, n: Date.now() });
+    };
+    window.addEventListener(`ll-files-reveal:${id}`, on);
+    return () => window.removeEventListener(`ll-files-reveal:${id}`, on);
+  }, [id, enabled]);
+  const insert = (text) => {
+    if (chat) {
+      setTab('chat');
+      // 等对话标签露出来再填，输入框才能拿到焦点
+      requestAnimationFrame(() => window.dispatchEvent(new CustomEvent(`ll-chat-insert:${id}`, { detail: text })));
+    } else {
+      setTab('term');
+      termPaste(frame, text);
+    }
+  };
+  return { seen, reveal, insert, insertTo: chat ? 'chat' : 'term' };
+}
+
 /** 带对话界面的 Claude Code 终端（docs/CLAUDE_UI.md） */
 export const hasChat = (inst) => Boolean(CHAT_LAUNCHES.includes(inst?.launch) && inst?.chat_ui);
 
@@ -351,7 +386,7 @@ function PaneNotice({ title, body, children }) {
  * 不是当前标签时只是隐藏（iframe 不卸载、会话保持连接），切回来时让终端重新适配大小并聚焦。
  * 最大化：铺满整个浏览器窗口（盖住侧栏和标签栏），但不进系统全屏；双击工具栏空白处也能切换。
  */
-export function TermPane({ id, inst, active, missing, offline = false, onStart, lead, sub, menu, named = true, focusN = 0 }) {
+export function TermPane({ id, inst, active, missing, offline = false, onStart, lead, sub, menu, named = true, focusN = 0, onNewHere }) {
   const { t } = useTranslation();
   // 有人正在看这个会话（任务看板：结束的这一轮算看过，不发通知）
   useSeenPing(id, Boolean(active && hasChat(inst) && !offline));
@@ -370,6 +405,7 @@ export function TermPane({ id, inst, active, missing, offline = false, onStart, 
   const [tab0, setTab] = useTab(id, chat);
   // 容器里的会话只有终端（文件、Git 看的是这台电脑上的目录，对话界面拿不到容器里的记录）
   const tab = inst?.container ? 'term' : tab0;
+  const side = useSideTabs(id, tab, setTab, chat, frame, !inst?.container);
   const link = { src: termSrc(id) };
   const allowed = status.account.allowed;
   const running = Boolean(inst?.running && allowed);
@@ -543,14 +579,14 @@ export function TermPane({ id, inst, active, missing, offline = false, onStart, 
         {tab !== 'chat' && files.layer}
         {selecting && <TextSelect id={id} frame={frame} at={selectAt} onClose={() => { setSelecting(false); termFocus(frame); }} />}
         <TermThemeModal open={picking} onClose={() => { setPicking(false); termFocus(frame); }} />
-        {running && tab === 'git' && (
-          <div className="term-files-tab">
+        {running && side.seen.has('git') && (
+          <div className="term-files-tab" hidden={tab !== 'git'}>
             <GitPanel id={id} active={active && tab === 'git'} />
           </div>
         )}
-        {running && tab === 'files' && (
-          <div className="term-files-tab">
-            <FileBrowser id={id} active={active && tab === 'files'} onInsert={(text) => { setTab('term'); termPaste(frame, text); }} />
+        {running && side.seen.has('files') && (
+          <div className="term-files-tab" hidden={tab !== 'files'}>
+            <FileBrowser id={id} active={active && tab === 'files'} onInsert={side.insert} insertTo={side.insertTo} reveal={side.reveal} onNewHere={onNewHere} />
           </div>
         )}
         {/* 对话一直挂着（切到别的标签时只是隐藏）：切回来时内容和滚动位置都还在 */}
@@ -606,6 +642,7 @@ function TermPage({ id }) {
   const draftBack = useDraftBack(id, inst);
   const [tab0, setTab] = useTab(id, chat);
   const tab = inst?.container ? 'term' : tab0;
+  const side = useSideTabs(id, tab, setTab, chat, frame, !inst?.container);
   const allowed = status.account.allowed;
   const running = inst?.running;
   const live = Boolean(running && allowed);
@@ -650,10 +687,6 @@ function TermPage({ id }) {
     termFit(frame, true);
     if (tab === 'term' && !touch) termFocus(frame);
   }, [keys, tab, tabbarShown]);
-  const insertPath = (text) => {
-    setTab('term');
-    termPaste(frame, text);
-  };
   const reloadTerm = () => {
     setLoaded(false);
     setReloadKey((k) => k + 1);
@@ -811,15 +844,15 @@ function TermPage({ id }) {
         {body}
         {cut && tab !== 'chat' && <OfflineNote />}
         {tab !== 'chat' && files.layer}
-        {live && tab === 'files' && (
-          <div className="term-files-tab">
-            <FileBrowser id={id} active={tab === 'files'} onInsert={insertPath} />
+        {live && side.seen.has('files') && (
+          <div className="term-files-tab" hidden={tab !== 'files'}>
+            <FileBrowser id={id} active={tab === 'files'} onInsert={side.insert} insertTo={side.insertTo} reveal={side.reveal} />
           </div>
         )}
         {selecting && <TextSelect id={id} frame={frame} at={selectAt} onClose={() => { setSelecting(false); if (!touch) termFocus(frame); }} />}
         <TermThemeModal open={picking} onClose={() => { setPicking(false); if (!touch) termFocus(frame); }} />
-        {live && tab === 'git' && (
-          <div className="term-files-tab">
+        {live && side.seen.has('git') && (
+          <div className="term-files-tab" hidden={tab !== 'git'}>
             <GitPanel id={id} active={tab === 'git'} />
           </div>
         )}

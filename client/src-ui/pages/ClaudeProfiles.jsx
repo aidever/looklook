@@ -29,7 +29,7 @@ const PRESET = 'preset:';
 
 /** 配置显示的名字：本机默认账号没有名字；另外的官方账号登录成功后才有（登录的邮箱） */
 export function profileName(t, p, agent = 'claude') {
-  return p.id === 'official' ? t(`${AGENTS[agent].t}.builtin`) : p.name || t('cprof.unnamed');
+  return p.id === 'official' ? p.name || t(`${AGENTS[agent].t}.builtin`) : p.name || t('cprof.unnamed');
 }
 
 /** models.dev 的价格（美元 / 百万 token）：“$1.2 / $4.2” */
@@ -225,6 +225,8 @@ function LoginModal({ profile, onClose }) {
 function OfficialForm({ initial, onClose, onSaved }) {
   const { t } = useTranslation();
   const [name, setName] = useState(initial.name);
+  // 本机默认账号：名字可以清空，回到“本机默认账号”
+  const builtin = initial.id === 'official';
   const { busy, error, run } = useAction();
   const save = (e) => {
     e.preventDefault();
@@ -234,14 +236,14 @@ function OfficialForm({ initial, onClose, onSaved }) {
     <Modal open onClose={onClose} title={t('cprof.rename')}>
       <form onSubmit={save}>
         <Field label={t('cprof.name')}>
-          <input value={name} onChange={(e) => setName(e.target.value)} maxLength={40} placeholder={t('cprof.name_ph_official')} required autoFocus />
+          <input value={name} onChange={(e) => setName(e.target.value)} maxLength={40} placeholder={builtin ? t('cprof.builtin') : t('cprof.name_ph_official')} required={!builtin} autoFocus />
         </Field>
         <ErrorNote error={error} />
         <div className="modal-actions">
           <Button variant="ghost" onClick={onClose}>
             {t('action.cancel')}
           </Button>
-          <Button type="submit" busy={busy} disabled={!name.trim()}>
+          <Button type="submit" busy={busy} disabled={!builtin && !name.trim()}>
             {t('action.save')}
           </Button>
         </div>
@@ -520,7 +522,7 @@ function ApiForm({ agent, initial, accepted, onClose, onSaved }) {
  * 一个配置。Claude Code 的官方账号：已登录时按钮是“查用量”（请 Claude Code 去取，顺便确认登录状态；登录失效就提示重新登录），
  * 没登录时是“登录”，“重新登录”在更多菜单里。Codex 的本机默认只是说明（Codex 自己的登录和配置）。
  */
-function ProfileRow({ agent, p, isDefault, busy, nonce, onDefault, onLogin, onEdit, onRemove }) {
+function ProfileRow({ agent, p, isDefault, busy, nonce, onDefault, onLogin, onEdit, onRemove, only }) {
   const { t } = useTranslation();
   const toast = useToast();
   const cfg = AGENTS[agent];
@@ -606,14 +608,15 @@ function ProfileRow({ agent, p, isDefault, busy, nonce, onDefault, onLogin, onEd
             {t('cprof.usage')}
           </Button>
         )}
-        {(p.id !== 'official' || loggedIn) && (
+        {/* Claude Code 的本机默认账号也能改名、从列表里去掉（只剩它一个时不能去掉）；Codex 的本机默认只是说明 */}
+        {(p.id !== 'official' || agent === 'claude') && (
           <PopMenu
             label={t('action.more')}
             items={[
               claudeLogin && loggedIn && { icon: LogIn, label: t('cprof.relogin'), onClick: () => onLogin(p) },
-              p.id !== 'official' && !isDefault && { icon: Check, label: t('cprof.make_default'), onClick: () => onDefault(p) },
-              p.id !== 'official' && { label: t(p.kind === 'api' ? 'cprof.edit' : 'cprof.rename'), onClick: () => onEdit(p) },
-              p.id !== 'official' && { label: t('action.delete'), danger: true, onClick: () => onRemove(p) },
+              !isDefault && { icon: Check, label: t('cprof.make_default'), onClick: () => onDefault(p) },
+              { label: t(p.kind === 'api' ? 'cprof.edit' : 'cprof.rename'), onClick: () => onEdit(p) },
+              !(p.id === 'official' && only) && { label: t(p.id === 'official' ? 'cprof.hide_builtin' : 'action.delete'), danger: true, onClick: () => onRemove(p) },
             ]}
           />
         )}
@@ -654,7 +657,13 @@ function ProfilesCard({ agent }) {
     }
   };
   const remove = async (p) => {
-    const ok = await confirm({ title: t('cprof.delete_title', { name: profileName(t, p, agent) }), body: t(p.kind === 'api' ? `${cfg.t}.delete_body_api` : 'cprof.delete_body_official'), confirm: t('action.delete'), danger: true });
+    const builtin = p.id === 'official';
+    const ok = await confirm({
+      title: t(builtin ? 'cprof.hide_builtin_title' : 'cprof.delete_title', { name: profileName(t, p, agent) }),
+      body: t(builtin ? 'cprof.hide_builtin_body' : p.kind === 'api' ? `${cfg.t}.delete_body_api` : 'cprof.delete_body_official'),
+      confirm: t(builtin ? 'cprof.hide_builtin' : 'action.delete'),
+      danger: true,
+    });
     if (!ok) return;
     const r = await run(() => api.del(`${cfg.base}/${p.id}`));
     if (r) apply(r);
@@ -718,6 +727,7 @@ function ProfilesCard({ agent }) {
                 onLogin={login}
                 onEdit={(x) => setForm({ kind: x.kind, initial: x })}
                 onRemove={remove}
+                only={data.profiles.length === 1}
               />
             ))}
           </ul>

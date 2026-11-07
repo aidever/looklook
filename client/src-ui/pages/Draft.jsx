@@ -695,7 +695,7 @@ function DraftForm() {
             />
           )}
           <div className="draft-tools">
-            {/* 按钮多了横着滑，不换行：“开始”一直在右边看得见 */}
+            {/* 按钮多了折行：“开始”一直在右下角 */}
             <div className="draft-tools-row">
             {assist.on && launch !== 'opencode' && (
               <>

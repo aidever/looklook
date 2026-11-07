@@ -1050,7 +1050,22 @@
     "dl_allow_hint": "If the browser asks whether to allow multiple downloads, choose Allow.",
     "dl_failed": "{{n}} files failed to download",
     "dl_progress": "Downloading {{n}}/{{total}}: {{name}}",
-    "dl_hint": "Download the selected files (up to {{n}} files, {{size}})"
+    "dl_hint": "Download the selected files (up to {{n}} files, {{size}})",
+    "insert_chat": "Insert path into the chat input",
+    "insert_chat_short": "Insert in chat",
+    "new_here": "New session in this folder",
+    "new_here_dir": "New session in this folder",
+    "reveal_gone": "“{{name}}” is no longer in this folder",
+    "zoom": "View full size",
+    "media_paused": "Paused (resumes when you come back)",
+    "office_media_big": "Files over 512 MB aren’t played here when browsing several computers remotely. Download to open.",
+    "office_media_failed": "The browser can’t play this file (unsupported codec such as HEVC or AVI). Download and open it in a player.",
+    "git_dir": "Contains changes (Git)",
+    "git_M": "Modified (Git)",
+    "git_A": "Added (Git)",
+    "git_U": "Untracked (Git)",
+    "git_R": "Renamed (Git)",
+    "git_x": "Conflict (Git)"
   },
   "model": {
     "provider": "Provider",
@@ -1079,6 +1094,9 @@
     "title": "Claude Code accounts",
     "intro": "Add several official accounts and third-party endpoints, and pick one as the default. New sessions use the default, and you can pick another one on the start page. Sessions that are already open don't change.",
     "builtin": "This computer's account",
+    "hide_builtin": "Remove from list",
+    "hide_builtin_title": "Remove “{{name}}”?",
+    "hide_builtin_body": "It just stops showing here and can't be picked. It isn't signed out and ~/.claude isn't deleted (running claude in a terminal still uses it, and other accounts share its settings and history). Sessions using it switch to the default account when they restart. It comes back automatically if you delete all other accounts.",
     "default": "Default",
     "is_default": "Current default",
     "make_default": "Make default",
@@ -2186,7 +2204,8 @@
     "sel_comment_add": "Add",
     "sel_copied": "Copied",
     "sel_copy_failed": "The browser blocked copying",
-    "sel_quote": "Quote in message"
+    "sel_quote": "Quote in message",
+    "reveal_file": "Show in the Files tab"
   },
   "board": {
     "title": "Tasks",
@@ -3475,5 +3494,19 @@
     "proto_responses": "OpenAI Responses",
     "proto_anthropic": "Anthropic Messages",
     "proto_chat": "OpenAI-compatible (Chat Completions, DeepSeek etc.)"
+  },
+  "cm": {
+    "find": "Find",
+    "replace": "Replace",
+    "next": "next",
+    "previous": "previous",
+    "all": "all",
+    "case": "match case",
+    "regexp": "regexp",
+    "word": "by word",
+    "close": "close",
+    "fold": "Fold line",
+    "unfold": "Unfold line",
+    "folded": "folded code"
   }
 }

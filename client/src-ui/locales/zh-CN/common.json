@@ -1050,7 +1050,22 @@
     "dl_allow_hint": "浏览器如果问“是否允许下载多个文件”，请点允许。",
     "dl_failed": "{{n}} 个文件没下载成功",
     "dl_progress": "正在下载 {{n}}/{{total}}：{{name}}",
-    "dl_hint": "下载选中的文件（一次最多 {{n}} 个、{{size}}）"
+    "dl_hint": "下载选中的文件（一次最多 {{n}} 个、{{size}}）",
+    "insert_chat": "把路径填进对话输入框",
+    "insert_chat_short": "填进输入框",
+    "new_here": "在这个文件夹开新会话",
+    "new_here_dir": "在这个文件夹开新会话",
+    "reveal_gone": "“{{name}}”已经不在这个文件夹里了",
+    "zoom": "看大图",
+    "media_paused": "已暂停（切回来接着看）",
+    "office_media_big": "文件超过 512 MB，远程多台电脑时不在这里播放，下载后打开。",
+    "office_media_failed": "浏览器放不了这个文件（可能是编码不支持，比如 HEVC、AVI），下载后用播放器打开。",
+    "git_dir": "里面有改动（Git）",
+    "git_M": "改过（Git）",
+    "git_A": "新加（Git）",
+    "git_U": "还没加进 Git",
+    "git_R": "改了名（Git）",
+    "git_x": "有冲突（Git）"
   },
   "model": {
     "provider": "服务商",
@@ -1079,6 +1094,9 @@
     "title": "Claude Code 账号",
     "intro": "可以添加多个官方账号和第三方接口，选一个作为默认。新建的会话使用默认账号，开始页也可以临时换一个；已经开着的会话不受影响。",
     "builtin": "本机默认账号",
+    "hide_builtin": "从列表中移除",
+    "hide_builtin_title": "移除“{{name}}”？",
+    "hide_builtin_body": "只是不再在这里显示、不能再选，不会退出登录，也不删除 ~/.claude（终端里直接运行 claude 照常使用它，其他账号也和它共用设置与对话记录）。用它的会话重启后改用默认账号。其他账号都删除后它会自动回来。",
     "default": "默认",
     "is_default": "当前默认",
     "make_default": "设为默认",
@@ -2186,7 +2204,8 @@
     "sel_comment_add": "添加",
     "sel_copied": "已复制",
     "sel_copy_failed": "浏览器不允许复制",
-    "sel_quote": "引用到输入框"
+    "sel_quote": "引用到输入框",
+    "reveal_file": "在“文件”标签里显示"
   },
   "board": {
     "title": "任务",
@@ -3475,5 +3494,19 @@
     "proto_responses": "OpenAI Responses",
     "proto_anthropic": "Anthropic Messages",
     "proto_chat": "OpenAI 兼容（Chat Completions，DeepSeek 等）"
+  },
+  "cm": {
+    "find": "查找",
+    "replace": "替换",
+    "next": "下一个",
+    "previous": "上一个",
+    "all": "全部",
+    "case": "区分大小写",
+    "regexp": "正则",
+    "word": "整词",
+    "close": "关闭",
+    "fold": "折叠",
+    "unfold": "展开",
+    "folded": "已折叠"
   }
 }

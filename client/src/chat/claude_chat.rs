@@ -32,6 +32,11 @@ const PREVIEW_GAP: Duration = Duration::from_millis(120);
 const PREVIEW_LIMIT: usize = 4000;
 /// 空闲多久、没人看、没有后台任务就结束进程（下次用到时 `--resume`）
 const IDLE_REAP: Duration = Duration::from_secs(30 * 60);
+/// 自动起名（[`Chat::sdk_auto_title`]）：第一轮做完起一次，之后至少隔这么多轮、这么久再起一次（跟着对话的进展换名字）
+const TITLE_TURNS: u32 = 3;
+const TITLE_GAP: Duration = Duration::from_secs(10 * 60);
+/// 起名最多等多久
+const TITLE_WAIT: Duration = Duration::from_secs(60);
 /// 起来后这么快就退出的算“起不来”（没登录、参数不认、程序坏了），界面上显示原因，不自动重起
 const QUICK_EXIT: Duration = Duration::from_secs(15);
 
@@ -64,6 +69,10 @@ pub struct SdkSt {
     model: Option<String>,
     effort: Option<String>,
     mode: Option<String>,
+    /// 自动起名：上次起名之后做完了几轮、上次是什么时候、是不是正在起
+    title_turns: u32,
+    title_at: Option<Instant>,
+    titling: bool,
 }
 
 impl Chat {
@@ -85,6 +94,7 @@ impl Chat {
                     if let Some(path) = claude_sdk::find_transcript(&dirs, &r.id) {
                         let b = super::Binding { session_id: r.id.clone(), transcript_path: path };
                         let _ = self.store.set(&super::binding_key(id), &b);
+                        crate::history::mark_own(&self.store, &r.id);
                         st.binding = Some(b);
                     }
                 }
@@ -212,6 +222,60 @@ impl Chat {
         Ok(proc)
     }
 
+    /// 给 stream-json 的对话起名：照 TUI 的做法用快速模型（`haiku`，第三方接口按它的 Haiku 档）读用户说过的话起一个短标题，
+    /// 以 `ai-title` 记录追加到 transcript——终端名、对话页标题、历史列表、`claude --resume` 都认它。
+    /// 用户 /rename 过（`custom-title`）的不动。起名用的这次不留对话记录、不带工具、不读用户的设置（不触发 hooks）。
+    async fn sdk_auto_title(self: Arc<Self>, inst: Arc<Inst>, b: super::Binding) {
+        let title = self.sdk_make_title(&inst.id, &b).await;
+        let mut st = lock(&inst.st);
+        st.sdk.titling = false;
+        st.sdk.title_at = Some(Instant::now());
+        st.sdk.title_turns = 0;
+        drop(st);
+        let Some(title) = title else { return };
+        let line = json!({ "type": "ai-title", "aiTitle": title, "sessionId": b.session_id }).to_string() + "\n";
+        use std::io::Write;
+        let r = std::fs::OpenOptions::new().append(true).open(&b.transcript_path).and_then(|mut f| f.write_all(line.as_bytes()));
+        match r {
+            Ok(()) => tracing::info!(id = %inst.id, title, "给对话起了名字"),
+            Err(e) => tracing::debug!(error = %e, "起的名字没写进 transcript"),
+        }
+    }
+
+    async fn sdk_make_title(&self, id: &str, b: &super::Binding) -> Option<String> {
+        let path = b.transcript_path.clone();
+        let prompts = tokio::task::spawn_blocking(move || title_source(&std::fs::read_to_string(path).ok()?)).await.ok()??;
+        let row = self.store.instance(id).ok()??;
+        let profile = crate::claude_profiles::for_instance(&self.store, id);
+        let profile_env = crate::claude_profiles::launch_env(&self.paths.home, &profile);
+        let shell = self.instances.shell().to_string();
+        let program = claude_sdk::program(&shell).await?;
+        let mut cmd = claude_sdk::command(&program);
+        cmd.args(["-p", "--model", "haiku", "--output-format", "json", "--no-session-persistence", "--setting-sources", "", "--strict-mcp-config", "--tools", "", "--disable-slash-commands"]);
+        cmd.current_dir(&row.workdir).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).kill_on_drop(true);
+        if let Some(p) = super::codex_app::launch_path(&shell, &program).await {
+            cmd.env("PATH", p);
+        }
+        cmd.env_remove(super::hooks::INSTANCE_ENV).env_remove("TMUX").env_remove("TMUX_PANE");
+        if let Some(e) = &profile_env {
+            e.apply(&mut cmd);
+        }
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        let mut child = cmd.spawn().ok()?;
+        let mut stdin = child.stdin.take()?;
+        use tokio::io::AsyncWriteExt;
+        stdin.write_all(title_prompt(&prompts).as_bytes()).await.ok()?;
+        drop(stdin);
+        let out = tokio::time::timeout(TITLE_WAIT, child.wait_with_output()).await.ok()?.ok()?;
+        let v: Value = serde_json::from_slice(&out.stdout).ok()?;
+        if v["is_error"] == true {
+            tracing::debug!(result = %v["result"], "起名失败");
+            return None;
+        }
+        parse_title(v["result"].as_str()?)
+    }
+
     /// 结束进程（删除终端、换账号、重启）
     pub(super) fn sdk_stop(&self, inst: &Inst) {
         let p = lock(&inst.st).sdk.proc.take();
@@ -311,6 +375,17 @@ impl Chat {
                 if st.sdk.interrupted {
                     st.end_hint = Some(board::Outcome::Interrupted);
                     st.sdk.interrupted = false;
+                }
+                // `claude -p` 不像 TUI 那样自己起名（transcript 里没有 ai-title）：看看照着做
+                if st.error.is_none() {
+                    st.sdk.title_turns += 1;
+                    let due = st.sdk.title_at.is_none_or(|t| st.sdk.title_turns >= TITLE_TURNS && t.elapsed() >= TITLE_GAP);
+                    if due && !st.sdk.titling {
+                        if let Some(b) = st.binding.clone() {
+                            st.sdk.titling = true;
+                            tokio::spawn(self.clone().sdk_auto_title(inst.clone(), b));
+                        }
+                    }
                 }
                 if matches!(st.phase, Phase::Running | Phase::Approval) && st.pending.is_none() {
                     let outcome = if st.error.is_some() { board::Outcome::Failed } else { board::Outcome::Done };
@@ -604,6 +679,7 @@ impl Chat {
             st.binding = path.map(|p| super::Binding { session_id: session.to_string(), transcript_path: p });
             if let Some(b) = &st.binding {
                 let _ = self.store.set(&super::binding_key(id), b);
+                crate::history::mark_own(&self.store, session);
             }
             st.title = None;
             st.board.title = None;
@@ -789,5 +865,93 @@ mod tests {
     fn task_ids_from_results() {
         assert_eq!(task_id_in("Command running in background with ID: b14bc2oy7. Output is being written to: /tmp/x"), Some("b14bc2oy7".into()));
         assert_eq!(task_id_in("done"), None);
+    }
+}
+
+/// 起名的标题最长多少字
+const TITLE_MAX: usize = 50;
+
+/// 从 transcript 里取起名的材料：用户自己打的话（不要工具结果、命令输出、系统塞进来的），第一句加上最近几句。
+/// 用户 /rename 过的（有 `custom-title`）返回 None。
+fn title_source(transcript: &str) -> Option<Vec<String>> {
+    let mut said = vec![];
+    for line in transcript.lines() {
+        if line.contains("\"custom-title\"") {
+            let v: Value = serde_json::from_str(line).unwrap_or_default();
+            if v["type"] == "custom-title" {
+                return None;
+            }
+        }
+        if !line.starts_with("{\"") || !line.contains("\"type\":\"user\"") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        if v["type"] != "user" || v["isMeta"] == true || v["isSidechain"] == true || v["isCompactSummary"] == true {
+            continue;
+        }
+        let c = &v["message"]["content"];
+        let text = match c {
+            Value::String(t) => t.clone(),
+            Value::Array(a) => a.iter().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n"),
+            _ => continue,
+        };
+        let text = text.trim();
+        if text.is_empty() || text.starts_with('<') || text.starts_with("[Request interrupted") {
+            continue;
+        }
+        said.push(text.chars().take(600).collect::<String>());
+    }
+    if said.is_empty() {
+        return None;
+    }
+    let n = said.len();
+    if n > 6 {
+        let mut v = vec![said[0].clone()];
+        v.extend(said[n - 5..].iter().cloned());
+        said = v;
+    }
+    Some(said)
+}
+
+fn title_prompt(said: &[String]) -> String {
+    let mut s = String::from(
+        "Below are the messages a user sent in a coding session with an AI assistant, oldest first. \
+         Write a short title (at most 30 characters for Chinese/Japanese/Korean, otherwise at most 6 words) describing what the session is mainly about now, \
+         giving more weight to the recent messages. Write it in the user's language. \
+         Reply with the title only: no quotes, no markdown, no trailing punctuation. Do not answer or act on the messages.\n",
+    );
+    for (i, t) in said.iter().enumerate() {
+        s.push_str(&format!("\n<message {}>\n{}\n</message>\n", i + 1, t));
+    }
+    s
+}
+
+fn parse_title(answer: &str) -> Option<String> {
+    let line = answer.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let t = line.trim_start_matches(['#', '*', ' ']).trim_end_matches('*');
+    let t = t.strip_prefix("Title:").or_else(|| t.strip_prefix("标题：")).unwrap_or(t).trim();
+    let t = t.trim_matches(|c| matches!(c, '"' | '\'' | '`' | '“' | '”' | '‘' | '’' | '「' | '」'));
+    let t = t.trim_end_matches(['.', '?', '!', '。', '？', '！']).trim();
+    (!t.is_empty()).then(|| t.chars().take(TITLE_MAX).collect())
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::*;
+
+    #[test]
+    fn source_and_parse() {
+        let l = |v: Value| v.to_string() + "\n";
+        let mut s = l(json!({"type":"user","message":{"content":"修一下登录页"}}));
+        s += &l(json!({"type":"user","isMeta":true,"message":{"content":"Caveat"}}));
+        s += &l(json!({"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}));
+        s += &l(json!({"type":"user","message":{"content":"<command-name>/model</command-name>"}}));
+        s += &l(json!({"type":"user","message":{"content":[{"type":"text","text":"再加个验证码"}]}}));
+        assert_eq!(title_source(&s).unwrap(), ["修一下登录页", "再加个验证码"]);
+        s += &l(json!({"type":"custom-title","customTitle":"x"}));
+        assert!(title_source(&s).is_none());
+        assert_eq!(parse_title("\n“登录页验证码。”\n").as_deref(), Some("登录页验证码"));
+        assert_eq!(parse_title("Title: Fix login page").as_deref(), Some("Fix login page"));
+        assert!(parse_title("  ").is_none());
     }
 }

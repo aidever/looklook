@@ -106,14 +106,35 @@ fn builtin() -> Profile {
     Profile { id: OFFICIAL.into(), kind: Kind::Official, name: String::new(), provider_id: None, preset: None, base_url: None, models: Models::default(), auth: Auth::Bearer, created_at: String::new() }
 }
 
+/// 本机默认账号的改名、从列表里去掉（kv `claude_profiles.builtin`）。去掉只是不显示、不能选：
+/// `~/.claude` 照旧是另外账号共用设置和对话记录的目录，不退出登录、不删文件；其他账号都删光时自动回来。
+const BUILTIN_KEY: &str = "claude_profiles.builtin";
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct BuiltinOpts {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    hidden: bool,
+}
+
+fn builtin_opts(store: &Store) -> BuiltinOpts {
+    store.get::<BuiltinOpts>(BUILTIN_KEY).ok().flatten().unwrap_or_default()
+}
+
+fn builtin_of(store: &Store) -> Profile {
+    Profile { name: builtin_opts(store).name, ..builtin() }
+}
+
 fn stored(store: &Store) -> Vec<Profile> {
     store.get::<Vec<Profile>>(LIST_KEY).ok().flatten().unwrap_or_default()
 }
 
-/// 全部：本机默认账号在最前面
+/// 全部：本机默认账号在最前面（去掉了的不算，但其他账号都没了时还是有它）
 pub fn list(store: &Store) -> Vec<Profile> {
-    let mut v = vec![builtin()];
-    v.extend(stored(store));
+    let others = stored(store);
+    let mut v = if builtin_opts(store).hidden && !others.is_empty() { vec![] } else { vec![builtin_of(store)] };
+    v.extend(others);
     v
 }
 
@@ -121,9 +142,10 @@ pub fn get(store: &Store, id: &str) -> Option<Profile> {
     list(store).into_iter().find(|p| p.id == id)
 }
 
-/// 默认用哪个；记下的那个被删了时回到本机默认账号
+/// 默认用哪个；记下的那个被删了时回到列表里的第一个（一般是本机默认账号）
 pub fn default_id(store: &Store) -> String {
-    store.get::<String>(DEFAULT_KEY).ok().flatten().filter(|id| get(store, id).is_some()).unwrap_or_else(|| OFFICIAL.into())
+    let all = list(store);
+    store.get::<String>(DEFAULT_KEY).ok().flatten().filter(|id| all.iter().any(|p| &p.id == id)).unwrap_or_else(|| all.first().map(|p| p.id.clone()).unwrap_or_else(|| OFFICIAL.into()))
 }
 
 pub fn set_default(store: &Store, id: &str) -> Result<(), LocalError> {
@@ -242,6 +264,15 @@ pub fn add(store: &Store, home: &Path, input: Input) -> Result<Profile, LocalErr
 
 /// 修改：名字；第三方接口还可以改地址、模型、Key。种类不能改。
 pub fn update(store: &Store, home: &Path, id: &str, input: Input) -> Result<Profile, LocalError> {
+    if id == OFFICIAL {
+        // 本机默认账号只能改名字（清空回到“本机默认账号”）
+        let mut o = builtin_opts(store);
+        if let Some(name) = input.name.as_deref() {
+            o.name = clean_name(Some(name)).unwrap_or_default();
+            store.set(BUILTIN_KEY, &o)?;
+        }
+        return Ok(builtin_of(store));
+    }
     let mut all = stored(store);
     let p = all.iter_mut().find(|p| p.id == id).ok_or_else(LocalError::not_found)?;
     if let Some(name) = input.name.as_deref() {
@@ -270,10 +301,23 @@ pub fn update(store: &Store, home: &Path, id: &str, input: Input) -> Result<Prof
 
 /// 删掉配置和本机文件（Key、账号目录）。官方账号要先由调用方 `claude auth logout`（macOS 的钥匙串条目只有它删得掉）。
 pub fn remove(store: &Store, home: &Path, id: &str) -> Result<(), LocalError> {
+    if id == OFFICIAL {
+        // 本机默认账号：只从列表里去掉（见 BUILTIN_KEY）；只剩它一个时不能去掉
+        if stored(store).is_empty() {
+            return Err(LocalError::invalid("id", "last"));
+        }
+        let o = BuiltinOpts { hidden: true, ..builtin_opts(store) };
+        store.set(BUILTIN_KEY, &o)?;
+        return Ok(());
+    }
     let mut all = stored(store);
     let Some(i) = all.iter().position(|p| p.id == id) else { return Err(LocalError::not_found()) };
     let p = all.remove(i);
     store.set(LIST_KEY, &all)?;
+    // 其他账号都删光了：去掉过的本机默认账号自动回来
+    if all.is_empty() && builtin_opts(store).hidden {
+        store.set(BUILTIN_KEY, &BuiltinOpts { hidden: false, ..builtin_opts(store) })?;
+    }
     match p.kind {
         Kind::Api => match std::fs::remove_file(key_path(home, id)) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
@@ -320,7 +364,7 @@ pub fn unpin(store: &Store, instance: &str) {
 
 /// 会话记下的那个（被删了、没记下时用当前默认）
 pub fn for_instance(store: &Store, instance: &str) -> Profile {
-    store.get::<String>(&pin_key(instance)).ok().flatten().and_then(|id| get(store, &id)).unwrap_or_else(|| get(store, &default_id(store)).unwrap_or_else(builtin))
+    store.get::<String>(&pin_key(instance)).ok().flatten().and_then(|id| get(store, &id)).unwrap_or_else(|| get(store, &default_id(store)).unwrap_or_else(|| builtin_of(store)))
 }
 
 /// 会话记下的配置 ID（只给界面显示用；没记下时 None）
@@ -1005,6 +1049,28 @@ mod tests {
         assert!(!key_set(&dir, &api.id));
         assert_eq!(default_id(&store), OFFICIAL);
         assert_eq!(for_instance(&store, "i2").id, OFFICIAL);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn builtin_rename_and_hide() {
+        let (dir, store) = tmp_store("builtin");
+        assert!(remove(&store, &dir, OFFICIAL).is_err(), "只剩它一个时不能去掉");
+        update(&store, &dir, OFFICIAL, Input { name: Some(" 我的 ".into()), ..Default::default() }).unwrap();
+        assert_eq!(get(&store, OFFICIAL).unwrap().name, "我的");
+        let api = add(&store, &dir, Input { kind: Some(Kind::Api), name: Some("R".into()), base_url: Some("https://r.example.com".into()), api_key: Some("sk-1".into()), ..Default::default() }).unwrap();
+        pin(&store, "i1", None).unwrap();
+        remove(&store, &dir, OFFICIAL).unwrap();
+        assert_eq!(list(&store).iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), [api.id.as_str()]);
+        // 默认、记着它的会话都换到剩下的
+        assert_eq!(default_id(&store), api.id);
+        assert_eq!(for_instance(&store, "i1").id, api.id);
+        // 其他都删光了：它回来，名字还在
+        remove(&store, &dir, &api.id).unwrap();
+        assert_eq!(default_id(&store), OFFICIAL);
+        assert_eq!(list(&store)[0].name, "我的");
+        update(&store, &dir, OFFICIAL, Input { name: Some("".into()), ..Default::default() }).unwrap();
+        assert_eq!(get(&store, OFFICIAL).unwrap().name, "");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

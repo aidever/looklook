@@ -932,3 +932,20 @@ mod tests {
     }
 
 }
+
+#[cfg(test)]
+mod narrow_tests {
+    use super::*;
+
+    /// Claude Code 2.1.x 窄窗口（50 列）：输出回复时没有状态行，状态栏的“esc to interrupt”被截掉，看着不忙；
+    /// 但输入框上面挂着正在输出的回复（mod.rs 据此不把运行中当成被中断）。做完后上面是 `✻ Baked for 9s`，不再算
+    #[test]
+    fn streaming_on_narrow_screen() {
+        let s = include_str!("testdata/streaming-narrow.txt");
+        assert_eq!(classify(s), Screen::Input { text: String::new(), busy: false });
+        assert!(live(s).text.is_some_and(|t| t.contains("较短的那个")));
+        let done = include_str!("testdata/streamed-done-narrow.txt");
+        assert_eq!(classify(done), Screen::Input { text: String::new(), busy: false });
+        assert!(live(done).text.is_none());
+    }
+}

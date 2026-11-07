@@ -166,8 +166,8 @@ const ArtifactCtx = createContext({ list: [], links: null, fileUrl: null });
 const SideCtx = createContext({ openAgent: null });
 
 /**
- * 编辑重发（ChatView 提供）：`{ busy, run(key, text, keepImages, images) }`。只有主对话里的用户消息能改（子代理的步骤里没有）。
- * busy：这一轮还在跑（等做完再改）。
+ * 编辑重发（ChatView 提供）：`{ off, running, run(key, text, keepImages, images) }`。只有主对话里的用户消息能改（子代理的步骤里没有）。
+ * off：暂时不能改的原因（连不上电脑）；running：这一轮还在跑（发出时后台先停下它）。
  */
 const EditCtx = createContext(null);
 
@@ -1144,17 +1144,18 @@ function UserItem({ id, item, thumbs, editable = false }) {
               {expanded ? t('chat.user_collapse') : t('chat.user_expand', { n: text.length.toLocaleString() })}
             </button>
           )}
-          {(text || canEdit) && <UserActs id={id} text={text} onEdit={startEdit} editBusy={edit?.busy} />}
+          {(text || canEdit) && <UserActs id={id} text={text} onEdit={startEdit} editOff={edit?.off} />}
         </>
       )}
-      {sheet && <MessageSheet text={text} onFill={() => fillInput(id, text)} onEdit={edit?.busy ? null : startEdit} onClose={() => setSheet(false)} />}
+      {sheet && <MessageSheet text={text} onFill={() => fillInput(id, text)} onEdit={edit?.off ? null : startEdit} onClose={() => setSheet(false)} />}
     </div>
   );
 }
 
 /**
  * 编辑重发：就地改这句话，发出后丢掉它和之后的对话、从这里重新来（文件改动不撤回）。
- * Ctrl/⌘+Enter 发送，Esc 取消；原来带图片的可以选要不要一起再发。
+ * 跟输入框一样：电脑上 Enter 发送、Shift+Enter 换行（Ctrl/⌘+Enter 也能发），手机上 Enter 换行、点按钮发；Esc 取消。
+ * 这一轮还在跑也能改：先停下这一轮再重发。原来带图片的可以选要不要一起再发。
  */
 function EditUser({ id, item, text, onDone }) {
   const { t } = useT();
@@ -1180,7 +1181,7 @@ function EditUser({ id, item, text, onDone }) {
   const images = keep ? item.images : 0;
   const empty = !draft.trim() && !images;
   const send = async () => {
-    if (empty || saving || edit?.busy) return;
+    if (empty || saving || edit?.off) return;
     setSaving(true);
     try {
       await edit.run(item.key, draft.trimEnd(), images > 0, Array.from({ length: images }, (_, i) => userImageUrl(id, item.key, i)));
@@ -1196,7 +1197,7 @@ function EditUser({ id, item, text, onDone }) {
       e.preventDefault();
       e.stopPropagation();
       onDone();
-    } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+    } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey || (!e.shiftKey && !e.altKey && !isTouch()))) {
       e.preventDefault();
       send();
     }
@@ -1210,12 +1211,12 @@ function EditUser({ id, item, text, onDone }) {
           {t('chat.edit_keep_images', { n: item.images })}
         </label>
       )}
-      <p className="chat-edit-note">{t('chat.edit_note')}</p>
+      <p className="chat-edit-note">{edit?.running ? t('chat.edit_note_running') : t('chat.edit_note')}</p>
       <div className="chat-edit-acts">
         <button type="button" className="btn btn-ghost" onClick={onDone} disabled={saving}>
           {t('action.cancel')}
         </button>
-        <button type="button" className="btn btn-primary" onClick={send} disabled={empty || saving || edit?.busy} title={edit?.busy ? t('chat.edit_busy') : undefined}>
+        <button type="button" className="btn btn-primary" onClick={send} disabled={empty || saving || !!edit?.off} title={edit?.off || (isTouch() ? undefined : t('chat.edit_send_key'))}>
           {saving ? t('chat.edit_sending') : t('chat.edit_send')}
         </button>
       </div>
@@ -4959,10 +4960,12 @@ export default function ChatView({ id, launch, active, touch, offline = false, o
   const caps = status?.caps;
   const agentCtx = useMemo(() => ({ id: agentId, name: agentName, caps: caps ?? {} }), [agentId, agentName, caps]);
   const phase = status?.phase ?? 'detached';
-  const editBusy = phase === 'running' || phase === 'approval' || offline;
+  const editRunning = phase === 'running' || phase === 'approval';
+  const editOff = offline ? t('chat.edit_offline') : '';
   const editCtx = useMemo(
     () => ({
-      busy: editBusy,
+      off: editOff,
+      running: editRunning,
       run: async (key, text, keepImages, images) => {
         const all = allRef.current;
         const at = all.findIndex((x) => x.key === key);
@@ -4985,7 +4988,7 @@ export default function ChatView({ id, launch, active, touch, offline = false, o
         }
       },
     }),
-    [id, editBusy, t, toastTop],
+    [id, editOff, editRunning, t, toastTop],
   );
   const list = useRef(null);
   const inner = useRef(null);

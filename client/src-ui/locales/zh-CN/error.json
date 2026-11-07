@@ -304,5 +304,6 @@
   "PET_PEER_OLD": "那台电脑的看看版本太旧，还不能导出宠物，先把它升级到最新版",
   "PET_GEN_BAD": "模型的回答看不懂，再试一次",
   "CHAT_EDIT_UNAVAILABLE": "这种会话不支持编辑重发（只有对话模式的 Claude Code 和 Codex 可以）",
+  "CHAT_EDIT_BUSY": "这一轮没能停下来，稍后再试",
   "CHAT_EDIT_STALE": "这条消息已经不在当前对话里了，刷新后再试"
 }

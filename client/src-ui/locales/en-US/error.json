@@ -304,5 +304,6 @@
   "PET_PEER_OLD": "Looklook on that computer is too old to share pets. Update it first.",
   "PET_GEN_BAD": "Couldn't read the model's answer, please try again",
   "CHAT_EDIT_UNAVAILABLE": "Edit & resend isn't available for this session (chat-mode Claude Code and Codex only)",
+  "CHAT_EDIT_BUSY": "Couldn't stop the current turn. Try again in a moment",
   "CHAT_EDIT_STALE": "That message is no longer in this conversation. Refresh and try again"
 }

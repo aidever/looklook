@@ -1555,8 +1555,20 @@ impl Chat {
             return Err(LocalError::new("CHAT_EDIT_UNAVAILABLE"));
         }
         let inst = self.inst(id);
-        if matches!(lock(&inst.st).phase, Phase::Running | Phase::Approval) {
-            return Err(LocalError::new("CHAT_RUNNING"));
+        // 这一轮还在跑（或在等确认）：跟桌面版一样，先停下这一轮再改。
+        // Claude Code 反正要重起进程；Codex 的 `thread/fork` 不能带着在跑的一轮，等它停下来
+        let busy = || matches!(lock(&inst.st).phase, Phase::Running | Phase::Approval);
+        if busy() {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), self.interrupt(id)).await;
+            if codex {
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(15);
+                while busy() && std::time::Instant::now() < until {
+                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                }
+                if busy() {
+                    return Err(LocalError::new("CHAT_EDIT_BUSY"));
+                }
+            }
         }
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
         let text = text.trim_end();

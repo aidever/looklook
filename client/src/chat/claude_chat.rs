@@ -147,11 +147,18 @@ impl Chat {
         if let Ok(p) = super::hooks::ensure_terminal_settings(&self.paths) {
             args.extend(["--settings".into(), p.display().to_string()]);
         }
-        let (resume, resume_at, first, model, effort, mode) = {
+        let (resume, resume_at, first, model, effort, mode, transcript) = {
             let mut st = lock(&inst.st);
             let resume = st.sdk.resume.take().or_else(|| st.binding.as_ref().filter(|b| b.transcript_path.is_file()).map(|b| (b.session_id.clone(), false)));
-            (resume, st.sdk.resume_at.take(), st.sdk.first.take(), st.sdk.model.clone(), st.sdk.effort.clone(), st.sdk.mode.clone())
+            let transcript = st.binding.as_ref().filter(|b| resume.as_ref().is_some_and(|(sid, _)| *sid == b.session_id)).map(|b| b.transcript_path.clone());
+            (resume, st.sdk.resume_at.take(), st.sdk.first.take(), st.sdk.model.clone(), st.sdk.effort.clone(), st.sdk.mode.clone(), transcript)
         };
+        // 接着的是界面上显示的那一支（编辑重发分出来的）：见 [`pin_leaf`]
+        if let (Some((sid, _)), Some(path)) = (&resume, &transcript) {
+            if let Err(e) = pin_leaf(path, sid) {
+                tracing::warn!(error = %e, "没能把要接着的那一支记进 transcript");
+            }
+        }
         if let Some((sid, fork)) = &resume {
             args.extend(["--resume".into(), sid.clone()]);
             if *fork {
@@ -857,6 +864,41 @@ fn task_id_in(content: &str) -> Option<String> {
     (!id.is_empty()).then_some(id)
 }
 
+/// `--resume <会话>` 接着的是 Claude Code 自己记的那一支：transcript 里最后一条 `last-prompt` 的 `leafUuid`
+/// （正常退出时才写）。编辑重发分出新的一支后进程被结束（换账号、重启客户端、空闲退出、再编辑一次），
+/// 这条还指着改之前的那一支，下次接着时模型又回到改之前的对话，`--resume-session-at` 也找不到新那支上的记录（实测 2.1.319）。
+/// 所以起进程前按界面的显示规则（最后写下的一条主线记录，[`super::transcript`]）补一条 `last-prompt`，两边一致。
+/// 进程这时还没起，不会和 Claude Code 同时写。
+fn pin_leaf(path: &std::path::Path, sid: &str) -> std::io::Result<()> {
+    use std::io::{BufRead, Write};
+    let f = std::fs::File::open(path)?;
+    let (mut leaf, mut pinned, mut prompt): (Option<String>, Option<String>, Option<String>) = (None, None, None);
+    for line in std::io::BufReader::new(f).lines() {
+        let line = line?;
+        // 先粗筛，几十 MB 的 transcript 也不用每行都解析
+        if !line.contains("\"uuid\"") && !line.contains("\"last-prompt\"") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+        match v["type"].as_str().unwrap_or("") {
+            "last-prompt" => {
+                pinned = v["leafUuid"].as_str().map(String::from);
+                prompt = v["lastPrompt"].as_str().map(String::from);
+            }
+            "user" | "assistant" | "attachment" | "system" if v["isSidechain"] != true => {
+                if let Some(u) = v["uuid"].as_str() {
+                    leaf = Some(u.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(leaf) = leaf.filter(|l| pinned.as_deref() != Some(l.as_str())) else { return Ok(()) };
+    let rec = json!({ "type": "last-prompt", "lastPrompt": prompt.unwrap_or_default(), "leafUuid": leaf, "sessionId": sid });
+    let mut f = std::fs::OpenOptions::new().append(true).open(path)?;
+    f.write_all(format!("{rec}\n").as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -865,6 +907,32 @@ mod tests {
     fn task_ids_from_results() {
         assert_eq!(task_id_in("Command running in background with ID: b14bc2oy7. Output is being written to: /tmp/x"), Some("b14bc2oy7".into()));
         assert_eq!(task_id_in("done"), None);
+    }
+
+    #[test]
+    fn pin_leaf_follows_the_edited_branch() {
+        let l = |v: Value| v.to_string() + "\n";
+        let path = std::env::temp_dir().join(format!("ll-pin-leaf-{}.jsonl", std::process::id()));
+        // u2 → a2 是老的一支（Claude Code 记的 leaf 是 a2），编辑重发后从 a1 分出 u3 → a3，进程没正常退出
+        let mut s = l(json!({"type":"user","uuid":"u1","parentUuid":null,"message":{"content":"1"}}));
+        s += &l(json!({"type":"assistant","uuid":"a1","parentUuid":"u1","message":{"content":[]}}));
+        s += &l(json!({"type":"user","uuid":"u2","parentUuid":"a1","message":{"content":"2"}}));
+        s += &l(json!({"type":"assistant","uuid":"a2","parentUuid":"u2","message":{"content":[]}}));
+        s += &l(json!({"type":"last-prompt","lastPrompt":"2","leafUuid":"a2","sessionId":"s"}));
+        s += &l(json!({"type":"user","uuid":"u3","parentUuid":"a1","message":{"content":"3"}}));
+        s += &l(json!({"type":"assistant","uuid":"a3","parentUuid":"u3","message":{"content":[]}}));
+        s += &l(json!({"type":"assistant","uuid":"x1","parentUuid":"a3","isSidechain":true,"message":{"content":[]}}));
+        s += &l(json!({"type":"cost-state","sessionId":"s"}));
+        std::fs::write(&path, &s).unwrap();
+        pin_leaf(&path, "s").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let last: Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+        assert_eq!(last["leafUuid"], "a3", "接着界面上显示的那一支，不算子代理的记录");
+        assert_eq!(last["lastPrompt"], "2");
+        // 已经一致：不再写
+        pin_leaf(&path, "s").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        let _ = std::fs::remove_file(&path);
     }
 }
 

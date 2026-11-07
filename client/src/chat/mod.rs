@@ -2069,6 +2069,8 @@ impl Chat {
         self.quit_claude(id).await?;
         Self::set_phase(&inst, &mut lock(&inst.st), Phase::Detached, Some("switching"));
         crate::claude_profiles::pin(&self.store, id, None)?;
+        // 新起的是一段新对话：新建时接着的那段别再算它的（会话列表的名字、tmux 没了重启时接哪段）
+        let _ = self.store.remove(&crate::instances::resume_key(id));
         let cmd = self.instances.chat_relaunch_command(id, None)?;
         self.instances.send_literal(id, &cmd).await?;
         self.instances.send_keys(id, &["Enter"]).await?;

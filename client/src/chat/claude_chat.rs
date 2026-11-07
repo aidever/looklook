@@ -729,6 +729,8 @@ impl Chat {
             Self::set_phase(&inst, &mut st, Phase::Idle, None);
         }
         let _ = self.store.remove(&super::binding_key(id));
+        // 新建时接着的那段也忘掉：不然还没说话（没有新的对话记录）时，会话列表按它显示旧对话的名字
+        let _ = self.store.remove(&crate::instances::resume_key(id));
         *inst.tr.lock().await = None;
         let _ = inst.tx.send(Event::Reset);
         self.sdk_attach(id).await.map(|_| ())

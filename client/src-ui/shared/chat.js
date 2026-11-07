@@ -262,6 +262,10 @@ export const CODEX_ACTIONS = { '/permissions': 'mode' };
 /** DSH（走 dsh web）认的：/clear、/new 开新会话，/model 是界面的模型菜单；别的斜杠命令交给 DSH 自己执行 */
 export const DSH_COMMANDS = ['/clear', '/new', '/model'];
 
+/** stream-json 的 Claude Code 里用不了的（`claude -p` 回“isn't available in this environment”）：不列。
+ *  要回到前面用编辑重发（铅笔）或检查点 */
+export const SDK_UNAVAILABLE = ['/rewind'];
+
 /** 只有 Codex 有的（看看在界面里做）：别的工具不列、不拦 */
 export const CODEX_ONLY = ['/worktree'];
 

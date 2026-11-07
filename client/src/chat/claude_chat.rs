@@ -80,9 +80,13 @@ pub struct SdkSt {
     /// 最近一次 `rate_limit_event` 说额度用完了（`status: rejected`）：什么时候重置（Unix 秒）
     limit_reset: Option<i64>,
     /// 额度用完、在等重置后自动发 continue：什么时候发（毫秒）。TUI 里是 Claude Code 自己等（默认开着），这里看看替它等
+    /// 存在数据库里（[`limit_key`]），客户端重启后接着等
     pub(super) limit_resume: Option<i64>,
-    /// 每次开始等 +1：取消、重新开始等之后，旧的定时不算
-    limit_gen: u64,
+    /// 到点了、正在发 continue
+    limit_firing: bool,
+    /// Stop hook 的 `session_crons` 不是空的：这段对话里有定时任务（/loop、CronCreate、ScheduleWakeup），
+    /// 都在 claude 进程里，进程结束就没了，所以不能当空闲结束
+    pub(super) crons: bool,
 }
 
 impl Chat {
@@ -202,7 +206,7 @@ impl Chat {
         tracing::info!(id, program = %program.display(), resume = ?resume.as_ref().map(|r| &r.0), "起对话模式的 Claude Code（stream-json）");
         let proc = Proc::spawn(claude_sdk::Spawn { program, args, cwd: PathBuf::from(&row.workdir), env, profile_env, path }, tx)?;
         tokio::spawn(self.clone().sdk_loop(inst.clone(), proc.clone(), rx));
-        let init = match proc.request("initialize", json!({ "hooks": claude_sdk::hooks_payload() })).await {
+        let init = match proc.request("initialize", json!({ "hooks": claude_sdk::hooks_payload(), "promptSuggestions": true })).await {
             Ok(v) => v,
             Err(e) => {
                 proc.kill();
@@ -298,7 +302,7 @@ impl Chat {
         let p = {
             let mut st = lock(&inst.st);
             // 换了对话、换了账号：不再替旧的那段等额度重置
-            st.sdk.limit_resume = None;
+            self.limit_set(inst, &mut st, None);
             st.sdk.proc.take()
         };
         if let Some(p) = p {
@@ -312,7 +316,7 @@ impl Chat {
         st.sdk.interrupted = false;
         st.sdk.idle_since = None;
         // 自己发了消息（或者是到点发的 continue）：不再等
-        st.sdk.limit_resume = None;
+        self.limit_set(inst, &mut st, None);
         if st.phase == Phase::Idle {
             st.error = None;
             Self::set_phase(inst, &mut st, Phase::Running, None);
@@ -322,8 +326,7 @@ impl Chat {
 
     /// 运行中、等审批时不自动更新
     fn guard_turn(st: &mut super::State) {
-        // 等额度重置自动继续时也不更新：更新要重启客户端，等着的定时就没了
-        let busy = matches!(st.phase, Phase::Running | Phase::Approval) || st.sdk.limit_resume.is_some();
+        let busy = matches!(st.phase, Phase::Running | Phase::Approval);
         match (busy, st.sdk.turn_guard.is_some()) {
             (true, false) => st.sdk.turn_guard = Some(crate::updater::TerminalGuard::new()),
             (false, true) => {
@@ -354,6 +357,7 @@ impl Chat {
             return;
         }
         st.sdk.proc = None;
+        st.sdk.crons = false;
         st.sdk.tasks.clear();
         st.background.clear();
         st.agents.clear();
@@ -382,6 +386,15 @@ impl Chat {
             "control_request" => self.sdk_control(inst, proc, v),
             "stream_event" => self.sdk_stream(inst, &v["event"], v["parent_tool_use_id"].is_null()),
             "system" => self.sdk_system(inst, &v),
+            // 推荐回复（`initialize` 里开了 promptSuggestions）：输入框里灰色的那句，跟 TUI 里一样
+            "prompt_suggestion" => {
+                let s = v["suggestion"].as_str().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+                let mut st = lock(&inst.st);
+                if st.suggestion != s {
+                    st.suggestion = s;
+                    Self::emit_status(inst, &st);
+                }
+            }
             "rate_limit_event" => {
                 let info = &v["rate_limit_info"];
                 let mut st = lock(&inst.st);
@@ -400,9 +413,12 @@ impl Chat {
                 st.compacting = None;
                 if v["is_error"] == true && v["subtype"] != "error_during_execution" {
                     let msg = v["result"].as_str().map(String::from).or_else(|| v["errors"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n")));
-                    st.error = msg.filter(|m| !m.is_empty()).map(|m| m.chars().take(500).collect());
+                    // StopFailure 先到，已经记下了是哪种错（billing_error、authentication_failed……）：保留它，
+                    // 界面按它显示“换个账号继续”；换成报错原文就认不出来了
+                    let code = st.error.take().filter(|e| is_error_code(e));
+                    st.error = code.or_else(|| msg.filter(|m| !m.is_empty()).map(|m| m.chars().take(500).collect()));
                     // 额度用完：默认等重置后自动继续（跟 TUI 里 Claude Code 默认的一样），界面上可以取消、换账号
-                    if st.sdk.limit_reset.is_some() || st.error.as_deref().is_some_and(is_limit_text) {
+                    if st.sdk.limit_reset.is_some() || st.error.as_deref().is_some_and(|e| e == "rate_limit" || is_limit_text(e)) {
                         st.error = Some("rate_limit".into());
                         let reset = st.sdk.limit_reset.take().filter(|&t| t > 0);
                         tokio::spawn(self.clone().sdk_limit_wait(inst.clone(), reset));
@@ -561,6 +577,9 @@ impl Chat {
                             input["hook_event_name"] = json!(e);
                         }
                     }
+                    if let Some(c) = input["session_crons"].as_array() {
+                        lock(&inst.st).sdk.crons = !c.is_empty();
+                    }
                     let out = me.hook(&inst.id, input).await;
                     let resp: Value = serde_json::from_str(&out).unwrap_or_else(|_| json!({}));
                     if let Err(e) = proc.respond(&rid, resp).await {
@@ -686,6 +705,24 @@ impl Chat {
         let content = claude_sdk::user_content(text, images)?;
         let proc = self.sdk_attach(id).await?;
         proc.send_user(content).await?;
+        // 手打的 `/model sonnet`、`/effort high`：claude 只在这个进程里生效，跟界面上选的一样记下来，进程重起时带上
+        // （不然空闲结束、换账号、重启客户端后就回去了）
+        if let Some((cmd, v)) = text.split_once(' ').map(|(c, v)| (c, v.trim())).filter(|(_, v)| !v.is_empty() && !v.contains(char::is_whitespace)) {
+            let ok_model = v.len() <= 64 && v.chars().all(|c| c.is_ascii_alphanumeric() || "._-[]".contains(c));
+            let mut st = lock(&inst.st);
+            match cmd {
+                "/model" if ok_model => {
+                    st.model = Some(v.to_string());
+                    st.model_set_at = Some(st.model_msg.clone());
+                    st.sdk.model = Some(v.to_string());
+                }
+                "/effort" if super::screen::EFFORTS.contains(&v) => {
+                    st.effort = Some(v.to_string());
+                    st.sdk.effort = Some(v.to_string());
+                }
+                _ => {}
+            }
+        }
         if !text.starts_with('/') {
             self.sdk_running(&inst);
         }
@@ -765,7 +802,8 @@ impl Chat {
         self.sdk_attach(id).await.map(|_| ())
     }
 
-    /// 额度用完：等到重置（`reset`，Unix 秒；不知道时看用量接口，再不知道就过一会儿试一次）后发 continue
+    /// 额度用完：算出什么时候重置（`reset`，Unix 秒；不知道时看用量接口，再不知道就过一会儿试一次）再多等一会儿，记下来，
+    /// 到点由 [`Chat::sdk_limit_tick`] 发 continue
     async fn sdk_limit_wait(self: Arc<Self>, inst: Arc<Inst>, reset: Option<i64>) {
         let reset = match reset {
             Some(t) => Some(t),
@@ -773,39 +811,71 @@ impl Chat {
         };
         let now = crate::util::system_ms();
         let at = reset.map_or(now + LIMIT_RETRY_MS, |t| (t * 1000).max(now) + LIMIT_SLACK_MS);
-        let gen = {
-            let mut st = lock(&inst.st);
-            // 等的这会儿已经有人接手了（发了消息、换了账号）
-            if st.phase != Phase::Idle || st.error.as_deref() != Some("rate_limit") {
-                return;
-            }
-            st.sdk.limit_gen += 1;
-            st.sdk.limit_resume = Some(at);
-            Self::guard_turn(&mut st);
-            Self::emit_status(&inst, &st);
-            st.sdk.limit_gen
-        };
-        tracing::info!(id = %inst.id, at, "额度用完了，等重置后自动继续");
-        tokio::time::sleep(Duration::from_millis((at - now).max(0) as u64)).await;
-        {
-            let mut st = lock(&inst.st);
-            if st.sdk.limit_gen != gen || st.sdk.limit_resume.is_none() {
-                return;
-            }
-            if st.phase != Phase::Idle {
-                st.sdk.limit_resume = None;
-                Self::guard_turn(&mut st);
-                Self::emit_status(&inst, &st);
-                return;
-            }
+        let mut st = lock(&inst.st);
+        // 取用量的这会儿已经有人接手了（发了消息、换了账号）
+        if st.phase != Phase::Idle || st.error.as_deref() != Some("rate_limit") {
+            return;
         }
-        tracing::info!(id = %inst.id, "额度应该重置了，自动继续");
-        if let Err(e) = self.sdk_input(&inst.id, "continue", &[]).await {
-            tracing::warn!(code = %e.code, "额度重置后没能自动继续");
+        tracing::info!(id = %inst.id, at, "额度用完了，等重置后自动继续");
+        self.limit_set(&inst, &mut st, Some(at));
+    }
+
+    /// 记下（存进数据库）或取消“额度重置后自动继续”
+    fn limit_set(&self, inst: &Inst, st: &mut super::State, at: Option<i64>) {
+        if st.sdk.limit_resume == at {
+            return;
+        }
+        st.sdk.limit_resume = at;
+        let key = limit_key(&inst.id);
+        let _ = match at {
+            Some(t) => self.store.set(&key, &t),
+            None => self.store.remove(&key),
+        };
+        Self::guard_turn(st);
+        Self::emit_status(inst, st);
+    }
+
+    /// 后台每隔几秒看一次（[`Chat::background`]）：在等额度重置的到点了就发 continue。
+    /// 进程空闲时被结束了也没关系，发消息时会 `--resume` 接着
+    pub(super) fn sdk_limit_tick(self: &Arc<Self>, inst: &Arc<Inst>) {
+        let mut st = lock(&inst.st);
+        let Some(at) = st.sdk.limit_resume else { return };
+        if st.sdk.limit_firing || crate::util::system_ms() < at {
+            return;
+        }
+        if !matches!(st.phase, Phase::Idle | Phase::Detached) {
+            self.limit_set(inst, &mut st, None);
+            return;
+        }
+        st.sdk.limit_firing = true;
+        drop(st);
+        let (me, inst) = (self.clone(), inst.clone());
+        tokio::spawn(async move {
+            tracing::info!(id = %inst.id, "额度应该重置了，自动继续");
+            let r = me.sdk_input(&inst.id, "continue", &[]).await;
             let mut st = lock(&inst.st);
-            st.sdk.limit_resume = None;
+            st.sdk.limit_firing = false;
+            if let Err(e) = r {
+                tracing::warn!(code = %e.code, "额度重置后没能自动继续");
+            }
+            me.limit_set(&inst, &mut st, None);
+        });
+    }
+
+    /// 客户端启动时：重启前在等额度重置的会话接着等
+    pub(super) fn sdk_limit_restore(&self) {
+        for r in self.store.instances().unwrap_or_default() {
+            let key = limit_key(&r.id);
+            let Ok(Some(at)) = self.store.get::<i64>(&key) else { continue };
+            if !self.instances.claude_sdk_mode(&r) {
+                let _ = self.store.remove(&key);
+                continue;
+            }
+            let inst = self.inst(&r.id);
+            let mut st = lock(&inst.st);
+            st.sdk.limit_resume = Some(at);
+            st.error = Some("rate_limit".into());
             Self::guard_turn(&mut st);
-            Self::emit_status(&inst, &st);
         }
     }
 
@@ -814,9 +884,8 @@ impl Chat {
         // 在等额度重置自动继续：“不自动继续”
         {
             let mut st = lock(&inst.st);
-            if st.sdk.limit_resume.take().is_some() {
-                Self::guard_turn(&mut st);
-                Self::emit_status(&inst, &st);
+            if st.sdk.limit_resume.is_some() {
+                self.limit_set(&inst, &mut st, None);
                 return Ok(());
             }
         }
@@ -931,7 +1000,7 @@ impl Chat {
     /// 后台：结束空闲很久、没人看、没有后台任务的进程
     pub(super) fn sdk_reap(&self, inst: &Inst) {
         let mut st = lock(&inst.st);
-        let idle = st.phase == Phase::Idle && st.background.is_empty() && st.agents.is_empty() && st.sdk.idle_since.is_some_and(|t| t.elapsed() >= IDLE_REAP);
+        let idle = st.phase == Phase::Idle && st.background.is_empty() && st.agents.is_empty() && !st.sdk.crons && st.sdk.idle_since.is_some_and(|t| t.elapsed() >= IDLE_REAP);
         if idle && st.sdk.proc.is_some() && inst.viewers.load(std::sync::atomic::Ordering::SeqCst) == 0 {
             tracing::info!(id = %inst.id, "对话模式的 Claude Code 空闲很久了，先结束，用到时再接着");
             if let Some(p) = st.sdk.proc.take() {
@@ -945,6 +1014,16 @@ impl Chat {
 fn is_limit_text(s: &str) -> bool {
     let s = s.to_ascii_lowercase();
     s.contains("usage limit reached") || (s.contains("hit your") && s.contains("limit"))
+}
+
+/// 存“额度重置后自动继续”时间（毫秒）的键
+fn limit_key(id: &str) -> String {
+    format!("chat.limit_resume.{id}")
+}
+
+/// StopFailure 的 `error`（`rate_limit`、`billing_error`……），不是报错原文
+fn is_error_code(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 40 && s.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
 }
 
 /// 用量接口（[`Chat::usage`]）里用完的那个窗口什么时候重置（Unix 秒）
@@ -999,6 +1078,21 @@ fn pin_leaf(path: &std::path::Path, sid: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn limit_and_error_codes() {
+        assert!(is_limit_text("You've hit your weekly limit · resets Oct 18, 11pm (America/New_York)"));
+        assert!(is_limit_text("Claude AI usage limit reached|1792378800"));
+        assert!(!is_limit_text("API Error: 500 Internal server error"));
+        assert!(is_error_code("billing_error") && is_error_code("rate_limit"));
+        assert!(!is_error_code("Credit balance is too low") && !is_error_code(""));
+        let u = json!({ "limits": {
+            "five_hour": { "used": 40.0, "resets_at": "2026-11-07T15:00:00Z" },
+            "seven_day": { "used": 100.0, "resets_at": "2026-11-09T03:00:00+00:00" },
+        } });
+        assert_eq!(limit_reset_in(&u), Some(1_794_193_200));
+        assert_eq!(limit_reset_in(&json!({ "limits": { "five_hour": { "used": 10.0, "resets_at": "2026-11-07T15:00:00Z" } } })), None);
+    }
 
     #[test]
     fn task_ids_from_results() {

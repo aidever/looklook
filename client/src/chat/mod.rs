@@ -1273,6 +1273,8 @@ impl Chat {
             // 这一轮做完了、后台还有任务（shell、子代理……，Claude Code 状态栏上的个数）：做完会接着回来，会话列表上算在干活。
             // 不并进 board：看板上的“正在干活”是这一轮还没完（卡住提醒、停止都按它），后台开着的开发服务器不该算
             "background": st.background.iter().map(|(n, kind)| json!({ "n": n, "kind": kind })).collect::<Vec<_>>(),
+            // 有定时任务（/loop 等，stream-json 的 Claude Code）：在 claude 进程里，结束了就没了，清理后台会话时算在忙
+            "crons": st.sdk.crons,
             "seen_at": st.board.seen_at,
             // 复制会话时复制这段对话（`resume.fork`）
             "session_id": st.binding.as_ref().map(|b| &b.session_id),
@@ -1293,6 +1295,16 @@ impl Chat {
     }
 
     /// 带对话界面的会话（通知按它们逐个检查）
+    /// AI 最近一次开始或做完一轮的时间（毫秒，没有时 0）。存在数据库里，客户端重启后也有。
+    /// stream-json 的会话不在终端里输出，“终端有没有输出”看不出它在干活（飞书里聊、/loop 自己跑），清理后台会话时看这个
+    pub fn turn_at(&self, id: &str) -> i64 {
+        let turn = match lock(&self.insts).get(id).cloned() {
+            Some(inst) => lock(&inst.st).board.turn.clone(),
+            None => self.store.get::<board::Meta>(&board::key(id)).ok().flatten().and_then(|m| m.turn),
+        };
+        turn.map_or(0, |t| t.ended_at.unwrap_or(t.started_at).max(t.started_at))
+    }
+
     pub fn ids(&self) -> Vec<String> {
         lock(&self.insts).keys().cloned().collect()
     }
@@ -1325,6 +1337,7 @@ impl Chat {
     ///   空闲的 15 秒一次（看额度等重置、claude 退出）。额度菜单没人选时照样替用户选“等重置后自动继续”；
     /// - 补上一轮结束时的摘要、记下标题，改过的存进数据库。
     pub async fn background(self: Arc<Self>) {
+        self.sdk_limit_restore();
         let mut tick = 0u32;
         loop {
             tokio::time::sleep(Duration::from_secs(3)).await;
@@ -1335,6 +1348,7 @@ impl Chat {
                 let sdk = inst.sdk.load(Ordering::Relaxed);
                 if sdk {
                     self.sdk_reap(&inst);
+                    self.sdk_limit_tick(&inst);
                 }
                 if tick.is_multiple_of(20) && inst.agent.launch() == "codex" {
                     self.codex_reap(&inst).await;
@@ -1639,6 +1653,10 @@ impl Chat {
             return self.dsh_input(id, text, images).await;
         }
         if inst.sdk.load(Ordering::Relaxed) {
+            // “立即发送”排着的消息：stream-json 里运行中发的本来就在这一步做完后并进这一轮，没有别的可发
+            if text.is_empty() && images.is_empty() {
+                return Ok(json!({ "delivered": true }));
+            }
             return self.sdk_input(id, text, images).await;
         }
         let (hooked, running) = {

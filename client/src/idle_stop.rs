@@ -37,12 +37,14 @@ pub struct Idle {
     pub fg: Option<String>,
 }
 
-/// 在忙：对话界面在跑、等你确认、后台还有任务；看进程认出来在忙（AI 在回复、普通终端有命令在跑）
+/// 在忙：对话界面在跑、等你确认、后台还有任务、有定时任务（/loop）、在等额度重置后自动继续；
+/// 看进程认出来在忙（AI 在回复、普通终端有命令在跑）
 fn busy(chat: &Chat, v: &View) -> bool {
     let brief = chat.brief(&v.row.id);
     let phase = brief.as_ref().and_then(|b| b["phase"].as_str());
     let background = brief.as_ref().and_then(|b| b["background"].as_array()).is_some_and(|a| !a.is_empty());
-    matches!(phase, Some("running" | "approval" | "tui")) || background || v.busy == Some(true)
+    let waiting = brief.as_ref().is_some_and(|b| b["crons"] == true || !b["limit"].is_null());
+    matches!(phase, Some("running" | "approval" | "tui")) || background || waiting || v.busy == Some(true)
 }
 
 /// 在后台跑着的会话（tmux 会话还在），很久没动静的在前
@@ -62,7 +64,8 @@ pub async fn list(instances: &Instances, chat: &Chat) -> Vec<Idle> {
                 tool: v.tool,
                 workdir: v.row.workdir.clone(),
                 opened_at,
-                active_at: output.get(&v.row.id).copied().unwrap_or(0).max(opened_at),
+                // AI 做的一轮也算（stream-json 的会话不在终端里输出）
+                active_at: output.get(&v.row.id).copied().unwrap_or(0).max(opened_at).max(chat.turn_at(&v.row.id)),
                 busy: busy(chat, v),
                 fg: v.fg.clone(),
             }

@@ -84,6 +84,7 @@ import {
   DSH_COMMANDS,
   CODEX_ONLY,
   COMMANDS,
+  SDK_UNAVAILABLE,
   EFFORTS,
   effortShown,
   EMPTY,
@@ -3201,7 +3202,9 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
   const slash = useMemo(() => {
     if (!wantSlash) return [];
     const q = slashWord.toLowerCase();
-    const builtin = COMMANDS.filter(([name]) => (agentId === 'codex' ? CODEX_COMMANDS.includes(name) : agentId === 'dsh' ? DSH_COMMANDS.includes(name) : !CODEX_ONLY.includes(name))).map(([name, action]) => {
+    const builtin = COMMANDS.filter(([name]) =>
+      agentId === 'codex' ? CODEX_COMMANDS.includes(name) : agentId === 'dsh' ? DSH_COMMANDS.includes(name) : !CODEX_ONLY.includes(name) && !(caps?.sdk && SDK_UNAVAILABLE.includes(name)),
+    ).map(([name, action]) => {
       const codex = agentId === 'codex' ? CODEX_ACTIONS[name] : null;
       return { name, action: codex ?? action, description: t(codex ? `chat.cmd.codex_${name.slice(1)}` : `chat.cmd.${name.slice(1)}`) };
     });
@@ -3210,7 +3213,7 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
     const all = [...builtin, ...mine];
     const hit = all.filter((c) => c.name.toLowerCase().startsWith(q));
     return (hit.length ? hit : all.filter((c) => c.name.toLowerCase().includes(q.slice(1)))).slice(0, 40);
-  }, [wantSlash, slashWord, custom]);
+  }, [wantSlash, slashWord, custom, caps?.sdk]);
   // 把光标放到 at，并记下来（程序改了输入框的字以后）：在这次渲染完、下一个按键之前放好，
   // 不用 requestAnimationFrame——选完马上接着打字时，晚到的光标会把刚打的字挤到后面去
   const pendingCaret = useRef(null);
@@ -3313,8 +3316,8 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
   const workdir = useSessions()?.known(id)?.workdir;
   const trim = (p) => String(p ?? '').replace(/[\\/]+$/, '');
   const elsewhere = agentId === 'codex' && status?.cwd && workdir && !trim(status.cwd).startsWith(trim(workdir)) ? status.cwd : null;
-  // 运行中能不能“立即发送”：Claude Code 2.1.275 起才有
-  const canNow = running && agentId === 'claude' && versionAtLeast(status?.version, [2, 1, 275]);
+  // 运行中能不能“立即发送”：Claude Code 2.1.275 起才有，而且只有 TUI 里有（stream-json 里运行中发的本来就在这一步做完后并进这一轮）
+  const canNow = running && agentId === 'claude' && !caps?.sdk && versionAtLeast(status?.version, [2, 1, 275]);
   // Codex 运行中：回车插话（这一轮里下一步就读到），Tab 排到这一轮之后
   const canLater = running && agentId === 'codex';
   const later = Array.isArray(status?.later) ? status.later : [];

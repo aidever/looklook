@@ -502,7 +502,8 @@ impl Chat {
             "queued": st.queued.iter().chain(&st.codex.steered).chain(&st.dsh.queued).collect::<Vec<_>>(),
             // Codex：Tab 排到这一轮之后的（这一轮结束后作为下一轮发出）
             "later": st.codex.later.iter().map(|(t, i)| json!({ "text": t, "images": i.len() })).collect::<Vec<_>>(),
-            "limit": (st.limit_wait.is_some() || st.limit_auto_at.is_some()).then(|| json!({ "waiting": st.limit_wait, "auto_at": st.limit_auto_at })),
+            "limit": (st.limit_wait.is_some() || st.limit_auto_at.is_some() || st.sdk.limit_resume.is_some())
+                .then(|| json!({ "waiting": st.limit_wait, "auto_at": st.limit_auto_at, "resume_at": st.sdk.limit_resume })),
             "effort": st.effort,
             // 终端里开着这里读不出来的界面（只提示，phase 不变）
             "other": st.other,
@@ -1249,7 +1250,7 @@ impl Chat {
             Phase::Approval | Phase::Tui => "attn",
             Phase::Running => "working",
             // 额度用完、正在等重置后自动继续
-            _ if st.limit_wait.is_some() => "working",
+            _ if st.limit_wait.is_some() || st.sdk.limit_resume.is_some() => "working",
             _ if ended => "ended",
             Phase::Idle => "idle",
             Phase::Detached => "stopped",
@@ -1267,7 +1268,8 @@ impl Chat {
             "doing": st.doing,
             "activity": st.live.activity,
             "turn": turn,
-            "limit": (st.limit_wait.is_some() || st.limit_auto_at.is_some()).then(|| json!({ "waiting": st.limit_wait, "auto_at": st.limit_auto_at })),
+            "limit": (st.limit_wait.is_some() || st.limit_auto_at.is_some() || st.sdk.limit_resume.is_some())
+                .then(|| json!({ "waiting": st.limit_wait, "auto_at": st.limit_auto_at, "resume_at": st.sdk.limit_resume })),
             // 这一轮做完了、后台还有任务（shell、子代理……，Claude Code 状态栏上的个数）：做完会接着回来，会话列表上算在干活。
             // 不并进 board：看板上的“正在干活”是这一轮还没完（卡住提醒、停止都按它），后台开着的开发服务器不该算
             "background": st.background.iter().map(|(n, kind)| json!({ "n": n, "kind": kind })).collect::<Vec<_>>(),
@@ -2469,7 +2471,8 @@ impl Chat {
     /// [`LIMIT_AUTO_AFTER`] 没人选就替用户选这一项，任务不会因为没人在电脑前一直停着。
     /// 不管有没有人开着对话页都要看（关着页面时没有抓屏），所以单独跑：每 2 秒看一眼，菜单不在了或者一直没出现就结束。
     fn guard_limit(self: &Arc<Self>, inst: &Arc<Inst>) {
-        if inst.agent.launch() != "claude" || inst.limit_guard.swap(true, Ordering::SeqCst) {
+        // stream-json 的会话没有菜单（看看自己等，见 `sdk_limit_wait`）
+        if inst.agent.launch() != "claude" || inst.sdk.load(Ordering::Relaxed) || inst.limit_guard.swap(true, Ordering::SeqCst) {
             return;
         }
         let (me, inst) = (self.clone(), inst.clone());

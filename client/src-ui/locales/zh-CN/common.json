@@ -2047,6 +2047,7 @@
       "auto_in": "{{s}} 秒内没人选择，会自动选“额度重置后自动继续”",
       "waiting": "额度用完了，重置后会自动继续",
       "terminal_says": "终端里显示：continuing automatically {{when}}",
+      "resume_at": "到 {{when}} 自动发“继续”",
       "keep_open": "这台电脑上的看看要一直开着；继续之后如果需要你确认，还是会停下来等你。",
       "cancel_wait": "不自动继续",
       "switch": "换个账号继续",

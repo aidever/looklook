@@ -6,7 +6,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { api, terminalDevice } from '../shared/api.js';
-import { awayRecap, boardSort, boardSpan, boardState, boardSummary, useAwaySince, BOARD_GROUPS } from '../shared/board.js';
+import { awayRecap, limitAt, boardSort, boardSpan, boardState, boardSummary, useAwaySince, BOARD_GROUPS } from '../shared/board.js';
 import { DeviceTag, SessionIcon } from '../shared/brands.jsx';
 import { useDevices } from '../shared/devices.jsx';
 import { errorText } from '../shared/i18n.js';
@@ -216,7 +216,7 @@ function Peek({ i, state, onOpen }) {
     );
   } else if (state === 'attn' && a.kind === 'limit') {
     const auto = (a.options ?? []).findIndex((o) => o.startsWith(LIMIT_AUTO));
-    body = <p className="bd-peek-lead">{c.limit?.waiting ? t('board.limit_waiting', { at: c.limit.waiting }) : t('board.limit_body')}</p>;
+    body = <p className="bd-peek-lead">{limitAt(c.limit) ? t('board.limit_waiting', { at: limitAt(c.limit) }) : t('board.limit_body')}</p>;
     actions = (
       <>
         {auto >= 0 && (

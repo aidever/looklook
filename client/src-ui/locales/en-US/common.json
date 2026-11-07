@@ -2047,6 +2047,7 @@
       "auto_in": "If nobody chooses within {{s}} s, “continue automatically after the reset” is picked",
       "waiting": "Usage limit reached. It continues automatically after the reset",
       "terminal_says": "The terminal says: continuing automatically {{when}}",
+      "resume_at": "Will send “continue” at {{when}}",
       "keep_open": "Keep Looklook running on this computer. After it continues, it still stops for anything that needs your approval.",
       "cancel_wait": "Don't continue automatically",
       "switch": "Continue with another account",

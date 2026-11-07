@@ -15,6 +15,16 @@ export function boardState(i) {
 }
 
 /** 看板组的顺序 */
+/** 某个时间（毫秒）显示成 15:01；不是今天的带上日期 */
+export function clockAt(ms) {
+  const d = new Date(ms);
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return d.toDateString() === new Date().toDateString() ? time : `${d.toLocaleDateString([], { month: 'numeric', day: 'numeric' })} ${time}`;
+}
+
+/** 额度用完在等重置时，“{{at}} 自动继续”里的时间：TUI 是屏幕上的原话，对话模式是看看定的时间 */
+export const limitAt = (l) => l?.waiting || (l?.resume_at > 0 ? clockAt(l.resume_at) : null);
+
 export const BOARD_GROUPS = ['attn', 'working', 'ended'];
 
 /** 组里的顺序：等你处理按等得久的在前，其余新的在前 */
@@ -66,7 +76,7 @@ export function boardSummary(t, i, activityText) {
     }
   }
   if (state === 'working') {
-    if (c.limit?.waiting) return { text: t('board.limit_waiting', { at: c.limit.waiting }) };
+    if (limitAt(c.limit)) return { text: t('board.limit_waiting', { at: limitAt(c.limit) }) };
     const tool = c.doing?.tool;
     const detail = c.doing?.detail;
     if (tool && detail) return { text: t(`board.do_${toolKind(tool)}`, { detail, tool }), kind: toolKind(tool) };

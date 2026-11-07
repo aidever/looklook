@@ -152,6 +152,7 @@ import { endpoints as fileEndpoints, Preview as FilePreview } from './FileBrowse
 import { imeComposing } from '../shared/ime.js';
 import { shownFocus } from '../shared/termFrame.js';
 import { splitTitle } from '../shared/title.js';
+import { clockAt } from '../shared/board.js';
 
 // ---------------- 数据 ----------------
 
@@ -2138,7 +2139,9 @@ function OtherScreen({ id, onTab }) {
   );
 }
 
-function LimitWait({ id, waiting }) {
+/** 额度用完、在等重置后自动继续。`waiting`：TUI 里 Claude Code 自己在等（屏幕上的原话）；
+ *  `resumeAt`：对话模式（stream-json）里看看替它等，到这个时间（毫秒）自动发“继续” */
+function LimitWait({ id, waiting, resumeAt }) {
   const { t } = useT();
   const toast = useToast();
   const [busy, setBusy] = useState(false);
@@ -2160,7 +2163,11 @@ function LimitWait({ id, waiting }) {
       </span>
       <div className="chat-limit-when">
         <LimitReset id={id} />
-        <span className="chat-note">{t('chat.limit.terminal_says', { when: waiting })}</span>
+        {waiting ? (
+          <span className="chat-note">{t('chat.limit.terminal_says', { when: waiting })}</span>
+        ) : (
+          <span className="chat-note">{t('chat.limit.resume_at', { when: clockAt(resumeAt) })}</span>
+        )}
       </div>
       <p className="chat-note">{t('chat.limit.keep_open')}</p>
       <div className="chat-acts">
@@ -5179,9 +5186,9 @@ export default function ChatView({ id, launch, active, touch, offline = false, o
           )}
           {/* 第一句在等它起来：上面已经写着“正在启动”，这里不再说一遍 */}
           {phase === 'detached' && !first && <Detached id={id} status={status} />}
-          {status?.limit?.waiting && phase !== 'tui' && <LimitWait id={id} waiting={status.limit.waiting} />}
+          {(status?.limit?.waiting || status?.limit?.resume_at > 0) && phase !== 'tui' && <LimitWait id={id} waiting={status.limit.waiting} resumeAt={status.limit.resume_at} />}
           {status?.other && phase !== 'tui' && phase !== 'detached' && <OtherScreen id={id} onTab={onTab} />}
-          {agentId === 'claude' && phase === 'idle' && !status?.limit?.waiting && ACCOUNT_ERRORS.includes(status?.error) && <AccountFail id={id} error={status.error} />}
+          {agentId === 'claude' && phase === 'idle' && !status?.limit?.waiting && !status?.limit?.resume_at && ACCOUNT_ERRORS.includes(status?.error) && <AccountFail id={id} error={status.error} />}
           {agentId === 'codex' && status != null && <CodexSetup id={id} phase={phase} onTab={onTab} />}
           {phase !== 'detached' && <AgentStrip id={id} items={items} live={live} bg={bg} onOpen={openAgent} />}
           <StatusNotice status={status} online={chat.online} offline={offline} />

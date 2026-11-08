@@ -997,10 +997,10 @@ impl Chat {
         self.sdk_attach(id).await.map(|_| ())
     }
 
-    /// 后台：结束空闲很久、没人看、没有后台任务的进程
+    /// 后台：结束空闲很久、没人看、没有后台任务、没有定时任务、不在等额度重置的进程
     pub(super) fn sdk_reap(&self, inst: &Inst) {
         let mut st = lock(&inst.st);
-        let idle = st.phase == Phase::Idle && st.background.is_empty() && st.agents.is_empty() && !st.sdk.crons && st.sdk.idle_since.is_some_and(|t| t.elapsed() >= IDLE_REAP);
+        let idle = st.phase == Phase::Idle && st.background.is_empty() && st.agents.is_empty() && !st.sdk.crons && st.sdk.limit_resume.is_none() && st.sdk.idle_since.is_some_and(|t| t.elapsed() >= IDLE_REAP);
         if idle && st.sdk.proc.is_some() && inst.viewers.load(std::sync::atomic::Ordering::SeqCst) == 0 {
             tracing::info!(id = %inst.id, "对话模式的 Claude Code 空闲很久了，先结束，用到时再接着");
             if let Some(p) = st.sdk.proc.take() {

@@ -2868,7 +2868,7 @@ impl Chat {
         self.instances.send_keys(id, &["Down"]).await?;
         wait(400).await;
         let scr = self.instances.screen(id).await.unwrap_or_default();
-        if !scr.lines().map(screen_plain).any(|l| l.contains("to view tasks")) {
+        if !screen::tasks_focused(&scr) {
             return Err(changed());
         }
         self.instances.send_keys(id, &["Enter"]).await?;

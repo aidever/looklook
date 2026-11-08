@@ -290,6 +290,12 @@ pub fn task_details(capture: &str) -> Option<String> {
     lines.iter().find_map(|l| l.strip_prefix("Command:").or_else(|| l.strip_prefix("Description:")).or_else(|| l.strip_prefix("Prompt:")).map(|s| s.trim().to_string()))
 }
 
+/// 输入框里按 ↓ 之后，状态栏上的后台任务被选中了：提示从 `↓ to manage` 变成 `Enter to view tasks`。
+/// 窗口窄（手机）时提示会被截断成 `· Enter to…`、`· Ent…`，只认 `· Ent` 开头。
+pub fn tasks_focused(capture: &str) -> bool {
+    capture.lines().map(|l| strip(l).0).any(|l| l.contains("to view tasks") || l.contains("· Ent"))
+}
+
 /// 运行中屏幕上看得到、但 transcript 里还没有的东西（docs/CLAUDE_UI.md §4.5“正在输出的预览”）
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Live {
@@ -770,6 +776,10 @@ mod tests {
         // 有输出时按键提示在屏幕外
         let tall = format!("{RULE}\n  Shell details\n\n  Status:   running\n  Runtime:  15s\n  Command:  for i in 1 2 3; do echo tick$i; done\n\n  Output:\n  ╭──╮\n  │ tick1 │\n");
         assert_eq!(task_details(&tall).as_deref(), Some("for i in 1 2 3; do echo tick$i; done"));
+        // ↓ 选中状态栏上的后台任务（宽窗口、50 列的手机窗口），没选中时不算
+        assert!(tasks_focused(&format!("{RULE}\n❯ \n{RULE}\n  ⏵⏵ bypass permissions on · 1 shell · Enter to view tasks\n")));
+        assert!(tasks_focused(&format!("{RULE}\n❯ \n{RULE}\n  ⏵⏵ bypass permissions on · 1 shell · Enter to…\n")));
+        assert!(!tasks_focused(&format!("{RULE}\n❯ \n{RULE}\n  ⏵⏵ bypass permissions on · 1 shell · ↓ to man…\n")));
     }
 
     #[test]

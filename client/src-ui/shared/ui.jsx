@@ -7,6 +7,7 @@ import { useTranslation } from 'react-i18next';
 
 import { copyText } from './chatCopy.js';
 import { errorText, setLocale } from './i18n.js';
+import { useLayer } from './layers.js';
 import { formatTime, relativeTime } from './time.js';
 
 // 品牌标志：两只眼睛（看看 / Looklook 的 oo），瞳孔拼成终端提示符 >_，右上角的点是“在线”指示灯。
@@ -262,6 +263,8 @@ export function Modal({ open, onClose, title, wide, className = '', children }) 
   const ref = useRef(null);
   const close = useRef(onClose);
   close.current = onClose;
+  // 返回键 / 浏览器后退关掉弹窗（docs/REMOTE_UX_2026-11-07.md §7）
+  useLayer(open, onClose);
   useEffect(() => {
     if (!open) return undefined;
     const me = {};

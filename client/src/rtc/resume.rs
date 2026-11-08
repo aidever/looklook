@@ -14,7 +14,7 @@
 //! 不带 `resume` 的 WebSocket（本机 App 连别的电脑、旧版启动页）走同一套代码，只是通道断了会话就结束。
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -26,8 +26,14 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 use tokio_util::sync::CancellationToken;
 
-/// 通道断开后保留会话的时间（浏览器那边放弃得更早一些）。
+/// 通道断开后保留会话的时间。
 pub const PARK: Duration = Duration::from_secs(60);
+/// 页面切到后台前说过（ctl 上的 `bg`）时保留的时间：手机切后台连接很快就断，回来时终端从断点接上（客户端 docs/REMOTE_UX_2026-11-07.md §5.3）。
+pub const AWAY_PARK: Duration = Duration::from_secs(600);
+/// `bg` 之后这么久没再听到这个子站会话（`fg`、hello）就当它不回来了。
+const AWAY_TTL: Duration = Duration::from_secs(15 * 60);
+/// 保留的会话超过这么多时不再按 [`AWAY_PARK`] 留（每个会话的输出缓冲有上限，再限制总数）。
+const AWAY_MAX: usize = 32;
 /// 已交给通道的输出保留这么多，供续接时重发（发送缓冲高水位 1 MiB，再留些余量）。
 const RETAIN: usize = 2 * 1024 * 1024;
 /// 还没交给通道的输出超过这么多就先不读 ttyd（背压到 ttyd 与 tmux）。
@@ -79,6 +85,8 @@ struct Entry {
 #[derive(Default)]
 pub struct Terms {
     m: Mutex<HashMap<String, Entry>>,
+    /// 页面在后台的子站会话 → 到什么时候不再当它在后台（[`AWAY_TTL`]）。
+    away: Mutex<HashMap<String, Instant>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -101,6 +109,28 @@ impl Terms {
 
     pub fn count(&self) -> usize {
         lock(&self.m).len()
+    }
+
+    /// 页面切到后台（`true`）或回到前台。
+    pub fn set_away(&self, sid: &str, away: bool) {
+        let mut m = lock(&self.away);
+        if away {
+            let now = Instant::now();
+            m.retain(|_, t| *t > now);
+            m.insert(sid.to_string(), now + AWAY_TTL);
+        } else {
+            m.remove(sid);
+        }
+    }
+
+    /// 这个子站会话的终端断开后保留多久。
+    fn park_for(&self, sid: &str) -> Duration {
+        let away = lock(&self.away).get(sid).is_some_and(|t| *t > Instant::now());
+        if away && self.count() <= AWAY_MAX {
+            AWAY_PARK
+        } else {
+            PARK
+        }
     }
 
     /// 续接：令牌对得上、属于同一个子站会话时，返回接入的一端与会话已收到的输入条数。
@@ -134,8 +164,9 @@ where
     });
     let terms = terms.clone();
     let k = key.clone();
+    let sid = sid.to_string();
     tokio::spawn(async move {
-        let park = if resumable { PARK } else { Duration::ZERO };
+        let park = resumable.then(|| (terms.clone(), sid));
         run(ws, Some((out, inp)), attach_rx, cancel, park, expires).await;
         drop(guard);
         if let Some(k) = k {
@@ -212,7 +243,8 @@ async fn reserve(out: Option<mpsc::Sender<Out>>) -> Option<mpsc::OwnedPermit<Out
     }
 }
 
-async fn run<S>(mut ws: WebSocketStream<S>, mut cur: Option<Cur>, mut attach_rx: mpsc::Receiver<Attach>, cancel: CancellationToken, park: Duration, expires: Instant)
+/// `park`：可续接时为会话表与子站会话（断开后保留多久按 [`Terms::park_for`]），不可续接时为 None。
+async fn run<S>(mut ws: WebSocketStream<S>, mut cur: Option<Cur>, mut attach_rx: mpsc::Receiver<Attach>, cancel: CancellationToken, park: Option<(Arc<Terms>, String)>, expires: Instant)
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -232,7 +264,7 @@ where
             _ = &mut lifetime => break "session_expired",
             _ = &mut parked, if cur.is_none() => break "park_timeout",
             // 不可续接的会话没有登记，发送端一开始就没了
-            a = attach_rx.recv(), if !park.is_zero() => {
+            a = attach_rx.recv(), if park.is_some() => {
                 let Some(a) = a else { break "closed" };
                 if !ob.rewind(a.rx) {
                     let _ = a.reply.send(None);
@@ -255,10 +287,8 @@ where
                 }
                 None => {
                     cur = None;
-                    if park.is_zero() {
-                        break "detached";
-                    }
-                    parked.as_mut().reset(Instant::now() + park);
+                    let Some((terms, sid)) = &park else { break "detached" };
+                    parked.as_mut().reset(Instant::now() + terms.park_for(sid));
                 }
             },
             p = reserve(out), if pending && cur.is_some() => match p {
@@ -314,5 +344,16 @@ mod tests {
         assert_eq!((ob.sent, ob.held, ob.backlog), (3, 512 * 1024, 5 * 512 * 1024));
         assert!(ob.rewind(8));
         assert_eq!(ob.peek(), None);
+    }
+
+    #[tokio::test]
+    async fn away_sessions_park_longer() {
+        let t = Terms::default();
+        assert_eq!(t.park_for("s"), PARK);
+        t.set_away("s", true);
+        assert_eq!(t.park_for("s"), AWAY_PARK);
+        assert_eq!(t.park_for("other"), PARK);
+        t.set_away("s", false);
+        assert_eq!(t.park_for("s"), PARK);
     }
 }

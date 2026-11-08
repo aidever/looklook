@@ -34,8 +34,10 @@ use tokio_util::sync::CancellationToken;
 use crate::account::Account;
 use crate::gateway::{remote::Remote, App};
 
-/// 每台设备最多同时保持的连接数（超过时关掉最早的一条）。
+/// 每台设备最多同时保持的连接数（超过时关掉一条，见 [`Rtc::victim`]）。
 const MAX_PEERS: usize = 16;
+/// 建立中超过这么久还没连通的连接，超过上限时先关它们（多半是浏览器切回前台时并行建了又放弃的）。
+const HALF_OPEN_GRACE: Duration = Duration::from_secs(3);
 /// 等候选收集完的上限（中转上的 TURN 分配要一两个往返）。
 const GATHER_LIMIT: Duration = Duration::from_secs(3);
 /// 建立连接的期限。
@@ -47,6 +49,16 @@ const MAX_JTIS: usize = 4096;
 struct Entry {
     sid: String,
     cancel: CancellationToken,
+    /// 浏览器 offer 里的 ice-ufrag：浏览器经别的连接让这边释放这一条时用（[`Rtc::drop_peer`]）。
+    ufrag: String,
+    /// 连通过。
+    connected: bool,
+    at: std::time::Instant,
+}
+
+/// offer 里的 `a=ice-ufrag:`。
+fn ice_ufrag(sdp: &str) -> &str {
+    sdp.lines().find_map(|l| l.trim().strip_prefix("a=ice-ufrag:")).unwrap_or("").trim()
 }
 
 #[derive(Default)]
@@ -111,18 +123,43 @@ impl Rtc {
         true
     }
 
-    fn add(&self, sid: &str) -> (u64, CancellationToken) {
+    fn add(&self, sid: &str, ufrag: &str) -> (u64, CancellationToken) {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let cancel = CancellationToken::new();
         let mut m = lock(&self.peers);
         while m.len() >= MAX_PEERS {
-            let Some(&oldest) = m.keys().min() else { break };
-            if let Some(e) = m.remove(&oldest) {
+            let Some(v) = Self::victim(&m) else { break };
+            if let Some(e) = m.remove(&v) {
                 e.cancel.cancel();
             }
         }
-        m.insert(id, Entry { sid: sid.to_string(), cancel: cancel.clone() });
+        m.insert(id, Entry { sid: sid.to_string(), cancel: cancel.clone(), ufrag: ufrag.to_string(), connected: false, at: std::time::Instant::now() });
         (id, cancel)
+    }
+
+    /// 超过上限时关哪一条：建立中超过 [`HALF_OPEN_GRACE`] 还没连通的里最早的；没有就最早的一条。
+    /// 不这样的话，浏览器每次切回前台并行建连，挤掉的往往正是用户正在用、还活着的那条（客户端 docs/REMOTE_UX_2026-11-07.md §5.2）。
+    fn victim(m: &HashMap<u64, Entry>) -> Option<u64> {
+        let now = std::time::Instant::now();
+        m.iter().filter(|(_, e)| !e.connected && now.duration_since(e.at) >= HALF_OPEN_GRACE).map(|(id, _)| *id).min().or_else(|| m.keys().min().copied())
+    }
+
+    fn set_connected(&self, id: u64) {
+        if let Some(e) = lock(&self.peers).get_mut(&id) {
+            e.connected = true;
+        }
+    }
+
+    /// 浏览器放弃了这条连接（并行建连时输了，或者被新连接换掉）：同一子站会话、本端 ice-ufrag 对得上的马上关掉，
+    /// 不用等 30 秒的建连期限或断开宽限。返回是否找到。
+    pub fn drop_peer(&self, sid: &str, ufrag: &str) -> bool {
+        if ufrag.is_empty() {
+            return false;
+        }
+        let m = lock(&self.peers);
+        let hit: Vec<&Entry> = m.values().filter(|e| e.sid == sid && e.ufrag == ufrag).collect();
+        hit.iter().for_each(|e| e.cancel.cancel());
+        !hit.is_empty()
     }
 
     fn remove(&self, id: u64) {
@@ -191,7 +228,7 @@ pub(crate) async fn accept(app: &App, sid: Option<&str>, req: &OfferRequest) -> 
         (StatusCode::INTERNAL_SERVER_ERROR, "answer")
     })?;
     let (key, sig) = app.account.sign_device(&proto::answer_canonical(&req.grant, &answer)).ok_or((StatusCode::UNAUTHORIZED, "not_logged_in"))?;
-    let (id, cancel) = app.rtc.add(&g.sid);
+    let (id, cancel) = app.rtc.add(&g.sid, ice_ufrag(&req.offer));
     let ttl = Duration::from_millis((g.abs_exp - app.account.clock.now_ms()).max(0) as u64);
     let ctx = bridge::Ctx {
         router: crate::gateway::router(app.clone()),
@@ -200,6 +237,7 @@ pub(crate) async fn accept(app: &App, sid: Option<&str>, req: &OfferRequest) -> 
         sid: g.sid.clone(),
         device: g.dev.clone(),
         terms: app.rtc.terms.clone(),
+        rtc: Arc::downgrade(&app.rtc),
         expires: tokio::time::Instant::now() + ttl,
     };
     tracing::info!(sid = %g.sid, peers = app.rtc.count(), parked_terms = app.rtc.terms.count(), "WebRTC 连接建立中");
@@ -236,6 +274,7 @@ async fn run_peer(app: App, id: u64, mut pc: peer::Pc, ctx: bridge::Ctx, cancel:
                             tracing::info!(sid = %ctx.sid, kind = ?path.as_ref().map(|p| p.kind), local = path.as_ref().map(|p| p.local.as_str()), remote = path.as_ref().map(|p| p.remote.as_str()), "WebRTC 已连接");
                         }
                         connected = true;
+                        app.rtc.set_connected(id);
                         deadline.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(86_400 * 365));
                     }
                     peer::PcState::Disconnected => deadline.as_mut().reset(tokio::time::Instant::now() + DISCONNECT_GRACE),
@@ -284,15 +323,38 @@ mod tests {
     #[test]
     fn peers_are_capped_and_revoked_by_session() {
         let r = Rtc::default();
-        let first = r.add("s0").1;
+        let first = r.add("s0", "u0").1;
         for i in 1..MAX_PEERS {
-            r.add(&format!("s{i}"));
+            r.add(&format!("s{i}"), "");
         }
         assert!(!first.is_cancelled());
-        let (_, newest) = r.add("s1");
+        let (_, newest) = r.add("s1", "");
         assert!(first.is_cancelled(), "oldest closed when over the cap");
         assert_eq!(r.count(), MAX_PEERS);
         r.revoke(&["s1".into()]);
         assert!(newest.is_cancelled());
+    }
+
+    #[test]
+    fn cap_prefers_stale_half_open_and_drop_by_ufrag() {
+        let r = Rtc::default();
+        let (live_id, live) = r.add("s", "live");
+        r.set_connected(live_id);
+        let (_, half) = r.add("s", "half");
+        // 让“half”看上去已经建立了好一会儿
+        lock(&r.peers).values_mut().filter(|e| e.ufrag == "half").for_each(|e| e.at -= HALF_OPEN_GRACE);
+        for i in 2..MAX_PEERS {
+            let (id, _) = r.add(&format!("o{i}"), "");
+            r.set_connected(id);
+        }
+        r.add("x", "");
+        assert!(half.is_cancelled(), "stale half-open peer goes first");
+        assert!(!live.is_cancelled(), "the oldest live peer stays");
+
+        assert!(!r.drop_peer("other", "live"), "other sessions can't drop it");
+        assert!(!live.is_cancelled());
+        assert!(r.drop_peer("s", "live"));
+        assert!(live.is_cancelled());
+        assert_eq!(ice_ufrag("v=0\r\na=ice-ufrag:AbC1\r\na=x\r\n"), "AbC1");
     }
 }

@@ -7,6 +7,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState } f
 import { useTranslation } from 'react-i18next';
 
 import { configureDevices, deviceApi, fetchDevices, localApi, rtcMode } from './api.js';
+import { rememberDevices, snapDevices } from './snapshot.js';
 import { DeviceAvatar } from './brands.jsx';
 import { linkLabel, PathDot, PathLine, useLinks } from './paths.jsx';
 import { useTip } from './tips.jsx';
@@ -82,12 +83,20 @@ function writePin(id) {
  * `onSelect`：切换电脑后调用（刷新客户端状态）。
  */
 export function useDeviceState(remote, onSelect) {
-  const [list, setList] = useState(null); // null = 还没加载
+  // null = 还没加载；远程打开时先用上次的快照（snapshot.js），不等连上电脑就能显示
+  const [list, setList] = useState(() => (rtcMode ? snapDevices() : null));
   const [want, setWant] = useState(stored);
   const [pin, setPin] = useState(() => (rtcMode ? readPin() : null));
   // 一次没拿到（网络抖动、中转重启）时保留上一次的列表：清空会让页面在“单台/多台”之间来回切换，
   // 整个页面重新挂载，打开着的终端小窗也就没了。只有第一次拿不到时才当作没有设备。
-  const load = useCallback(() => fetchDevices().then((d) => setList((prev) => d ?? prev ?? { items: [], default: null, max: null })), []);
+  const load = useCallback(
+    () =>
+      fetchDevices().then((d) => {
+        if (d) rememberDevices(d);
+        setList((prev) => d ?? prev ?? { items: [], default: null, max: null });
+      }),
+    [],
+  );
   useEffect(() => {
     if (!remote) return undefined;
     load();

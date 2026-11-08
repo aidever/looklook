@@ -1,10 +1,10 @@
-// 账户与安全：显示名称、邮箱、专属地址、修改密码、网页登录（浏览器）。数据来自看看平台（shared/platform.js）；
+// 账户与安全：显示名称、邮箱、专属地址、修改密码、两步验证（去网站上开）、网页登录（浏览器）。数据来自看看平台（shared/platform.js）；
 // 连不上平台时显示这台电脑上缓存的账户信息。
-import { KeyRound, LogOut, MonitorSmartphone, PenLine } from 'lucide-react';
+import { ExternalLink, KeyRound, LogOut, MonitorSmartphone, PenLine } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { Initial, useLogout, useStatus } from '../App.jsx';
+import { Initial, useLogout, useStatus, webUrl } from '../App.jsx';
 import { api } from '../shared/api.js';
 import { platform } from '../shared/platform.js';
 import { Button, Card, CopyButton, ErrorNote, Field, Modal, PasswordInput, Row, Skeleton, Time, useAction, useLoad, useToast } from '../shared/ui.jsx';
@@ -211,6 +211,13 @@ export default function Account() {
           <Button variant="ghost" icon={KeyRound} disabled={!fresh} onClick={() => setModal('password')}>
             {t('acct.change')}
           </Button>
+        </Row>
+        {/* 扫码绑定、恢复码只在网站上做；?web=1 让网站不要因为有电脑在线又跳回管理台 */}
+        <Row label={t('acct.two_factor')} hint={!fresh ? t('acct.two_factor_body') : fresh.two_factor ? t('acct.two_factor_on') : t('acct.two_factor_off')}>
+          <a className="btn btn-ghost" href={webUrl(status, '/security?web=1')} target="_blank" rel="noopener noreferrer">
+            <ExternalLink size={18} aria-hidden="true" />
+            {fresh?.two_factor ? t('acct.two_factor_manage') : t('acct.two_factor_enable')}
+          </a>
         </Row>
       </Card>
       <Sessions />

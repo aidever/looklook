@@ -154,8 +154,17 @@ import { imeComposing } from '../shared/ime.js';
 import { shownFocus } from '../shared/termFrame.js';
 import { splitTitle } from '../shared/title.js';
 import { clockAt } from '../shared/board.js';
+import { touchUi, useLayer } from '../shared/layers.js';
+import { connManaged, isOnline, useConn } from '../shared/conn.js';
+import { takeChatInsert } from '../shared/chatInsert.js';
 
 // ---------------- 数据 ----------------
+
+/** 离开了多久（“离开 12 分钟”）。 */
+function awayLabel(t, ms) {
+  const m = Math.round(ms / 60000);
+  return m < 60 ? t('chat.away_min', { count: m }) : t('chat.away_hour', { count: Math.round(m / 60) });
+}
 
 /** 服务端状态里的 `agent` → 文案里的 {{agent}}；老版本服务端不带 agent，就是 Claude Code */
 const AGENT_NAMES = { claude: 'Claude Code', codex: 'Codex', dsh: 'DSH' };
@@ -1327,6 +1336,8 @@ const FILE_TOOLS = new Set(['Read', 'Edit', 'MultiEdit', 'Write', 'NotebookEdit'
  * 能复制路径；`list`（同一组文件：改动列表，或者对话里读过、改过的文件）里有它时，标题栏和 ← → 前后翻。
  */
 function FileViewer({ target, onTarget, onClose }) {
+  // 返回键关掉文件查看器（docs/REMOTE_UX_2026-11-07.md §7.2）
+  useLayer(true, onClose);
   const { t } = useT();
   const { files } = useContext(PreviewCtx);
   const { path, ep, focus } = target;
@@ -2376,6 +2387,7 @@ let attachSeq = 0;
 
 /** 弹出层：贴着输入框上沿往上展开，点外面或按 Esc 关掉 */
 function Popover({ onClose, className = '', children, label }) {
+  useLayer(true, onClose, { history: touchUi });
   const ref = useRef(null);
   useEffect(() => {
     const away = (e) => !ref.current?.contains(e.target) && !e.target.closest?.('[data-pop-anchor]') && onClose();
@@ -2862,6 +2874,9 @@ function claimFocus(el) {
 }
 
 function Composer({ id, active, status, phase, touch, offline, models, usage, items, onAction, onSide }) {
+  // 远程连接断着、恢复中：草稿照写，发送等连上（不排队自动发，docs/REMOTE_UX_2026-11-07.md 决定 2）
+  const conn = useConn();
+  const waiting = connManaged && !isOnline(conn);
   const { t } = useT();
   // 权限模式只有 Claude Code 有；模型、思考强度、上下文用量按工具的能力（caps）显示
   const { id: agentId, caps } = useContext(AgentCtx);
@@ -2936,7 +2951,7 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
   // “文件”标签里点了“填进输入框”：接在已经写的后面（中间空一格），光标放到最后
   useEffect(() => {
     const ins = (e) => {
-      const add = e.detail ?? '';
+      const add = e?.detail ?? '';
       if (!add) return;
       setText((cur) => (cur && !/\s$/.test(cur) ? `${cur} ${add}` : `${cur}${add}`));
       requestAnimationFrame(() => {
@@ -2946,8 +2961,15 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
         el.setSelectionRange(el.value.length, el.value.length);
       });
     };
+    // “文件”页的“发给对话”：打开会话前记下的（shared/chatInsert.js）
+    const take = () => ins({ detail: takeChatInsert(id) });
+    take();
     window.addEventListener(`ll-chat-insert:${id}`, ins);
-    return () => window.removeEventListener(`ll-chat-insert:${id}`, ins);
+    window.addEventListener(`ll-chat-pending:${id}`, take);
+    return () => {
+      window.removeEventListener(`ll-chat-insert:${id}`, ins);
+      window.removeEventListener(`ll-chat-pending:${id}`, take);
+    };
   }, [id]);
   // 外面（空白对话里的常用开头）要把一句话填进输入框
   useEffect(() => {
@@ -3005,7 +3027,7 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
     const images = files.filter((f) => f.path && f.image).map((f) => f.path);
     const docs = files.filter((f) => f.path && !f.image).map((f) => f.path);
     const extra = docs.length > 0 || quotes.length > 0;
-    if ((!typed && !images.length && !extra && !now) || sending || uploading || disabled) return;
+    if ((!typed && !images.length && !extra && !now) || sending || uploading || disabled || waiting) return;
     // 界面自己能做的命令（/model、/resume、/context……）不送进去
     const action = !images.length && !extra && slashAction(typed, agentId);
     if (action) {
@@ -3651,7 +3673,8 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
                   {t('chat.way_now')}
                 </button>
               )}
-              <button type="button" className="btn btn-primary btn-icon chat-send" onClick={() => send()} disabled={disabled || sending || uploading || !canSend} aria-label={running ? t('chat.way_queue') : t('chat.send')} title={running ? t('chat.send_queue') : t('chat.send')}>
+              {waiting && <span className="chat-wait muted small">{t('rlink.send_wait')}</span>}
+              <button type="button" className="btn btn-primary btn-icon chat-send" onClick={() => send()} disabled={disabled || sending || uploading || !canSend || waiting} aria-label={waiting ? t('rlink.send_wait') : running ? t('chat.way_queue') : t('chat.send')} title={waiting ? t('rlink.send_wait') : running ? t('chat.send_queue') : t('chat.send')}>
                 {sending ? <LoaderCircle size={18} className="spin" /> : <ArrowUp size={18} />}
               </button>
             </>
@@ -4936,6 +4959,35 @@ const readSide = () => {
  * offline：终端所在的电脑连不上（对话照样显示，连不上时不能发送）；onTab(tab)：切到终端的别的标签（例如右侧“改动”里的“在 Git 里查看”）。
  * 对话页里不出现终端：Claude Code 的选择框显示成弹窗，界面做不了的就不做，用户自己切到“终端”标签去。
  */
+/**
+ * 切到后台（或连接断开）一会儿再回来时，离开期间新增了几条（docs/REMOTE_UX_2026-11-07.md §5.5）：
+ * 切走时记下条数，离开超过 1 分钟回来后有新的就给一个“离开 12 分钟 · 新增 N 条”的小条，点它跳到最新。
+ * 点了、发了新消息、再次切走时收起。
+ */
+const AWAY_MIN = 60_000;
+function useAwayNews(count) {
+  const mark = useRef(null);
+  const countRef = useRef(count);
+  countRef.current = count;
+  const [away, setAway] = useState(null); // { from, ms }
+  useEffect(() => {
+    const on = () => {
+      if (document.visibilityState !== 'visible') {
+        mark.current = { n: countRef.current, at: Date.now() };
+        setAway(null);
+        return;
+      }
+      const m = mark.current;
+      mark.current = null;
+      if (m && Date.now() - m.at >= AWAY_MIN) setAway({ from: m.n, ms: Date.now() - m.at });
+    };
+    document.addEventListener('visibilitychange', on);
+    return () => document.removeEventListener('visibilitychange', on);
+  }, []);
+  const news = away ? Math.max(0, count - away.from) : 0;
+  return [news > 0 ? { news, ms: away.ms } : null, () => setAway(null)];
+}
+
 export default function ChatView({ id, launch, active, touch, offline = false, onTab, onDraftBack }) {
   const router = useRouter();
   const chat = useChat(id, active);
@@ -5060,6 +5112,7 @@ export default function ChatView({ id, launch, active, touch, offline = false, o
     prev.current = phase;
   }, [phase]);
   const { following, toBottom } = useFollow(list, inner, [items, status?.pending?.id, active, side]);
+  const [awayNews, dismissAway] = useAwayNews(items.filter((x) => x.k !== 'user').length);
   // 查找栏：已经开着时再按 Ctrl/⌘ F 是回到查找框
   const [finding, setFinding] = useState(false);
   const onFind = useCallback(() => {
@@ -5168,6 +5221,18 @@ export default function ChatView({ id, launch, active, touch, offline = false, o
               )}
             </div>
           </div>
+          {awayNews && (
+            <button
+              type="button"
+              className="chat-away"
+              onClick={() => {
+                dismissAway();
+                toBottom();
+              }}
+            >
+              {t('chat.away_news', { time: awayLabel(t, awayNews.ms), count: awayNews.news })}
+            </button>
+          )}
           {!following && (
             <button type="button" className="chat-to-bottom" onClick={toBottom} aria-label={t('chat.to_bottom')}>
               <ArrowDown size={16} />

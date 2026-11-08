@@ -36,8 +36,8 @@
   function fromParent(e) { return e.source === window.parent && e.origin === PARENT && e.data && typeof e.data === 'object'; }
   // 与管理台共用语言设置（同源 localStorage）；英文未翻译时回退中文。
   var TEXT = {
-    'zh-CN': { copy: '复制', copy_hint: '复制选中的文字', copy_failed: '浏览器不允许复制', copied: '已复制', copy_offer: '复制选中的文字', link_open: '打开', link_copy: '复制链接', link_hint: '⌘ / Ctrl + 点击直接打开', pull: '下拉刷新', release: '松开刷新', connecting: '正在连接终端…', lost: '正在重新连接…', lost_slow: '暂时连不上电脑，正在重试…', ended: '终端连接已断开', back: '已重新连接', reload: '立即重试', reopen: '重新连接' },
-    'en-US': { copy: 'Copy', copy_hint: 'Copy the selected text', copy_failed: 'The browser blocked copying', copied: 'Copied', copy_offer: 'Copy the selected text', link_open: 'Open', link_copy: 'Copy link', link_hint: '⌘ / Ctrl + click opens directly', pull: 'Pull to refresh', release: 'Release to refresh', connecting: 'Connecting to the terminal…', lost: 'Reconnecting…', lost_slow: 'Cannot reach your computer, still retrying…', ended: 'The terminal disconnected', back: 'Reconnected', reload: 'Retry now', reopen: 'Reconnect' }
+    'zh-CN': { copy: '复制', copy_hint: '复制选中的文字', copy_failed: '浏览器不允许复制', copied: '已复制', copy_offer: '复制选中的文字', link_open: '打开', link_copy: '复制链接', link_hint: '⌘ / Ctrl + 点击直接打开', pull: '下拉刷新', release: '松开刷新', connecting: '正在连接终端…', lost: '正在重新连接…', lost_slow: '暂时连不上电脑，正在重试…', ended: '终端连接已断开', back: '已重新连接', reload: '立即重试', reopen: '重新连接', readonly: '只读 · 正在恢复连接' },
+    'en-US': { copy: 'Copy', copy_hint: 'Copy the selected text', copy_failed: 'The browser blocked copying', copied: 'Copied', copy_offer: 'Copy the selected text', link_open: 'Open', link_copy: 'Copy link', link_hint: '⌘ / Ctrl + click opens directly', pull: 'Pull to refresh', release: 'Release to refresh', connecting: 'Connecting to the terminal…', lost: 'Reconnecting…', lost_slow: 'Cannot reach your computer, still retrying…', ended: 'The terminal disconnected', back: 'Reconnected', reload: 'Retry now', reopen: 'Reconnect', readonly: 'Read-only · restoring the connection' }
   };
   function tr(key) {
     var lang = 'zh-CN';
@@ -65,6 +65,7 @@
     '.ll-pill .ll-dots{margin-right:2px;gap:4px}.ll-pill .ll-dots i{width:6px;height:6px;background:#f5b14c}' +
     '.ll-pill button{flex:none;border:0;border-radius:999px;padding:4px 12px;background:rgba(255,255,255,.12);color:#fff;font:inherit;cursor:pointer}' +
     '.ll-pill button:active{background:rgba(255,255,255,.22)}' +
+    '.ll-strip{position:fixed;top:0;left:0;right:0;z-index:99;padding:2px 10px;text-align:center;background:rgba(245,177,76,.9);color:#1a1300;font:12px/1.5 system-ui,sans-serif;pointer-events:none}' +
     // 断开后不显示 ttyd 的“Press ⏎ to Reconnect / Reconnecting...”，由上面的提示代替（它的提示框是 .xterm 下圆角 15px 的 div）
     'html.ll-down .xterm>div[style*="border-radius: 15px"]{display:none!important}' +
     '@media(prefers-reduced-motion:reduce){.ll-dots i{animation:none}}';
@@ -91,6 +92,8 @@
   function renderBanner() {
     // 电脑离线：管理台那边已经说明了，这里不再叠一个“正在重新连接”
     if (parentOffline && !ended) return hideBanner();
+    // 远程连接本身断了：管理台顶上统一显示（docs/REMOTE_UX_2026-11-07.md §4.3），这里只留只读细条
+    if (rtcDown() && !ended) return hideBanner();
     if (!banner) banner = mount(document.createElement('div'));
     banner.className = 'll-pill';
     banner.setAttribute('role', 'status');
@@ -147,6 +150,36 @@
   function readOnly() {
     if (TERM && TERM.options) TERM.options.disableStdin = parentOffline && !connOk;
   }
+  // ---------- 远程连接状态（启动页 __llrtc.subscribe，新版才有） ----------
+  // 远程连接确认中 / 恢复中 / 重连中时：终端内容照常能看，顶上一条细的“只读”；按键由启动页决定留着重发还是丢掉
+  // （不确定超过 2 秒就丢，管理台提示“有 N 个按键没发出”）。连接本身的提示由管理台统一显示，这里不再弹自己的。
+  var rtcPhase = 'online', strip = null;
+  function rtcDown() { return rtcPhase !== 'online' && rtcPhase !== 'checking'; }
+  function renderStrip() {
+    var show = rtcPhase === 'resuming' || rtcPhase === 'reconnecting';
+    if (!show) { if (strip) { strip.remove(); strip = null; } return; }
+    if (!strip) {
+      strip = mount(document.createElement('div'));
+      strip.className = 'll-strip';
+      strip.setAttribute('role', 'status');
+    }
+    strip.textContent = tr('readonly');
+  }
+  (function watchRtc() {
+    var b;
+    try { b = window.top !== window && window.top.__llrtc; } catch (e) { b = null; }
+    if (!b || typeof b.subscribe !== 'function') return;
+    var off = b.subscribe(function (st) {
+      var was = rtcDown();
+      rtcPhase = st && st.phase || 'online';
+      renderStrip();
+      // 远程连回来了：终端自己断着的话，现在该显示自己的提示（或者马上重连）
+      if (was && !rtcDown() && lostAt) { kick(); renderBanner(); }
+      else if (!was && rtcDown()) hideBanner();
+    });
+    window.addEventListener('pagehide', function () { try { off(); } catch (e) { /* 忽略 */ } });
+  })();
+
   /**
    * 管理台换了配色（looklook:theme，配色名）：ttyd 启动时 `-t theme=` 定下的配色只管新开的终端，
    * 已经开着的在这里换（配色表由客户端在脚本前面带上，见 gateway/assets.rs）。终端还没准备好时先记下。
@@ -1139,6 +1172,44 @@
     // 告诉管理台终端准备好了：当前显示的终端由它再聚焦一次
     toParent({ type: 'looklook:ready' });
   }
+
+  // ---------- 管理台的快捷键、桌面 App 的前进后退（docs/REMOTE_UX_2026-11-07.md §8） ----------
+  // 焦点在终端里时按键到不了管理台：Mac 上 ⌘ 组合终端用不到，转给管理台；Windows / Linux 上 Ctrl+K、Ctrl+R、Ctrl+F 这些
+  // 是命令行里的键，留给终端，管理台的快捷键改按 Ctrl+Shift+ 同一个键（本来就是 Ctrl+Shift 的照原样）。
+  (function forwardHotkeys() {
+    if (window.parent === window) return;
+    var APP = false;
+    try { APP = Boolean(window.top.__LOOKLOOK_DESKTOP__); } catch (e) { /* 跨源 */ }
+    function stop(e) { e.preventDefault(); e.stopImmediatePropagation(); }
+    function post(e, o) {
+      stop(e);
+      toParent({ type: 'looklook:hotkey', key: o.key, code: e.code || '', meta: o.meta, ctrl: o.ctrl, shift: o.shift, alt: false });
+    }
+    var SHIFTED = /^(KeyO|KeyS|KeyF|Digit[1-4])$/;
+    document.addEventListener('keydown', function (e) {
+      if (e.isComposing) return;
+      var k = (e.key || '').toLowerCase(), code = e.code || '';
+      if (MAC) {
+        if (!e.metaKey || e.ctrlKey || e.altKey) return;
+        if (APP && !e.shiftKey && (k === '[' || k === ']')) { stop(e); toParent({ type: 'looklook:nav', dir: k === '[' ? -1 : 1 }); return; }
+        if ((!e.shiftKey && (k === 'k' || k === ',' || k === '/' || (APP && (k === 'r' || k === 'w')))) || (e.shiftKey && SHIFTED.test(code))) {
+          post(e, { key: e.key, meta: true, ctrl: false, shift: e.shiftKey });
+        }
+        return;
+      }
+      if (!e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return;
+      if (code === 'KeyK' || code === 'Slash' || code === 'Comma') post(e, { key: code === 'KeyK' ? 'k' : code === 'Slash' ? '/' : ',', meta: false, ctrl: true, shift: false });
+      else if (SHIFTED.test(code)) post(e, { key: e.key, meta: false, ctrl: true, shift: true });
+    }, true);
+    // 鼠标侧键：桌面 App 的后退 / 前进（浏览器里浏览器自己处理）
+    if (APP) {
+      document.addEventListener('mouseup', function (e) {
+        if (e.button !== 3 && e.button !== 4) return;
+        e.preventDefault();
+        toParent({ type: 'looklook:nav', dir: e.button === 3 ? -1 : 1 });
+      }, true);
+    }
+  })();
 
   (function wait() {
     if (window.term && window.term.options) return setup(window.term);

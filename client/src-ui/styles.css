@@ -3664,3 +3664,62 @@ button.link-badge:hover { filter: brightness(1.15); }
 .fb-git-R { background: #2563eb; }
 .fb-git-x { background: var(--danger); }
 .fb-git-dot { display: inline-block; width: 6px; height: 6px; margin-left: 7px; border-radius: 50%; background: #d97706; vertical-align: 2px; }
+
+/* 远程连接状态（shared/ConnStatus.jsx）：顶上居中的小胶囊，不挡内容 */
+.conn-pill { position: fixed; top: calc(8px + env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); z-index: 400; display: flex; align-items: center; gap: 8px; max-width: calc(100% - 24px); padding: 5px 6px 5px 12px; border-radius: 999px; background: rgba(24, 26, 36, .92); color: #e6e8ef; font-size: 13px; line-height: 1.5; box-shadow: 0 4px 18px rgba(0, 0, 0, .25); border: 1px solid rgba(255, 255, 255, .08); white-space: nowrap; animation: conn-in .18s ease-out; }
+.conn-pill.conn-toast { padding-right: 12px; }
+.conn-pill .conn-text { overflow: hidden; text-overflow: ellipsis; }
+.conn-pill button { flex: none; border: 0; border-radius: 999px; padding: 2px 10px; background: rgba(255, 255, 255, .14); color: #fff; font: inherit; cursor: pointer; }
+.conn-pill button:active { background: rgba(255, 255, 255, .24); }
+.conn-pill:not(:has(button)) { padding-right: 12px; }
+.conn-dots { display: inline-flex; gap: 4px; }
+.conn-dots i { width: 6px; height: 6px; border-radius: 50%; background: #f5b14c; animation: conn-b 1.2s infinite ease-in-out; }
+.conn-dots i:nth-child(2) { animation-delay: .15s; } .conn-dots i:nth-child(3) { animation-delay: .3s; }
+.conn-pill.slow .conn-dots i { background: #f87171; }
+@keyframes conn-b { 0%, 80%, 100% { transform: scale(.6); opacity: .5; } 40% { transform: scale(1); opacity: 1; } }
+@keyframes conn-in { from { opacity: 0; transform: translate(-50%, -6px); } }
+@media (prefers-reduced-motion: reduce) { .conn-dots i, .conn-pill { animation: none; } }
+/* 按快照显示的旧数据：列表上方一行小字 */
+.snap-note { font-size: 12px; color: var(--muted); padding: 2px 0 6px; }
+.chat-wait { align-self: center; white-space: nowrap; margin-right: 4px; }
+/* 离开期间新增了几条（ChatView useAwayNews） */
+.chat-away { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 3; max-width: calc(100% - 90px); padding: 6px 14px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); color: var(--text); box-shadow: var(--shadow); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+
+/* ---------- 文件管理改版（docs/REMOTE_UX_2026-11-07.md §9）：快速访问、含子文件夹的搜索、剪贴板条、手机多选 ---------- */
+.fb-quick { overflow: auto; }
+.fb-qa { display: flex; flex-direction: column; gap: 18px; padding: 12px 14px 28px; max-width: 920px; width: 100%; box-sizing: border-box; margin: 0 auto; }
+.fb-qa-search { display: flex; align-items: center; gap: 8px; padding: 0 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+.fb-qa-search:focus-within { border-color: var(--brand); }
+.fb-qa-search input { flex: 1; min-width: 0; border: 0; outline: none; background: none; color: var(--text); font: 15px/1.4 var(--font); padding: 10px 0; }
+.fb-qa-sec { display: flex; flex-direction: column; gap: 2px; }
+.fb-qa-sec h3 { display: flex; align-items: center; gap: 6px; margin: 0 0 6px; font-size: 13px; font-weight: 600; color: var(--muted); }
+.fb-qa-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 8px; }
+.fb-qa-place { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--text); font: inherit; font-size: 14px; cursor: pointer; text-align: left; min-width: 0; }
+.fb-qa-place:hover { background: var(--panel-2); }
+.fb-qa-more { align-self: flex-start; font-size: 13px; color: var(--brand); }
+.fb-hit { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 48px; padding: 6px 10px; border: 0; border-radius: 8px; background: none; color: var(--text); font: inherit; cursor: pointer; text-align: left; }
+.fb-hit:hover { background: var(--panel-2); }
+.fb-hit-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.fb-hit-name { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fb-hit-where { font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fb-hit-time { flex: none; font-variant-numeric: tabular-nums; }
+.fb-deep-list { padding: 4px; }
+.fb-deep { flex: none; font-size: 12.5px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); }
+.fb-deep.on { border-color: var(--brand); color: var(--brand); background: color-mix(in srgb, var(--brand) 10%, transparent); }
+.fb-fav-on { color: #eab308; fill: #eab308; }
+.fb-clipbar { flex: none; display: flex; align-items: center; gap: 8px; padding: 5px 8px 5px 12px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--brand) 8%, var(--panel)); }
+.fb-clipbar .btn-sm { display: inline-flex; align-items: center; gap: 6px; }
+.fb-offline { flex: none; padding: 4px 12px; color: var(--muted); background: var(--panel-2); border-bottom: 1px solid var(--line); }
+.fb-list .fb-row.fb-flash { animation: fb-flash 1.2s ease-out; }
+@keyframes fb-flash { 0%, 40% { background: color-mix(in srgb, var(--brand) 18%, transparent); } 100% { background: transparent; } }
+/* 手机：长按进多选，不弹系统菜单、不选中文字；操作条贴在底部 */
+@media (hover: none) and (pointer: coarse) {
+  .fb-row { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+  /* 多选时盖住底部标签栏（像相册的多选），不随列表滚走 */
+  .fb > .fb-pickbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 45; border-bottom: 0; border-top: 1px solid var(--line); background: var(--panel); padding: 6px 8px calc(6px + env(safe-area-inset-bottom)); overflow-x: auto; box-shadow: 0 -6px 20px rgba(0, 0, 0, .08); }
+  .fb > .fb-pickbar .fb-act { flex-direction: column; gap: 1px; min-width: 52px; font-size: 11px; }
+  .fb > .fb-pickbar .fb-act-label { display: inline; }
+}
+@media (prefers-reduced-motion: reduce) { .fb-list .fb-row.fb-flash { animation: none; } }
+.fb-clipbar .btn-sm { min-height: 30px; padding: 0 12px; }
+.fb-preview-head .btn-sm { display: inline-flex; align-items: center; gap: 5px; min-height: 28px; padding: 0 10px; flex: none; }

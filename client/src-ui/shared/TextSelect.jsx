@@ -10,6 +10,7 @@ import { api } from './api.js';
 import { locateLine } from './selectAt.js';
 import { frameOrigin } from './termFrame.js';
 import { useToast } from './ui.jsx';
+import { useLayer } from './layers.js';
 
 /** 没有 tmux 会话时读终端自己的缓冲区：同源直接调用，本机直连（跨源）时发消息要。 */
 function frameText(frame) {
@@ -76,6 +77,8 @@ export function useTextSelect(frame, enabled) {
 }
 
 export default function TextSelect({ id, frame, at, onClose }) {
+  // 返回键关掉（手机上长按终端打开的整屏选择）
+  useLayer(true, onClose);
   const { t } = useTranslation();
   const toast = useToast();
   const [text, setText] = useState(null);

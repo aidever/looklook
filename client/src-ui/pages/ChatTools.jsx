@@ -9,6 +9,7 @@ import { chatToMarkdown, copyText, exportName } from '../shared/chatCopy.js';
 import { isMod } from '../shared/hotkeys.js';
 import { CopyButton, Modal, useToast } from '../shared/ui.jsx';
 import { imeComposing } from '../shared/ime.js';
+import { useLayer } from '../shared/layers.js';
 
 /** 把一句话填进这个对话的输入框（输入框听 `ll-chat-fill:{id}`） */
 export const fillInput = (id, text) => window.dispatchEvent(new CustomEvent(`ll-chat-fill:${id}`, { detail: text }));
@@ -58,6 +59,7 @@ export function useLongPress(onLong) {
 
 /** 长按后从底部弹出：复制全文、选择文字、编辑、填回输入框（后两个只有用户消息有） */
 export function MessageSheet({ text, onFill, onEdit, onQuote = null, onClose }) {
+  useLayer(true, onClose);
   const { t } = useTranslation();
   const toast = useToast();
   const [select, setSelect] = useState(false);

@@ -6,6 +6,8 @@ import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 
+import { useLayer } from './layers.js';
+
 /**
  * items：[{ icon, label, onClick, danger, disabled, hint, checked }]，假值会被跳过，'sep' 是一条分隔线，{ head } 是一组的小标题。
  * className：按钮的样式（默认幽灵按钮）；icon：按钮图标；onPointerDown：例如手机终端里按住不抢键盘焦点。
@@ -80,6 +82,8 @@ export default function PopMenu({ items, className = 'btn btn-ghost btn-icon', i
     };
   }, [open]);
   const asSheet = sheet && open && window.matchMedia('(max-width: 640px)').matches;
+  // 手机底部弹出的菜单：返回键收起它（桌面上的下拉菜单点别处就关，不进历史）
+  useLayer(asSheet, () => setOpen(false));
   const sheetRef = useRef(false);
   sheetRef.current = asSheet;
   // 按钮在底部标签栏里：弹在标签栏上面，标签栏还能点

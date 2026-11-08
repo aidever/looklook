@@ -177,6 +177,9 @@ pub struct RemoteDevice {
     pub name: String,
     pub os: String,
     pub online: bool,
+    /// 最近一次在线（心跳）的时间，Unix 毫秒；旧版主服务不给（0）。启动页在电脑离线时显示“最后在线 x 分钟前”。
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub last_seen_ms: i64,
     /// 这台设备上的终端 id（终端路由表）：WebRTC 启动页按它把 `/i/{id}…` 转给终端所在的设备（docs/06 §6.1）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub terminals: Vec<String>,
@@ -348,4 +351,8 @@ pub struct WellKnown {
 pub struct PlatformKey {
     pub kid: String,
     pub public_key: String,
+}
+
+fn is_zero(v: &i64) -> bool {
+    *v == 0
 }

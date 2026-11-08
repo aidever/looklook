@@ -1,9 +1,11 @@
 // 文件预览里的文字和代码（CodeMirror 6，只读）：按文件名语法高亮、行号、折叠、Ctrl/⌘+F 搜索、选中同词高亮、自动换行开关。
 // 按需加载（FileBrowser 的 Preview 里 lazy），各语言的语法也是用到时才取（@codemirror/language-data）。
 // `focus`（{ from, to }，从 1 开始）：那几行标出来，打开时滚到上面三分之一处（对话里“读的那段、改的地方”）。
+// `editable`：可以改（文件预览的“编辑”），改动经 `onChange` 报给外面，⌘S / Ctrl+S 调 `onSave`；
+// `onSelect`：选中的几行（{ from, to, text }，没选中时 null），给“让 AI 改”；`atEnd`：打开时滚到最后（跟随日志）。
 import { Compartment, EditorState, RangeSetBuilder, Text } from '@codemirror/state';
 import { Decoration, drawSelection, EditorView, highlightSpecialChars, keymap, lineNumbers } from '@codemirror/view';
-import { defaultKeymap } from '@codemirror/commands';
+import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { bracketMatching, codeFolding, foldGutter, foldKeymap, HighlightStyle, LanguageDescription, syntaxHighlighting } from '@codemirror/language';
 import { languages } from '@codemirror/language-data';
 import { highlightSelectionMatches, search, searchKeymap } from '@codemirror/search';
@@ -39,14 +41,21 @@ function focusDeco(doc, from, to) {
 /** 这个文件名对应的语法（没有就纯文字） */
 export const languageFor = (name) => LanguageDescription.matchFilename(languages, name);
 
-export default function CodeView({ text, name, wrap, focus }) {
+export default function CodeView({ text, name, wrap, focus, editable = false, onChange, onSave, onSelect, atEnd = false }) {
   const { t: tr } = useTranslation();
   const host = useRef(null);
   const view = useRef(null);
   const parts = useRef(null);
   const from = focus?.from ?? 0;
   const to = focus?.to ?? from;
+  const cb = useRef({});
+  cb.current = { onChange, onSave, onSelect };
+  const textRef = useRef(text);
+  textRef.current = text;
+  // 跟随日志时新内容接在后面，不整个重建（几秒一次）
+  const base = atEnd ? null : text;
   useEffect(() => {
+    const text = textRef.current;
     const wrapC = new Compartment();
     const langC = new Compartment();
     parts.current = { wrapC, langC };
@@ -54,9 +63,21 @@ export default function CodeView({ text, name, wrap, focus }) {
     const state = EditorState.create({
       doc,
       extensions: [
-        EditorState.readOnly.of(true),
-        // 能放光标、能选、能 Ctrl+F，打不进字
-        EditorView.contentAttributes.of({ 'aria-label': name, 'aria-readonly': 'true' }),
+        EditorState.readOnly.of(!editable),
+        // 只读时能放光标、能选、能 Ctrl+F，打不进字
+        EditorView.contentAttributes.of({ 'aria-label': name, 'aria-readonly': editable ? 'false' : 'true' }),
+        ...(editable ? [history(), keymap.of([...historyKeymap, { key: 'Mod-s', preventDefault: true, run: () => (cb.current.onSave?.(), true) }])] : []),
+        EditorView.updateListener.of((u) => {
+          if (u.docChanged) cb.current.onChange?.(u.state.doc.toString());
+          if (u.selectionSet || u.docChanged) {
+            const r = u.state.selection.main;
+            if (r.empty) cb.current.onSelect?.(null);
+            else {
+              const doc = u.state.doc;
+              cb.current.onSelect?.({ from: doc.lineAt(r.from).number, to: doc.lineAt(r.to).number, text: doc.sliceString(r.from, r.to) });
+            }
+          }
+        }),
         lineNumbers(),
         foldGutter(),
         codeFolding(),
@@ -79,7 +100,8 @@ export default function CodeView({ text, name, wrap, focus }) {
     });
     const ed = new EditorView({ state, parent: host.current });
     view.current = ed;
-    if (from) {
+    if (atEnd) requestAnimationFrame(() => ed.dispatch({ effects: EditorView.scrollIntoView(ed.state.doc.length, { y: 'end' }) }));
+    else if (from) {
       const line = ed.state.doc.line(Math.min(from, ed.state.doc.lines));
       // 标出的几行放在上面三分之一，前面留几行看上下文
       requestAnimationFrame(() => ed.dispatch({ effects: EditorView.scrollIntoView(line.from, { y: 'start', yMargin: ed.scrollDOM.clientHeight / 4 }) }));
@@ -95,7 +117,18 @@ export default function CodeView({ text, name, wrap, focus }) {
       ed.destroy();
       view.current = null;
     };
-  }, [text, name, from, to]);
+  }, [base, name, from, to, editable, atEnd]);
+  useEffect(() => {
+    const ed = view.current;
+    if (!atEnd || !ed) return;
+    const next = text.replace(/\r\n?/g, '\n');
+    const cur = ed.state.doc.toString();
+    if (next === cur) return;
+    const s = ed.scrollDOM;
+    const bottom = s.scrollHeight - s.scrollTop - s.clientHeight < 40;
+    ed.dispatch({ changes: next.startsWith(cur) ? { from: cur.length, insert: next.slice(cur.length) } : { from: 0, to: cur.length, insert: next } });
+    if (bottom) requestAnimationFrame(() => ed.dispatch({ effects: EditorView.scrollIntoView(ed.state.doc.length, { y: 'end' }) }));
+  }, [text, atEnd]);
   useEffect(() => {
     const ed = view.current;
     if (ed && parts.current) ed.dispatch({ effects: parts.current.wrapC.reconfigure(wrap ? EditorView.lineWrapping : []) });

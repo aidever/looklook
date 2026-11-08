@@ -1147,6 +1147,7 @@ pub(crate) mod e2e {
                             name: format!("{id}-pc"),
                             os: "linux".into(),
                             online: true,
+                            last_seen_ms: 0,
                             terminals: vec![],
                             keys: vec![DeviceKey { id: format!("k-{id}"), public_key: b64(k.verifying_key().as_bytes()) }],
                         })
@@ -1158,7 +1159,7 @@ pub(crate) mod e2e {
                     let router = lock(&target).clone().expect("A 的路由");
                     let mut pc = Pc::answer(&[], &req.offer).unwrap();
                     let answer = pc.local_answer(Duration::from_secs(3)).await.unwrap();
-                    let ctx = bridge::Ctx { router, host: "alice.looklook.test".into(), origin: "http://alice.looklook.test".into(), sid: "s".into(), device: "deva".into(), terms: Default::default(), expires: tokio::time::Instant::now() + Duration::from_secs(3600) };
+                    let ctx = bridge::Ctx { router, host: "alice.looklook.test".into(), origin: "http://alice.looklook.test".into(), sid: "s".into(), device: "deva".into(), terms: Default::default(), rtc: std::sync::Weak::new(), expires: tokio::time::Instant::now() + Duration::from_secs(3600) };
                     tokio::spawn(async move {
                         while let Some(ch) = pc.incoming.recv().await {
                             tokio::spawn(bridge::serve(ctx.clone(), ch));

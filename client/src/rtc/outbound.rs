@@ -694,7 +694,7 @@ mod loopback {
         let mut b = Pc::answer(&[], &offer).unwrap();
         let answer = b.local_answer(Duration::from_secs(3)).await.unwrap();
         a.set_answer(&answer).unwrap();
-        let ctx = bridge::Ctx { router, host: "u.looklook.test".into(), origin: "http://u.looklook.test".into(), sid: "s".into(), device: "devb".into(), terms, expires: tokio::time::Instant::now() + Duration::from_secs(3600) };
+        let ctx = bridge::Ctx { router, host: "u.looklook.test".into(), origin: "http://u.looklook.test".into(), sid: "s".into(), device: "devb".into(), terms, rtc: std::sync::Weak::new(), expires: tokio::time::Instant::now() + Duration::from_secs(3600) };
         tokio::spawn(async move {
             while let Some(ch) = b.incoming.recv().await {
                 if ch.label == crate::rtc::probe::LABEL {

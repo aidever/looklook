@@ -914,6 +914,8 @@ pub async fn preview(path: &str) -> R<Response> {
             (header::CONTENT_SECURITY_POLICY, "sandbox; default-src 'none'".into()),
             (header::CACHE_CONTROL, "no-store".into()),
             (header::HeaderName::from_static("x-looklook-size"), m.len().to_string()),
+            // 编辑保存时带回来比对（fsops::write 的 if_mtime）：期间被别人（例如 AI）改过就提示冲突
+            (header::HeaderName::from_static("x-looklook-mtime"), m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis()).unwrap_or(0).to_string()),
         ],
         buf,
     )

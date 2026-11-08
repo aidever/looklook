@@ -8,6 +8,7 @@ import Zoom from 'yet-another-react-lightbox/plugins/zoom';
 import 'yet-another-react-lightbox/styles.css';
 import 'yet-another-react-lightbox/plugins/counter.css';
 import { fetchRaw, plainLinksWork, rtcMode, saveViaFrame } from './api.js';
+import { useLayer } from './layers.js';
 
 /** 接口路径（`/instances/…`，不带 `/api`）：本机直接用地址，远程（经 WebRTC 转发、多台电脑）先取成 blob。其他地址原样用 */
 function useSrcs(urls) {
@@ -41,6 +42,8 @@ function useSrcs(urls) {
  * 有名字的能下载。
  */
 export default function ImageViewer({ images, index = 0, onClose }) {
+  // 返回键关掉看大图（docs/REMOTE_UX_2026-11-07.md §7）
+  useLayer(true, onClose);
   const srcs = useSrcs(images.map((i) => i.url));
   const slides = useMemo(
     () => images.map((img, i) => ({ src: srcs[i] ?? 'data:,', alt: img.name ?? '', download: img.name ? { url: srcs[i] ?? '', filename: img.name } : false })),

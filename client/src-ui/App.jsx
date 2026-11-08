@@ -22,6 +22,10 @@ import System from './pages/System.jsx';
 import { HistoryPage } from './pages/History.jsx';
 import { ProjectPage } from './pages/Project.jsx';
 import PullRefresh from './shared/pull.jsx';
+import ConnStatus from './shared/ConnStatus.jsx';
+import { claimConn } from './shared/conn.js';
+import { useGlobalShortcuts } from './shared/shortcuts.js';
+import { hasSnapshot, rememberStatus, snapStatus } from './shared/snapshot.js';
 import { opensInPage, SessionHome, SessionList, SessionStage, SessionTabs, SessionUiProvider, useSessionUi } from './pages/Sessions.jsx';
 import { DraftPane } from './pages/Draft.jsx';
 import TerminalView from './pages/TerminalView.jsx';
@@ -35,7 +39,7 @@ import { sessionState, SessionsProvider, useSessions } from './shared/sessions.j
 import { daysLeft, formatTime } from './shared/time.js';
 import { BrandMark, Button, Drawer, FoldNote, LangSwitch, Note, Skeleton, useConfirm, useToast } from './shared/ui.jsx';
 import { isMod, keyLabel } from './shared/hotkeys.js';
-import { setLocale } from './shared/i18n.js';
+import i18next, { setLocale } from './shared/i18n.js';
 import QuickSwitch from './shared/QuickSwitch.jsx';
 import ShortcutsHelp from './shared/Shortcuts.jsx';
 import { errorText } from './shared/i18n.js';
@@ -702,8 +706,15 @@ function Shell() {
   const route = useDrawerRoute(path0);
   // 抽屉开着时，主区域显示它下面的那页（会话不卸载、不隐藏）
   const path = route.drawer ? route.behind : path0;
-  const [status, setStatus] = useState(undefined);
+  // 远程打开时先按上次的快照显示（docs/REMOTE_UX_2026-11-07.md §3.4），连上电脑后静默换成最新的
+  const [status, setStatus] = useState(snapStatus);
+  const toastTop = useToast();
+  useGlobalShortcuts();
+  const toastRef = useRef(toastTop);
+  toastRef.current = toastTop;
   const [down, setDown] = useState(false);
+  // 告诉启动页状态由管理台显示（它收起骨架、藏起自己的提示条）
+  useEffect(() => claimConn(hasSnapshot()), []);
   useAwayTracker();
   // 状态来自哪台电脑（多设备时随顶栏的选择）
   const [statusDevice, setStatusDevice] = useState(null);
@@ -723,6 +734,7 @@ function Shell() {
         setStatus(s);
         setStatusDevice(device);
         setDown(false);
+        rememberStatus(s);
       })
       .catch(() => {
         if (n !== reqSeq.current) return;
@@ -731,7 +743,10 @@ function Shell() {
           // 已经有这台电脑的状态：只是一次没取到（网络抖动），留在这台，下一轮再取
           if (statusDevRef.current === device) return;
           // 刚切过去就连不上（例如它离线了）：这次先看默认的电脑，不要整页显示“连不上”；
-          // 不改记住的选择，下次打开还是用户选的那台
+          // 不改记住的选择，下次打开还是用户选的那台。说一声换了哪台，不悄悄换（docs/REMOTE_UX_2026-11-07.md 决定 3）
+          const from = d.byId(device);
+          const to = d.byId(d.def);
+          if (from && to) toastRef.current?.(i18next.t('devices.fallback', { from: from.name, to: to.name }));
           d.select(d.def, false);
           return;
         }
@@ -757,14 +772,27 @@ function Shell() {
     };
   }, [reload, relayState]);
 
-  if (down && !status) return <Unreachable onRetry={reload} />;
+  // 骨架、连不上的页面上也能下拉刷新，也有连接状态（以前要等拿到状态才挂上）
+  if (down && !status) {
+    return (
+      <>
+        <Unreachable onRetry={reload} />
+        <PullRefresh />
+        <ConnStatus />
+      </>
+    );
+  }
   if (!status || !devices.ready) {
     return (
-      <main className="shell stack">
-        <Skeleton height={60} />
-        <Skeleton height={180} style={{ borderRadius: 22 }} />
-        <Skeleton height={120} />
-      </main>
+      <>
+        <main className="shell stack">
+          <Skeleton height={60} />
+          <Skeleton height={180} style={{ borderRadius: 22 }} />
+          <Skeleton height={120} />
+        </main>
+        <PullRefresh />
+        <ConnStatus />
+      </>
     );
   }
   let body;
@@ -808,6 +836,7 @@ function Shell() {
               <OnboardTracker />
               {body}
               <PullRefresh />
+              <ConnStatus />
             </TipsProvider>
           </ReportProvider>
         </UpdateProvider>

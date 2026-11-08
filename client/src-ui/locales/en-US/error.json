@@ -305,5 +305,13 @@
   "PET_GEN_BAD": "Couldn't read the model's answer, please try again",
   "CHAT_EDIT_UNAVAILABLE": "Edit & resend isn't available for this session (chat-mode Claude Code and Codex only)",
   "CHAT_EDIT_BUSY": "Couldn't stop the current turn. Try again in a moment",
-  "CHAT_EDIT_STALE": "That message is no longer in this conversation. Refresh and try again"
+  "CHAT_EDIT_STALE": "That message is no longer in this conversation. Refresh and try again",
+  "NOT_A_DIR": "The target isn't a folder",
+  "DEST_INSIDE": "A folder can't be put inside itself",
+  "TRASH_UNAVAILABLE": "Can't move it to the trash",
+  "ZIP_TOO_MANY": "Too many files; at most {{max}} per zip",
+  "ZIP_TOO_BIG": "Too large; at most 4 GB per zip",
+  "CLIENT_TOO_OLD": "Looklook on that computer is too old for this. Update it first",
+  "FILE_CHANGED": "The file changed after you opened it",
+  "FILE_TOO_BIG": "The file is too large to edit here (max 1 MB)"
 }

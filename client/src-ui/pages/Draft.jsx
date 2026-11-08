@@ -30,6 +30,7 @@ import { BackendNote, FolderPicker, InstallProgress, Promotions, RemoteCard, She
 import { imeComposing } from '../shared/ime.js';
 import Select from '../shared/Select.jsx';
 import { useComposeAssist } from '../shared/composeAssist.jsx';
+import { useLayer } from '../shared/layers.js';
 
 // 留在草稿里的类型（写好第一句再开始）；终端、DSH 点了马上开
 const DRAFT_LAUNCHES = ['claude', 'codex', 'opencode', 'dsh'];
@@ -123,6 +124,7 @@ function containerFs(device, name) {
 
 /** 换项目：按电脑分组列出项目（可以搜），下面“选择其他文件夹”“添加项目”。 */
 function ProjectPicker({ device, workdir, container, onPick, onClose }) {
+  useLayer(true, onClose);
   const { t } = useTranslation();
   const devices = useDevices();
   const s = useSessions();

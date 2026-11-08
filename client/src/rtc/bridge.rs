@@ -9,7 +9,9 @@
 //!   握手，终端的口令、`ensure_attachable`、更新保护等都沿用 `gateway::terminal` 的逻辑。成功回 `{"t":"open","proto":…}`，
 //!   失败回 `{"t":"close","code":…}`；之后每条 WebSocket 消息对应一条（大的拆成几帧）数据帧。首帧带 `"resume": true` 时
 //!   `open` 帧带续接令牌，通道断了还能经新连接上的 `{"t":"resume",…}` 接回去（[`resume`](super::resume)）。
-//! - `ctl` 通道：`{"t":"hello","proto":1}` 握手，回本机设备 id。
+//! - `ctl` 通道：`{"t":"hello","proto":1}` 握手，回本机设备 id。另外（客户端 docs/REMOTE_UX_2026-11-07.md §5）：
+//!   `{"t":"bg"}` 页面切到后台，这个子站会话的终端断开后多留一会儿（[`Terms::set_away`]）；`{"t":"fg"}` / hello 回到前台；
+//!   `{"t":"drop","u":ice-ufrag}` 浏览器放弃了同一子站会话里的另一条连接（[`super::Rtc::drop_peer`]），马上释放。
 
 use std::convert::Infallible;
 use std::io::Write;
@@ -42,6 +44,8 @@ pub struct Ctx {
     pub device: String,
     /// 可续接的终端会话（属于整个 `Rtc`，不随这条连接结束）。
     pub terms: Arc<Terms>,
+    /// 用来释放浏览器放弃的连接（ctl 上的 `drop`）。测试里没有。
+    pub rtc: std::sync::Weak<super::Rtc>,
     /// 子站会话的绝对期限：终端会话最晚到这时结束。
     pub expires: tokio::time::Instant,
 }
@@ -76,8 +80,21 @@ pub async fn serve(ctx: Ctx, mut ch: Channel) {
 async fn control(ctx: &Ctx, ch: &mut Channel) -> Result<()> {
     while let Some(m) = ch.recv().await {
         if let Some(Frame::Ctl(v)) = frame::parse(&m) {
-            if frame::kind(&v) == "hello" {
-                ch.send(&frame::ctl(&json!({ "t": "hello", "proto": looklook_protocol::rtc::PROTO, "dev": ctx.device })))?;
+            match frame::kind(&v) {
+                "hello" => {
+                    // 心跳只在页面在前台时发
+                    ctx.terms.set_away(&ctx.sid, false);
+                    ch.send(&frame::ctl(&json!({ "t": "hello", "proto": looklook_protocol::rtc::PROTO, "dev": ctx.device })))?;
+                }
+                "bg" => ctx.terms.set_away(&ctx.sid, true),
+                "fg" => ctx.terms.set_away(&ctx.sid, false),
+                "drop" => {
+                    let u = v.get("u").and_then(Value::as_str).unwrap_or("");
+                    if let Some(rtc) = ctx.rtc.upgrade() {
+                        rtc.drop_peer(&ctx.sid, u);
+                    }
+                }
+                _ => {}
             }
         }
     }

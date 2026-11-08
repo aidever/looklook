@@ -3,7 +3,7 @@
 // 终端 / 文件 / Git 的切换在手机和窄屏上放在底部（像 App 的底部标签栏），宽屏放在顶栏。
 // 顶栏、按键条、标签栏都跟着终端配色（设置 → 终端配色），不会出现终端是浅色、上下两头还是深色。
 // 会话页右边打开的每个会话是一个 TermPane（见 Sessions.jsx）。
-import { ArrowLeft, Expand, ExternalLink, FolderOpen, GitBranch, Keyboard, Maximize2, MessagesSquare, Minimize2, Palette, Play, PlugZap, RefreshCw, Shrink, SquareTerminal, TextSelect as TextSelectIcon, WifiOff } from 'lucide-react';
+import { ArrowLeft, Expand, ExternalLink, Sun, SunDim, FolderOpen, GitBranch, Keyboard, Maximize2, MessagesSquare, Minimize2, Palette, Play, PlugZap, RefreshCw, Shrink, SquareTerminal, TextSelect as TextSelectIcon, WifiOff } from 'lucide-react';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -18,6 +18,7 @@ import { errorText } from '../shared/i18n.js';
 import { AI_LAUNCHES } from '../shared/keys.js';
 import KeyBar, { isTouch, keepFocus, useKeybarShown, useTouchTerminal } from '../shared/KeyBar.jsx';
 import PopMenu from '../shared/PopMenu.jsx';
+import { setWakeLock, useWakeLock, wakeLockSupported } from '../shared/wakeLock.js';
 import { useRouter } from '../shared/router.jsx';
 import { customName, sessionTitle, useSessions } from '../shared/sessions.jsx';
 import { SessionIcon } from '../shared/brands.jsx';
@@ -160,6 +161,23 @@ const tabsFor = (chat) => (chat ? [CHAT_TAB, ...TABS] : TABS);
  * 对话里点了“在文件中显示”（`ll-files-reveal:{id}`）：切到文件标签并打开那个文件。
  * 对话会话里“填路径”填进对话输入框（`ll-chat-insert:{id}`），其他填进终端。
  */
+/** ⌘⇧1–4（Ctrl+Shift+1–4）切到对话 / 终端 / Git / 文件标签（shared/shortcuts.js 发 ll-side-tab）：只有当前会话响应。 */
+function useTabKeys(active, chat, container, setTab) {
+  const set = useRef(setTab);
+  set.current = setTab;
+  useEffect(() => {
+    if (!active) return undefined;
+    const on = (e) => {
+      const name = e.detail;
+      if (name === 'chat' && !chat) return;
+      if ((name === 'git' || name === 'files') && container) return;
+      set.current(name);
+    };
+    window.addEventListener('ll-side-tab', on);
+    return () => window.removeEventListener('ll-side-tab', on);
+  }, [active, chat, container]);
+}
+
 function useSideTabs(id, tab, setTab, chat, frame, enabled = true) {
   const [seen, setSeen] = useState(() => new Set());
   const [reveal, setReveal] = useState(null);
@@ -406,6 +424,7 @@ export function TermPane({ id, inst, active, missing, offline = false, onStart, 
   // 容器里的会话只有终端（文件、Git 看的是这台电脑上的目录，对话界面拿不到容器里的记录）
   const tab = inst?.container ? 'term' : tab0;
   const side = useSideTabs(id, tab, setTab, chat, frame, !inst?.container);
+  useTabKeys(active, chat, Boolean(inst?.container), setTab);
   const link = { src: termSrc(id) };
   const allowed = status.account.allowed;
   const running = Boolean(inst?.running && allowed);
@@ -643,6 +662,7 @@ function TermPage({ id }) {
   const [tab0, setTab] = useTab(id, chat);
   const tab = inst?.container ? 'term' : tab0;
   const side = useSideTabs(id, tab, setTab, chat, frame, !inst?.container);
+  useTabKeys(true, chat, Boolean(inst?.container), setTab);
   const allowed = status.account.allowed;
   const running = inst?.running;
   const live = Boolean(running && allowed);
@@ -779,6 +799,7 @@ function TermPage({ id }) {
   // 窄屏时刷新、全屏、新窗口收进“更多”；手机上按住菜单不抢键盘焦点
   const compact = touch || narrow;
   const tap = touch ? keepFocus : undefined;
+  const awake = useWakeLock();
   const more = [
     tab === 'term' && live && { icon: TextSelectIcon, label: t('select.toggle'), onClick: () => setSelecting(true) },
     tab === 'term' && live && { icon: RefreshCw, label: t('term.reload'), onClick: reloadTerm },
@@ -786,6 +807,7 @@ function TermPage({ id }) {
     tab === 'term' && live && reconnect.shown && { icon: PlugZap, label: t('term.codex_reconnect'), onClick: reconnect.run },
     { icon: full ? Minimize2 : Maximize2, label: t(full ? 'term.exit_full' : 'term.full'), onClick: toggleFull },
     { icon: ExternalLink, label: t('instance.new_window'), onClick: newWindow },
+    touch && wakeLockSupported && { icon: awake ? SunDim : Sun, label: t(awake ? 'term.wake_off' : 'term.wake_on'), onClick: () => setWakeLock(!awake) },
   ];
   return (
     <div className="term-page" data-scheme={tab === 'term' ? termTheme(status.settings.theme).scheme : 'app'} data-tabbar={tabbarShown ? '' : undefined} style={{ ...vars, ...mobile.style }}>

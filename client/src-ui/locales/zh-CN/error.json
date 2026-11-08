@@ -305,5 +305,13 @@
   "PET_GEN_BAD": "模型的回答看不懂，再试一次",
   "CHAT_EDIT_UNAVAILABLE": "这种会话不支持编辑重发（只有对话模式的 Claude Code 和 Codex 可以）",
   "CHAT_EDIT_BUSY": "这一轮没能停下来，稍后再试",
-  "CHAT_EDIT_STALE": "这条消息已经不在当前对话里了，刷新后再试"
+  "CHAT_EDIT_STALE": "这条消息已经不在当前对话里了，刷新后再试",
+  "NOT_A_DIR": "目标不是文件夹",
+  "DEST_INSIDE": "不能把文件夹放进它自己里面",
+  "TRASH_UNAVAILABLE": "放不进回收站",
+  "ZIP_TOO_MANY": "文件太多了，一次最多打包 {{max}} 个文件",
+  "ZIP_TOO_BIG": "太大了，一次最多打包 4 GB",
+  "CLIENT_TOO_OLD": "那台电脑上的看看版本太旧，不支持这个操作，请先更新",
+  "FILE_CHANGED": "文件在你打开之后被改过了",
+  "FILE_TOO_BIG": "文件太大，不能在这里编辑（最多 1 MB）"
 }

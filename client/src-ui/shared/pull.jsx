@@ -5,6 +5,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { refreshAll } from './conn.js';
 import { isTouch } from './KeyBar.jsx';
 
 const LIMIT = 72;
@@ -29,7 +30,7 @@ export default function PullRefresh() {
     const onMsg = (e) => {
       if (e.data?.type !== 'looklook:pull-refresh') return;
       if (![...document.querySelectorAll('iframe')].some((f) => f.contentWindow === e.source)) return;
-      window.location.reload();
+      refreshAll();
     };
     window.addEventListener('message', onMsg);
     if (!isTouch()) return () => window.removeEventListener('message', onMsg);
@@ -61,7 +62,8 @@ export default function PullRefresh() {
       const go = start.current !== null && distRef.current >= LIMIT;
       start.current = null;
       set(0);
-      if (go) window.location.reload();
+      // 远程时交给启动页：先确认 / 重建连接再重载（只重载这一层的话，连接坏了刷新也没用）
+      if (go) refreshAll();
     };
     document.addEventListener('touchstart', down, { passive: true });
     document.addEventListener('touchmove', move, { passive: true });

@@ -1,14 +1,11 @@
-// 快捷键说明（⌘/ / Ctrl+/，用户菜单里也能打开）：列出管理台和对话页的全部快捷键。别处发 `ll-shortcuts` 事件打开。
+// 快捷键说明（⌘/ / Ctrl+/，用户菜单里也能打开）：按 shortcuts.js 的注册表列出当前环境能用的全部快捷键。别处发 `ll-shortcuts` 事件打开。
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { isMod, keyLabel } from './hotkeys.js';
+import { visibleGroups } from './shortcuts.js';
 import { Modal } from './ui.jsx';
 
-const GROUPS = [
-  ['app', [['mod+K', 'quick'], ['mod+shift+O', 'new'], ['mod+shift+S', 'pane'], ['mod+W', 'close_tab'], ['mod+,', 'settings'], ['mod+/', 'help']]],
-  ['chat', [['Enter', 'send'], ['shift+Enter', 'newline'], ['mod+F', 'find'], ['alt+↑ / alt+↓', 'jump'], ['↑ / ↓', 'history'], ['Ctrl+R', 'history_search'], ['Tab', 'suggest'], ['shift+Tab', 'mode'], ['Esc', 'stop']]],
-];
 
 const label = (combo) => combo.split(' / ').map((c) => keyLabel(c)).join(' / ');
 
@@ -33,7 +30,7 @@ export default function ShortcutsHelp() {
   return (
     <Modal open={open} onClose={() => setOpen(false)} title={t('keys.title')} wide>
       <div className="keys-help">
-        {GROUPS.map(([g, rows]) => (
+        {visibleGroups().map(([g, rows]) => (
           <section key={g}>
             <h3>{t(`keys.group.${g}`)}</h3>
             <dl>

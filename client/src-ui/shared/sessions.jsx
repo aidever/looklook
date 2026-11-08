@@ -7,6 +7,7 @@
 import { createContext, useContext, useEffect, useRef, useState } from 'react';
 
 import { api, ApiError, deviceApi, rememberTerminals, terminalDevice } from './api.js';
+import { rememberInstances, snapInstances } from './snapshot.js';
 import { useDevices } from './devices.jsx';
 
 const Ctx = createContext(null);
@@ -149,7 +150,15 @@ export function sessionState(i) {
  * 其他电脑的先显示出来；同一台电脑上一次还没返回时不重复请求。
  */
 function useDeviceGroups(online, key) {
-  const [groups, setGroups] = useState({});
+  // 远程打开时先用上次各台电脑的会话列表（标了 stale，不拿它判断“会话已删除”）
+  const [groups, setGroups] = useState(() => {
+    const out = {};
+    for (const d of online || []) {
+      const items = snapInstances(d.id);
+      if (items) out[d.id] = { id: d.id, items, stale: true };
+    }
+    return out;
+  });
   const inflight = useRef(new Set());
   const alive = useRef(true);
   const ids = useRef([]);
@@ -165,6 +174,7 @@ function useDeviceGroups(online, key) {
         (r) => {
           const items = Array.isArray(r?.items) ? r.items : [];
           rememberTerminals(id, items);
+          rememberInstances(id, items);
           return { id, items };
         },
         // 超时：保留上一次拿到的列表，免得卡一下就整组消失
@@ -199,7 +209,11 @@ function useDeviceGroups(online, key) {
 
 /** 只有一台电脑（或本机 / 局域网打开）时的会话列表。 */
 function useSingle(enabled) {
-  const [state, setState] = useState({ data: null, error: null });
+  // 远程打开时先用上次的会话列表（标了 stale：拿它判断“会话已删除”会误关标签，见 gone）
+  const [state, setState] = useState(() => {
+    const snap = enabled ? snapInstances('self') : null;
+    return { data: snap ? { items: snap, stale: true } : null, error: null };
+  });
   const busy = useRef(false);
   const reload = () => {
     if (!enabled || busy.current) return undefined;
@@ -207,7 +221,11 @@ function useSingle(enabled) {
     return api
       .get('/instances')
       .then(
-        (r) => setState({ data: { items: Array.isArray(r?.items) ? r.items : [] }, error: null }),
+        (r) => {
+          const items = Array.isArray(r?.items) ? r.items : [];
+          rememberInstances('self', items);
+          setState({ data: { items }, error: null });
+        },
         (e) => setState((s) => ({ data: s.data, error: e })),
       )
       .finally(() => {
@@ -542,11 +560,11 @@ export function SessionsProvider({ enabled, children }) {
   const gone = (id) => {
     if (items.some((i) => i.id === id)) return false;
     if (!multi) {
-      if (!single || singleError) return false;
+      if (!single || single.stale || singleError) return false;
       const dev = tabDev[id];
       return !dev || dev === 'self' || dev === selfId;
     }
-    const loaded = (dev) => Boolean(grouped?.groups?.[dev] && !grouped.groups[dev].error);
+    const loaded = (dev) => Boolean(grouped?.groups?.[dev] && !grouped.groups[dev].error && !grouped.groups[dev].stale);
     const dev = terminalDevice(id) ?? (tabDev[id] !== 'self' ? tabDev[id] : null);
     if (dev) return loaded(dev);
     return devices.items.length > 0 && devices.items.every((d) => d.online && loaded(d.id));

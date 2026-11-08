@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { localApi, rtcMode } from './api.js';
+import { connManaged, isOnline, useConn } from './conn.js';
 
 const POLL_MS = 10_000;
 let data = {};
@@ -46,6 +47,9 @@ export function usePaths() {
       }
     };
   }, []);
+  // 连接还没确认（切回前台、重连中）：往返时间是旧的，不显示（“—”），免得以为连着（docs/REMOTE_UX_2026-11-07.md §5.2）
+  const conn = useConn();
+  if (connManaged && !isOnline(conn)) return Object.fromEntries(Object.entries(data).map(([k, v]) => [k, { ...v, rtt_ms: null, loss: null }]));
   return data;
 }
 

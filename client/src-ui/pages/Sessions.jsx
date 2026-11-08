@@ -29,6 +29,7 @@ import { CAN_FORK } from './History.jsx';
 import { BackendNote, InstanceDialog, LogsDialog, useInstanceActions } from './Terminals.jsx';
 import { TermPane } from './TerminalView.jsx';
 import { WebPane } from './WebPane.jsx';
+import { touchUi, useLayer } from '../shared/layers.js';
 
 // 项目“⋯”里换个类型新建
 export const QUICK_LAUNCHES = ['claude', 'codex', 'opencode', 'shell'];
@@ -578,6 +579,7 @@ const GROUPS = ['project', 'device', 'recent'];
 /** 点到外面、按 Esc 时关掉弹出的筛选。 */
 function usePopover() {
   const [open, setOpen] = useState(false);
+  useLayer(open, () => setOpen(false), { history: touchUi });
   const ref = useRef(null);
   useEffect(() => {
     if (!open) return undefined;
@@ -1174,6 +1176,7 @@ export function SessionStage({ activeId }) {
 
 /** 点到外面、按 Esc 时关掉弹出的东西。 */
 function useDismiss(ref, open, onClose) {
+  useLayer(open, onClose, { history: touchUi });
   useEffect(() => {
     if (!open) return undefined;
     const down = (e) => !ref.current?.contains(e.target) && onClose();

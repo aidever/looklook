@@ -144,6 +144,15 @@ pub fn routes(app: App) -> Router<App> {
         .route("/fs/rename", post(fs_rename))
         .route("/fs/delete", post(fs_delete))
         .route("/fs/uploads", post(fs_upload))
+        .route("/fs/move", post(fs_move))
+        .route("/fs/copy", post(fs_copy))
+        .route("/fs/trash", post(fs_trash))
+        .route("/fs/restore", post(fs_restore))
+        .route("/fs/search", get(fs_search))
+        .route("/fs/recent", post(fs_recent))
+        .route("/fs/zip", get(fs_zip))
+        .route("/fs/write", post(fs_write).layer(DefaultBodyLimit::max(4 << 20)))
+        .route("/fs/tail", get(fs_tail))
         .route("/relay/reconnect", post(relay_reconnect))
         .route("/relays", get(list_relays))
         .route("/relays/preference", put(set_relay))
@@ -1625,6 +1634,159 @@ async fn fs_delete(Json(req): Json<FsNameReq>) -> R<StatusCode> {
     tracing::info!(path = %req.path, "管理台删除文件");
     blocking(move || crate::fsops::remove(&req.path)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct FsManyReq {
+    paths: Vec<String>,
+    /// move / copy：放进哪个文件夹
+    #[serde(default)]
+    dest: String,
+}
+
+#[derive(Serialize)]
+struct FsDone {
+    path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<String>,
+}
+
+/// 一项一项做，每项各自成败（移动了一半出错时，已经移动的照样算数，界面按结果刷新）。
+async fn fs_many(req: FsManyReq, f: fn(&str, &str) -> Result<String, LocalError>) -> R<Json<Value>> {
+    let out = blocking(move || {
+        Ok(req
+            .paths
+            .iter()
+            .take(1000)
+            .map(|p| match f(p, &req.dest) {
+                Ok(to) => FsDone { path: p.clone(), to: Some(to), code: None },
+                Err(e) => FsDone { path: p.clone(), to: None, code: Some(e.code) },
+            })
+            .collect::<Vec<_>>())
+    })
+    .await?;
+    Ok(Json(json!({ "items": out })))
+}
+
+/// `POST /api/fs/move {paths, dest}`：移动到文件夹里，重名自动改名。
+async fn fs_move(Json(req): Json<FsManyReq>) -> R<Json<Value>> {
+    tracing::info!(n = req.paths.len(), dest = %req.dest, "管理台移动文件");
+    fs_many(req, crate::fsops::move_into).await
+}
+
+/// `POST /api/fs/copy {paths, dest}`
+async fn fs_copy(Json(req): Json<FsManyReq>) -> R<Json<Value>> {
+    fs_many(req, crate::fsops::copy_into).await
+}
+
+fn trash_root(app: &App) -> std::path::PathBuf {
+    app.paths.home.join("trash")
+}
+
+/// `POST /api/fs/trash {paths}`：放进回收站（7 天），返回能撤销的 id；放不进去的在 `failed` 里，界面改问永久删除。
+async fn fs_trash(State(app): State<App>, Json(req): Json<FsManyReq>) -> R<Json<crate::fsops::TrashOut>> {
+    tracing::info!(n = req.paths.len(), "管理台删除文件（回收站）");
+    let root = trash_root(&app);
+    Ok(Json(blocking(move || Ok(crate::fsops::trash(&root, &req.paths))).await?))
+}
+
+#[derive(Deserialize)]
+struct FsRestoreReq {
+    ids: Vec<String>,
+}
+
+/// `POST /api/fs/restore {ids}`：撤销删除。
+async fn fs_restore(State(app): State<App>, Json(req): Json<FsRestoreReq>) -> R<Json<Value>> {
+    let root = trash_root(&app);
+    let out = blocking(move || {
+        Ok(req
+            .ids
+            .iter()
+            .map(|id| match crate::fsops::restore(&root, id) {
+                Ok(to) => FsDone { path: id.clone(), to: Some(to), code: None },
+                Err(e) => FsDone { path: id.clone(), to: None, code: Some(e.code) },
+            })
+            .collect::<Vec<_>>())
+    })
+    .await?;
+    Ok(Json(json!({ "items": out })))
+}
+
+#[derive(Deserialize)]
+struct FsSearchQ {
+    root: String,
+    q: String,
+    #[serde(default, deserialize_with = "de_flag")]
+    hidden: bool,
+}
+
+/// `GET /api/fs/search?root=&q=&hidden=`：在文件夹里（含子文件夹）按名字找，遵守 .gitignore。
+async fn fs_search(Query(q): Query<FsSearchQ>) -> R<Json<crate::fsops::Hits>> {
+    Ok(Json(blocking(move || crate::fsops::search(&q.root, &q.q, q.hidden)).await?))
+}
+
+#[derive(Deserialize)]
+struct FsRecentReq {
+    roots: Vec<String>,
+    since_ms: i64,
+}
+
+/// `POST /api/fs/recent {roots, since_ms}`：这些项目里最近改过的文件（文件页“最近改动”）。
+async fn fs_recent(Json(req): Json<FsRecentReq>) -> R<Json<crate::fsops::Hits>> {
+    Ok(Json(blocking(move || Ok(crate::fsops::recent(&req.roots, req.since_ms))).await?))
+}
+
+#[derive(Deserialize)]
+struct FsZipQ {
+    /// JSON 数组：要打包的文件 / 文件夹
+    p: String,
+}
+
+/// `GET /api/fs/zip?p=["/a","/b"]`：打成一个 zip 下载（先打进临时文件，有 Content-Length，下载进度准）。
+async fn fs_zip(Query(q): Query<FsZipQ>) -> R<Response> {
+    let paths: Vec<String> = serde_json::from_str(&q.p).map_err(|_| LocalError::invalid("p", "json_array"))?;
+    let (f, name) = blocking(move || crate::fsops::zip(&paths)).await?;
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(tokio::fs::File::from_std(f)));
+    let mut res = body.into_response();
+    let h = res.headers_mut();
+    use axum::http::{header, HeaderValue};
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/zip"));
+    h.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
+    if let Ok(v) = transfer::content_disposition(&name).parse() {
+        h.insert(header::CONTENT_DISPOSITION, v);
+    }
+    Ok(res)
+}
+
+#[derive(Deserialize)]
+struct FsWriteReq {
+    path: String,
+    content: String,
+    /// 打开时的修改时间；不带 = 覆盖
+    #[serde(default)]
+    if_mtime: Option<i64>,
+}
+
+/// `POST /api/fs/write {path, content, if_mtime}`：保存编辑（≤ 1 MiB 的文字文件），返回新的修改时间。
+async fn fs_write(Json(req): Json<FsWriteReq>) -> R<Json<Value>> {
+    tracing::info!(path = %req.path, "管理台保存文件");
+    let mtime = blocking(move || crate::fsops::write(&req.path, &req.content, req.if_mtime)).await?;
+    Ok(Json(json!({ "mtime_ms": mtime })))
+}
+
+#[derive(Deserialize)]
+struct FsTailQ {
+    path: String,
+    #[serde(default)]
+    from: u64,
+}
+
+/// `GET /api/fs/tail?path=&from=`：跟随日志，取 `from` 之后新增的内容。
+async fn fs_tail(Query(q): Query<FsTailQ>) -> R<Json<crate::fsops::Tail>> {
+    Ok(Json(blocking(move || crate::fsops::tail(&q.path, q.from)).await?))
 }
 
 #[derive(Deserialize)]

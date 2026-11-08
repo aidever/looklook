@@ -2060,7 +2060,8 @@ const OUTER_AGENT_ENV: &[&str] = &[
 ];
 
 /// 子进程环境：保证 UTF-8（中文输入输出正常），并去掉外层 tmux、外层 Claude Code 的变量。
-fn apply_env(cmd: &mut Command) {
+/// tmux 和对话模式直接起的 claude（`chat::claude_sdk`）都用这个，两边的 Claude Code 看到的一样。
+pub(crate) fn apply_env(cmd: &mut Command) {
     cmd.env_remove("TMUX").env_remove("TMUX_PANE");
     for k in OUTER_AGENT_ENV {
         cmd.env_remove(k);

@@ -74,25 +74,54 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// 用户交互登录 shell 里的 PATH（不是 Windows 时）：问一次记下来
-static USER_PATH: Mutex<Option<String>> = Mutex::new(None);
+/// 用户交互登录 shell 里的环境变量（不是 Windows 时）：问一次记下来
+static USER_ENV: Mutex<Option<Vec<(String, String)>>> = Mutex::new(None);
 
 /// 用户平时打开终端时的 PATH：从程序坞打开的客户端（和 launchd 起的后台）只有系统默认的 PATH，
 /// Homebrew、npm、nvm / fnm 加的目录常只写在 `~/.zshrc` 里，只问登录 shell 也拿不到。
-/// 用 `/usr/bin/env` 打印，不用 shell 自己的语法（fish、nushell 的 `$PATH` 不是冒号分隔）。
 pub(super) async fn user_path(shell: &str) -> Option<String> {
-    if cfg!(windows) {
+    user_env(shell).await?.into_iter().rev().find(|(k, _)| k == "PATH").map(|(_, v)| v).filter(|p| !p.is_empty())
+}
+
+/// 用户平时打开终端时的全部环境变量（`shell -lic /usr/bin/env`）：终端里的 Claude Code 是在这样的 shell 里起的，
+/// `~/.zshrc` 里 export 的代理、Key、工具链变量它都看得到；看看直接起的进程（对话模式）要补上这些才一样。
+/// 用 `/usr/bin/env` 打印，不用 shell 自己的语法（fish、nushell 的 `$PATH` 不是冒号分隔）。
+pub(crate) async fn user_env(shell: &str) -> Option<Vec<(String, String)>> {
+    if cfg!(windows) || shell.is_empty() {
         return None;
     }
-    if let Some(p) = lock(&USER_PATH).clone() {
-        return Some(p);
+    if let Some(e) = lock(&USER_ENV).clone() {
+        return Some(e);
     }
     let mut cmd = tokio::process::Command::new(shell);
     cmd.args(["-lic", "/usr/bin/env"]).stdin(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true);
     let out = tokio::time::timeout(Duration::from_secs(8), cmd.output()).await.ok()?.ok()?;
-    let path = String::from_utf8_lossy(&out.stdout).lines().rev().find_map(|l| l.strip_prefix("PATH=")).map(str::to_string).filter(|p| !p.is_empty())?;
-    *lock(&USER_PATH) = Some(path.clone());
-    Some(path)
+    let env = parse_env(&String::from_utf8_lossy(&out.stdout));
+    if env.is_empty() {
+        return None;
+    }
+    *lock(&USER_ENV) = Some(env.clone());
+    Some(env)
+}
+
+/// `env` 的输出：`名字=值` 一行一个；值里有换行时接在上一个后面。rc 文件在前面打印的其他内容（不像 `名字=` 的行）丢掉。
+fn parse_env(out: &str) -> Vec<(String, String)> {
+    let mut v: Vec<(String, String)> = vec![];
+    for line in out.lines() {
+        let name = line.split_once('=').map(|(k, _)| k).filter(|k| {
+            let mut c = k.chars();
+            c.next().is_some_and(|f| f.is_ascii_alphabetic() || f == '_') && c.all(|x| x.is_ascii_alphanumeric() || x == '_')
+        });
+        match (name, v.last_mut()) {
+            (Some(k), _) => v.push((k.to_string(), line[k.len() + 1..].to_string())),
+            (None, Some(last)) => {
+                last.1.push('\n');
+                last.1.push_str(line);
+            }
+            (None, None) => {}
+        }
+    }
+    v
 }
 
 /// 启动 app-server 时的 PATH：codex 所在的目录（node 常在它旁边）、用户 shell 的 PATH、客户端自己的 PATH
@@ -474,6 +503,12 @@ pub fn tui_command(base: &str, ep: &Endpoint, thread: Option<&str>, cwd: &str) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_env_output() {
+        let v = parse_env("Welcome!\nHOME=/home/a\nMULTI=one\ntwo\nPATH=/bin:/usr/bin\nEMPTY=\n");
+        assert_eq!(v, vec![("HOME".into(), "/home/a".into()), ("MULTI".into(), "one\ntwo".into()), ("PATH".into(), "/bin:/usr/bin".into()), ("EMPTY".into(), String::new())]);
+    }
 
     #[tokio::test]
     async fn program_falls_back_to_name() {

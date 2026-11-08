@@ -87,6 +87,47 @@ pub struct SdkSt {
     /// Stop hook 的 `session_crons` 不是空的：这段对话里有定时任务（/loop、CronCreate、ScheduleWakeup），
     /// 都在 claude 进程里，进程结束就没了，所以不能当空闲结束
     pub(super) crons: bool,
+    /// 快速模式：用户在这段对话里手打 `/fast` 选的（进程重起时带上）；None 时按账号设置里的 `fastMode`（TUI 的 /fast 存在那里）
+    fast: Option<bool>,
+    /// claude 最近报的快速模式状态（`fast_mode_state` 是 on / cooldown）：手打不带参数的 `/fast` 时按它切换
+    fast_on: bool,
+    /// 最近一次 init 的 `ultrathink_typed_raises`：用户手打了 ultrathink 时要在消息上说明（见 [`Chat::sdk_input`]）
+    ultrathink: bool,
+}
+
+/// 用户登录 shell 里的这些变量不带给 claude：这个 shell 自己的（目录、层数、终端）、看看的终端标识、
+/// PATH（另外算，见 `codex_app::launch_path`）、配置目录（按会话的账号定）、Claude Code 给它起的子进程设的（客户端本身在
+/// Claude Code 里跑时会带着）
+const SDK_ENV_SKIP: &[&str] = &[
+    "PATH", "PWD", "OLDPWD", "SHLVL", "_", "TMUX", "TMUX_PANE", "TERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "COLORTERM", "CLAUDECODE", "CLAUDE_CONFIG_DIR",
+    "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_SSE_PORT", super::hooks::INSTANCE_ENV,
+];
+
+/// stream-json 的 claude 的环境：补上终端里起的 claude 有、看看直接起的没有的——
+/// - 用户登录 shell 的环境变量（`~/.zshrc` 里的代理、Key 等）和 `SHELL`（Bash 工具按它选 shell、读它的配置）；
+/// - `CLAUDE_CODE_ARTIFACT=1`：`-p` 下 Artifact（claude.ai 网页）默认关着（sdk_default_off），终端里是开着的。
+///   用户自己设了（包括设成 0）就照他的；关掉 Artifact 的设置（`disableArtifact`、`CLAUDE_CODE_DISABLE_ARTIFACT`）照样管用。
+fn sdk_env(shell: &str, user: Vec<(String, String)>) -> Vec<(String, String)> {
+    let artifact_set = std::env::var_os("CLAUDE_CODE_ARTIFACT").is_some() || user.iter().any(|(k, _)| k == "CLAUDE_CODE_ARTIFACT");
+    // 和客户端自己的一样的不用再设（本来就继承）
+    let mut env: Vec<(String, String)> = user
+        .into_iter()
+        .filter(|(k, _)| !SDK_ENV_SKIP.contains(&k.as_str()) && !k.starts_with("LOOKLOOK_"))
+        .filter(|(k, v)| std::env::var(k).ok().as_deref() != Some(v.as_str()))
+        .collect();
+    if !cfg!(windows) && !shell.is_empty() {
+        env.push(("SHELL".into(), shell.to_string()));
+    }
+    if !artifact_set {
+        env.push(("CLAUDE_CODE_ARTIFACT".into(), "1".into()));
+    }
+    env
+}
+
+/// 账号设置里开着快速模式（终端里 `/fast` 打开后存在 `settings.json` 的 `fastMode`）
+fn account_fast(config_dir: &std::path::Path) -> bool {
+    std::fs::read(config_dir.join("settings.json")).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).is_some_and(|v| v["fastMode"] == true)
 }
 
 impl Chat {
@@ -196,7 +237,7 @@ impl Chat {
         if std::fs::create_dir_all(&attach).is_ok() {
             args.extend(["--add-dir".into(), attach.display().to_string()]);
         }
-        let mut env = vec![];
+        let mut env = sdk_env(&shell, super::codex_app::user_env(&shell).await.unwrap_or_default());
         // root 下 claude 不肯带全部权限运行，要说明是在沙箱里（和终端里的启动命令一样）
         if crate::platform::is_root() {
             env.push(("IS_SANDBOX".to_string(), "1".to_string()));
@@ -206,6 +247,7 @@ impl Chat {
         tracing::info!(id, program = %program.display(), resume = ?resume.as_ref().map(|r| &r.0), "起对话模式的 Claude Code（stream-json）");
         let proc = Proc::spawn(claude_sdk::Spawn { program, args, cwd: PathBuf::from(&row.workdir), env, profile_env, path }, tx)?;
         tokio::spawn(self.clone().sdk_loop(inst.clone(), proc.clone(), rx));
+        let fast = lock(&inst.st).sdk.fast.unwrap_or_else(|| account_fast(&crate::claude_profiles::config_paths(&self.paths.home, &profile).0));
         let init = match proc.request("initialize", json!({ "hooks": claude_sdk::hooks_payload(), "promptSuggestions": true })).await {
             Ok(v) => v,
             Err(e) => {
@@ -224,6 +266,7 @@ impl Chat {
             if let Some(m) = init["current_permission_mode"].as_str() {
                 st.mode = Some(m.to_string());
             }
+            st.sdk.fast_on = matches!(init["fast_mode_state"].as_str(), Some("on" | "cooldown"));
             st.sdk.proc = Some(proc.clone());
             st.sdk.idle_since = Some(Instant::now());
             st.error = None;
@@ -231,6 +274,13 @@ impl Chat {
                 Self::set_phase(&inst, &mut st, Phase::Idle, None);
             } else {
                 Self::emit_status(&inst, &st);
+            }
+        }
+        // 快速模式：-p 下要宿主明确打开（不然报“Agent SDK 里不能用”），打开就是开着。账号设置里开着（TUI 里 /fast 过）、
+        // 或者这段对话里 /fast 打开过的，跟终端里一样开着
+        if fast {
+            if let Err(e) = proc.request("apply_flag_settings", json!({ "settings": { "fastMode": true } })).await {
+                tracing::warn!(id, error = ?e, "没能打开快速模式");
             }
         }
         if let Some(text) = first {
@@ -410,6 +460,9 @@ impl Chat {
             "result" => {
                 let mut st = lock(&inst.st);
                 st.live = Default::default();
+                if let Some(f) = v["fast_mode_state"].as_str() {
+                    st.sdk.fast_on = matches!(f, "on" | "cooldown");
+                }
                 st.compacting = None;
                 if v["is_error"] == true && v["subtype"] != "error_during_execution" {
                     let msg = v["result"].as_str().map(String::from).or_else(|| v["errors"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n")));
@@ -467,6 +520,10 @@ impl Chat {
                 if let Some(ver) = v["claude_code_version"].as_str().filter(|x| st.version.as_deref() != Some(*x)) {
                     st.version = Some(ver.to_string());
                     changed = true;
+                }
+                st.sdk.ultrathink = v["ultrathink_typed_raises"] == true;
+                if let Some(f) = v["fast_mode_state"].as_str() {
+                    st.sdk.fast_on = matches!(f, "on" | "cooldown");
                 }
                 if changed {
                     Self::emit_status(inst, &st);
@@ -702,9 +759,25 @@ impl Chat {
         if text == "/clear" && images.is_empty() && self.sdk_new_with_default(id).await? {
             return Ok(json!({ "delivered": true }));
         }
-        let content = claude_sdk::user_content(text, images)?;
         let proc = self.sdk_attach(id).await?;
-        proc.send_user(content).await?;
+        // 手打的 `/fast`：-p 下 claude 只认宿主打开的快速模式（flag settings），自己切不了。看看替它切，
+        // 再把 `/fast on|off` 发过去，让 claude 照常回一句开了没有（额度不够、模型不支持时是它的原话）
+        let fast = match text.trim().to_ascii_lowercase().as_str() {
+            "/fast" => Some(!lock(&inst.st).sdk.fast_on),
+            "/fast on" => Some(true),
+            "/fast off" => Some(false),
+            _ => None,
+        };
+        if let Some(on) = fast {
+            proc.request("apply_flag_settings", json!({ "settings": { "fastMode": on } })).await?;
+            lock(&inst.st).sdk.fast = Some(on);
+            proc.send_user(json!(if on { "/fast on" } else { "/fast off" })).await?;
+            return Ok(json!({ "delivered": true }));
+        }
+        let content = claude_sdk::user_content(text, images)?;
+        // 手打了 ultrathink：TUI 里这一轮按 xhigh 想；-p 下要宿主说明是人打的（粘贴的不算，看看的输入框就是手打）
+        let ultrathink = lock(&inst.st).sdk.ultrathink && text.to_lowercase().contains("ultrathink");
+        proc.send_user_typed(content, ultrathink).await?;
         // 手打的 `/model sonnet`、`/effort high`：claude 只在这个进程里生效，跟界面上选的一样记下来，进程重起时带上
         // （不然空闲结束、换账号、重启客户端后就回去了）
         if let Some((cmd, v)) = text.split_once(' ').map(|(c, v)| (c, v.trim())).filter(|(_, v)| !v.is_empty() && !v.contains(char::is_whitespace)) {
@@ -1078,6 +1151,38 @@ fn pin_leaf(path: &std::path::Path, sid: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sdk_env_like_terminal() {
+        let kv = |k: &str, v: &str| (k.to_string(), v.to_string());
+        let user = vec![kv("HTTPS_PROXY", "http://127.0.0.1:7890"), kv("PWD", "/x"), kv("TMUX", "/tmp/t"), kv("LOOKLOOK_INSTANCE", "a"), kv("CLAUDE_CODE_ENTRYPOINT", "cli"), kv("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "9000"), kv("PATH", "/bin")];
+        let env = sdk_env("/bin/zsh", user);
+        let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("HTTPS_PROXY"), Some("http://127.0.0.1:7890"));
+        assert_eq!(get("CLAUDE_CODE_MAX_OUTPUT_TOKENS"), Some("9000"));
+        assert_eq!(get("SHELL"), Some("/bin/zsh"));
+        for k in ["PWD", "TMUX", "LOOKLOOK_INSTANCE", "CLAUDE_CODE_ENTRYPOINT", "PATH"] {
+            assert_eq!(get(k), None, "{k}");
+        }
+        if std::env::var_os("CLAUDE_CODE_ARTIFACT").is_none() {
+            assert_eq!(get("CLAUDE_CODE_ARTIFACT"), Some("1"));
+            // 用户自己关了 Artifact：照他的
+            let env = sdk_env("/bin/zsh", vec![kv("CLAUDE_CODE_ARTIFACT", "0")]);
+            assert_eq!(env.iter().filter(|(k, _)| k == "CLAUDE_CODE_ARTIFACT").map(|(_, v)| v.as_str()).collect::<Vec<_>>(), vec!["0"]);
+        }
+    }
+
+    #[test]
+    fn account_fast_setting() {
+        let dir = std::env::temp_dir().join(format!("ll-fast-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!account_fast(&dir));
+        std::fs::write(dir.join("settings.json"), r#"{"fastMode":true}"#).unwrap();
+        assert!(account_fast(&dir));
+        std::fs::write(dir.join("settings.json"), r#"{"fastMode":false}"#).unwrap();
+        assert!(!account_fast(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn limit_and_error_codes() {

@@ -73,8 +73,11 @@ impl Proc {
         if let Some(p) = &s.path {
             cmd.env("PATH", p);
         }
-        // 看看自己的环境不传进去：终端里的标识（hook 会把它当成 TUI 会话）、管理台的端口
-        cmd.env_remove(super::hooks::INSTANCE_ENV).env_remove("TMUX").env_remove("TMUX_PANE");
+        // 和 tmux 里起的一样：保证 UTF-8，去掉外层 tmux、外层 Claude Code 的标记（客户端是在 Claude Code 里重启的时候
+        // 会带着 CLAUDE_CODE_CHILD_SESSION，claude 就不存对话记录了）
+        crate::instances::apply_env(&mut cmd);
+        // 终端里的标识不传进去（hook 会把它当成 TUI 会话）
+        cmd.env_remove(super::hooks::INSTANCE_ENV);
         for (k, v) in &s.env {
             cmd.env(k, v);
         }
@@ -207,7 +210,17 @@ impl Proc {
 
     /// 发一条用户消息（`content` 是字符串或内容块数组）。这一轮还在跑时 claude 先排着，做完这一步再并进去。
     pub async fn send_user(&self, content: Value) -> Result<(), LocalError> {
-        self.write(&json!({ "type": "user", "message": { "role": "user", "content": content }, "parent_tool_use_id": null, "session_id": "" })).await
+        self.send_user_typed(content, false).await
+    }
+
+    /// 同上；`ultrathink`：用户在输入框里手打了 ultrathink（`ultrathink_typed`，claude 这一轮按 xhigh 想，跟 TUI 里一样）。
+    /// 只在最近一次 init 带了 `ultrathink_typed_raises: true` 时用。
+    pub async fn send_user_typed(&self, content: Value, ultrathink: bool) -> Result<(), LocalError> {
+        let mut m = json!({ "type": "user", "message": { "role": "user", "content": content }, "parent_tool_use_id": null, "session_id": "" });
+        if ultrathink {
+            m["ultrathink_typed"] = json!(true);
+        }
+        self.write(&m).await
     }
 
     /// 结束进程（连同它起的命令：单独一个进程组）

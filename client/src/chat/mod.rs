@@ -4163,6 +4163,30 @@ mod tests {
         println!("看图：{}", last_text(&s));
         let _ = std::fs::remove_file(&png);
 
+        // 和终端里起的一样（docs/CLAUDE_SDK.md「和终端里的差别」）：环境、Artifact、/fast
+        #[cfg(target_os = "linux")]
+        {
+            let pid = lock(&chat.inst(&id).st).sdk.proc.as_ref().and_then(|p| p.pid).expect("进程号");
+            let env = std::fs::read(format!("/proc/{pid}/environ")).unwrap();
+            let env: Vec<String> = env.split(|b| *b == 0).map(|v| String::from_utf8_lossy(v).into_owned()).collect();
+            let has = |k: &str| env.iter().find_map(|l| l.strip_prefix(&format!("{k}="))).map(String::from);
+            assert!(has("SHELL").is_some(), "SHELL");
+            assert!(has("CLAUDE_CODE_CHILD_SESSION").is_none() && has("TMUX").is_none(), "外层的标记去掉了");
+            if std::env::var_os("CLAUDE_CODE_ARTIFACT").is_none() {
+                assert_eq!(has("CLAUDE_CODE_ARTIFACT").as_deref(), Some("1"));
+            }
+        }
+        chat.input(&id, "你现在能用的工具里，有没有名字正好是 Artifact 的？只回复 YES 或 NO", &[]).await.unwrap();
+        let s = wait(&chat, &id, "Artifact", 60, |s| s["status"]["phase"] == "idle" && s["items"].as_array().unwrap().last().is_some_and(|i| i["k"] == "assistant")).await;
+        println!("Artifact：{}", last_text(&s));
+        assert!(last_text(&s).contains("YES"), "Artifact 工具没开");
+        chat.input(&id, "/fast", &[]).await.unwrap();
+        // claude 的回话是本地命令的输出（`command`）：开了，或者额度、模型不够时的原因，但不是“Agent SDK 里不能用”
+        let fast = |s: &Value| s["items"].as_array().unwrap().iter().rev().find(|i| i["k"] == "command" && i["text"].as_str().is_some_and(|t| t.contains("Fast mode"))).map(|i| i["text"].to_string());
+        let s = wait(&chat, &id, "/fast", 30, |s| s["status"]["phase"] == "idle" && fast(s).is_some()).await;
+        println!("/fast：{}", fast(&s).unwrap());
+        assert!(!fast(&s).unwrap().contains("Agent SDK"), "快速模式还是说 SDK 里不能用");
+
         // /clear：换一段新的
         chat.input(&id, "/clear", &[]).await.unwrap();
         let s = wait(&chat, &id, "新会话", 30, |s| s["status"]["session_id"].as_str().is_some_and(|x| x != sid)).await;

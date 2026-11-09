@@ -3479,7 +3479,7 @@ fn desk_view(s: &crate::desk_pet::State) -> Value {
         let k = k(s.owner);
         json!({ "x": a.x + (x + w / 2.0) * k, "y": a.y + (y + h / 2.0) * k })
     });
-    json!({ "running": crate::desk_pet::running(), "focus": s.focus, "owner": s.owner, "entry": s.entry, "screens": edges, "peer": peer, "chat": s.chat, "note": s.note, "open": s.open, "pos": me, "seq": s.seq })
+    json!({ "running": crate::desk_pet::running(), "focus": s.focus, "owner": s.owner, "entry": s.entry, "screens": edges, "peer": peer, "chat": s.chat, "note": s.note, "open": s.open, "pos": me, "hot": s.hot, "grabKey": crate::desk_pet::grab_key(), "seq": s.seq })
 }
 
 #[derive(Deserialize)]
@@ -3517,6 +3517,10 @@ struct DeskPetQ {
     hit: Option<Option<[f64; 4]>>,
     focus: Option<String>,
     grab: Option<bool>,
+    /// 头上的气泡能点
+    tap: Option<bool>,
+    /// 桌面宠物右键菜单：打开宠物设置（主窗口会被叫出来）
+    settings: Option<bool>,
     /// 宠物走出 / 被拖出了它所在的屏幕
     exit: Option<DeskExit>,
     /// 网页里的宠物报到（同一台电脑上、页面在前台）
@@ -3556,6 +3560,13 @@ async fn desk_pet_put(Extension(access): Extension<Access>, Json(q): Json<DeskPe
         if let Some(g) = q.grab {
             s.grab = g;
         }
+        if let Some(t) = q.tap {
+            s.tap = t;
+        }
+        if q.settings == Some(true) {
+            let seq = s.open.as_ref().map_or(0, |x| x.seq) + 1;
+            s.open = Some(crate::desk_pet::Note { kind: "settings".into(), seq, at: crate::util::system_ms(), ..Default::default() });
+        }
         if let Some(e) = q.exit.filter(|e| e.screen == s.owner && e.x.is_finite() && e.y.is_finite()) {
             let seq = s.entry.as_ref().map_or(0, |x| x.seq) + 1;
             match crate::desk_pet::handoff(&s.screens, e.screen, e.x, e.y, e.side.as_deref()) {
@@ -3592,7 +3603,7 @@ async fn desk_pet_put(Extension(access): Extension<Access>, Json(q): Json<DeskPe
             s.open = Some(crate::desk_pet::Note { id: id.clone(), seq, at: crate::util::system_ms(), ..Default::default() });
         }
     });
-    if q.open.is_some() {
+    if q.open.is_some() || q.settings == Some(true) {
         crate::desk_pet::opened();
     }
     let mut v = desk_view(&s);

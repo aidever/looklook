@@ -2,9 +2,13 @@
 // 宠物只在一个窗口里（`owner`），可以拖到屏幕任何地方；走过屏幕边、拖到别的屏幕上松手就换到那块屏幕的窗口。
 // 跟着主窗口正在看的对话（`/api/desktop/pet` 的 focus）。宠物占的框报给桌面那边，框外的鼠标穿透到下面的窗口。
 // 同一台电脑上开着网页、网页里也有宠物（在前台）时，两只会互相打招呼、聊两句（见 ChatPet.jsx 的 usePeer）。
+// 不影响干活：点、拖宠物不抢焦点（桌面那边把窗口设成不能获得焦点）；可以半透明（鼠标放上去变实，桌面那边报 `hot`）、
+// 可以“不挡操作”（鼠标直接穿过，按住 Ctrl / ⌥ 才能抓）。右键宠物就地调这些。
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { api } from '../shared/api.js';
 import { LivePet, PETS_CHANGED, useInstancePet, usePeerChat, usePetsLive } from '../shared/ChatPet.jsx';
+import { Seg } from '../shared/ui.jsx';
 import { useChat } from './ChatView.jsx';
 
 const enc = encodeURIComponent;
@@ -89,11 +93,16 @@ function DefaultPet({ st }) {
 
 function Desk({ pet, cfg, status, items, fileUrl, st }) {
   const player = useRef(null);
+  // 右键菜单开着：整个窗口接鼠标（点菜单外面关掉它）
+  const [menu, setMenu] = useState(null);
+  const menuOpen = useRef(false);
+  menuOpen.current = Boolean(menu);
   // 框变了报给桌面那边；拖着的时候每帧都变，最多 80 ms 报一次
-  const q = useRef({ t: 0, timer: 0, last: null });
-  const onHit = (hit, grab) => {
+  const q = useRef({ t: 0, timer: 0, last: null, raw: null });
+  const onHit = (hit, grab, tap = false) => {
     const s = q.current;
-    s.last = { hit, grab };
+    s.raw = { hit, grab, tap };
+    s.last = { hit, grab: grab || menuOpen.current, tap };
     if (s.timer) return;
     const send = () => {
       s.timer = 0;
@@ -133,8 +142,15 @@ function Desk({ pet, cfg, status, items, fileUrl, st }) {
     const id = setTimeout(() => player.current?.say(key, { name: n.title || '' }, { force: true, state, onClick: () => api.put('/desktop/pet', { open: n.id }).catch(() => {}) }), 300);
     return () => clearTimeout(id);
   }, [st.note?.seq]);
+  // 菜单开、关：重新报一次（grab 跟着变）
+  useEffect(() => {
+    const r = q.current.raw;
+    if (r) onHit(r.hit, r.grab, r.tap);
+  }, [Boolean(menu)]);
   const edges = st.screens?.[SCREEN];
+  const opacity = Number(cfg.opacity) > 0 && Number(cfg.opacity) < 1 ? Number(cfg.opacity) : 1;
   return (
+    <>
     <LivePet
       key={pet.key}
       pet={pet}
@@ -151,6 +167,79 @@ function Desk({ pet, cfg, status, items, fileUrl, st }) {
       pad={0}
       edges={edges ? { left: Boolean(edges.left), right: Boolean(edges.right) } : undefined}
       onExit={edges?.left || edges?.right ? onExit : undefined}
+      onMenu={setMenu}
+      alpha={st.hot || menu ? 1 : opacity}
     />
+    {menu && <PetMenu at={menu} cfg={cfg} grabKey={st.grabKey} player={player} onClose={() => setMenu(null)} />}
+    </>
+  );
+}
+
+/** 改一项宠物设置（和设置页存的是同一份；存完宠物窗口、设置页都会跟着变） */
+async function patchSettings(patch) {
+  const s = await api.get('/pets/settings');
+  await api.put('/pets/settings', { ...s, ...patch });
+}
+
+const ALPHAS = [1, 0.7, 0.5, 0.3];
+const SIZES = [0.75, 1, 1.25, 1.5];
+
+/** 右键宠物的菜单：透明度、不挡操作、大小、睡觉、宠物设置、收回对话页 */
+function PetMenu({ at, cfg, grabKey, player, onClose }) {
+  const { t } = useTranslation();
+  const box = useRef(null);
+  const [pos, setPos] = useState({ left: at.x, top: at.y, visibility: 'hidden' });
+  // 改了马上显示（存完、配置重新取回来之前）
+  const [local, setLocal] = useState({});
+  const v = { opacity: Number(cfg.opacity) || 1, through: Boolean(cfg.through), size: Number(cfg.size) || 1, ...local };
+  useEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const left = Math.max(8, Math.min(at.x, window.innerWidth - r.width - 8));
+    const top = at.y + r.height + 8 > window.innerHeight ? Math.max(8, at.y - r.height) : at.y;
+    setPos({ left, top });
+  }, [at.x, at.y]);
+  const set = (k, val) => {
+    setLocal((x) => ({ ...x, [k]: val }));
+    patchSettings({ [k]: val }).catch(() => {});
+  };
+  const act = (f) => () => {
+    onClose();
+    f();
+  };
+  const sleeping = player.current?.sleeping?.() ?? false;
+  const near = (x, list) => list.reduce((a, b) => (Math.abs(b - x) < Math.abs(a - x) ? b : a));
+  const keyName = grabKey === 'ctrl' ? 'Ctrl' : grabKey === 'option' ? '⌥ Option' : null;
+  return (
+    <div className="pet-menu-backdrop" onPointerDown={(e) => e.target === e.currentTarget && onClose()} onContextMenu={(e) => e.preventDefault()}>
+      <div className="pet-menu" ref={box} style={pos} role="menu" aria-label={t('pet.menu')}>
+        <div className="pet-menu-row">
+          <span>{t('pet.alpha')}</span>
+          <Seg value={near(v.opacity, ALPHAS)} label={t('pet.alpha')} onChange={(x) => set('opacity', x)} options={ALPHAS.map((n) => [n, n === 1 ? t('pet.alpha_off') : `${Math.round((1 - n) * 100)}%`])} />
+        </div>
+        <div className="pet-menu-row">
+          <span>{t('pet.size')}</span>
+          <Seg value={near(v.size, SIZES)} label={t('pet.size')} onChange={(x) => set('size', x)} options={SIZES.map((n) => [n, `${Math.round(n * 100)}%`])} />
+        </div>
+        <button type="button" role="menuitemcheckbox" aria-checked={v.through} className="pet-menu-item pet-menu-check" onClick={() => set('through', !v.through)}>
+          <span className="pet-menu-box" aria-hidden="true">{v.through ? '✓' : ''}</span>
+          <span>
+            {t('pet.through')}
+            <small>{keyName ? t('pet.through_key', { key: keyName }) : t('pet.through_tray')}</small>
+          </span>
+        </button>
+        <hr />
+        <button type="button" role="menuitem" className="pet-menu-item" onClick={act(() => player.current?.toggleSleep?.())}>
+          {sleeping ? t('pet.wake') : t('pet.sleep')}
+        </button>
+        <button type="button" role="menuitem" className="pet-menu-item" onClick={act(() => api.put('/desktop/pet', { settings: true }).catch(() => {}))}>
+          {t('pet.open_settings')}
+        </button>
+        <button type="button" role="menuitem" className="pet-menu-item" onClick={act(() => patchSettings({ desktop: false }).catch(() => {}))}>
+          {t('pet.to_page')}
+        </button>
+      </div>
+    </div>
   );
 }

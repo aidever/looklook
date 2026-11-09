@@ -4,7 +4,9 @@
 //! - 宠物窗口的页面（`/pet-desk`）每次宠物动了报一下它在窗口里占的框（`hit`），桌面这边按鼠标在不在框里
 //!   切换“鼠标穿透”——框外的点击落到下面的窗口上；
 //! - 主窗口的对话页报“正在看哪个对话”（`focus`），宠物窗口跟着它；
-//! - 设置里开关桌面宠物（`wanted`），桌面这边按它开、关窗口。
+//! - 设置里开关桌面宠物（`wanted`），桌面这边按它开、关窗口；
+//! - 不挡操作（`through`）：鼠标一直穿过宠物，按住 Ctrl（Windows）/ ⌥（macOS）才接；桌面这边算出“鼠标在宠物身上”（`hot`）告诉页面，
+//!   页面据此把半透明的宠物变实（不靠网页自己的 hover：宠物窗口不能获得焦点，macOS 上非焦点窗口收不到鼠标移动）。
 //!
 //! 命令行版（Linux、没开桌面应用）这些状态照样有，只是没人用。
 
@@ -20,8 +22,12 @@ pub struct State {
     pub hit: Option<[f64; 4]>,
     /// 主窗口正在看的对话（实例 id）
     pub focus: Option<String>,
-    /// 宠物正被拖着：鼠标移出框也不能穿透
+    /// 宠物正被拖着（或开着右键菜单）：鼠标移出框也不能穿透
     pub grab: bool,
+    /// 头上有能点的提醒气泡：不挡操作时也让它能点
+    pub tap: bool,
+    /// 鼠标在宠物身上（不挡操作时还要按着抓宠物的键，见 [`grab_key`]）、或正拖着：页面把它显示成不透明
+    pub hot: bool,
     /// 每块屏幕一个宠物窗口，宠物在哪块（`screens` 的下标）
     pub owner: usize,
     /// 刚换到这块屏幕时放在哪：[x, 离底边 y]（CSS 像素）和往哪边走进来；换一次 `seq` + 1
@@ -137,7 +143,7 @@ pub fn update(f: impl FnOnce(&mut State)) -> State {
     let mut g = STATE.lock().unwrap_or_else(|e| e.into_inner());
     let s = g.get_or_insert_with(State::default);
     // 框、拖着没有一直在变（走动、拖拽时每帧都报）：不算“变了”，不叫醒等着的窗口
-    let quiet = |x: &State| State { hit: None, grab: false, peer: x.peer.as_ref().map(|p| Peer { at: 0, ..p.clone() }), ..x.clone() };
+    let quiet = |x: &State| State { hit: None, grab: false, tap: false, peer: x.peer.as_ref().map(|p| Peer { at: 0, ..p.clone() }), ..x.clone() };
     let before = quiet(s);
     f(s);
     if quiet(s) != before {
@@ -176,6 +182,103 @@ pub fn set_wanted(on: bool) {
 #[allow(dead_code)]
 pub fn wanted() -> watch::Receiver<bool> {
     sender().subscribe()
+}
+
+static THROUGH: std::sync::OnceLock<watch::Sender<bool>> = std::sync::OnceLock::new();
+
+fn through_tx() -> &'static watch::Sender<bool> {
+    THROUGH.get_or_init(|| watch::channel(false).0)
+}
+
+/// 设置里的“不挡操作”（启动时、改设置时调）
+pub fn set_through(on: bool) {
+    through_tx().send_replace(on);
+}
+
+#[allow(dead_code)]
+pub fn through() -> watch::Receiver<bool> {
+    through_tx().subscribe()
+}
+
+/// 托盘菜单上点的开关：交给有数据库的那边改设置（桌面这边拿不到 Store）
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub enum Toggle {
+    /// 桌面宠物开 / 关（开的时候宠物本身没开也一起开）
+    Desktop(bool),
+    Through(bool),
+}
+
+static TOGGLES: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Toggle>>> = Mutex::new(None);
+
+#[allow(dead_code)]
+pub fn toggle(t: Toggle) {
+    if let Some(tx) = TOGGLES.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        let _ = tx.send(t);
+    }
+}
+
+/// 收托盘菜单的开关、写进宠物设置（和设置页改的一样，页面会跟着变）
+pub async fn apply_toggles(store: std::sync::Arc<crate::store::Store>) {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    *TOGGLES.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
+    while let Some(t) = rx.recv().await {
+        let mut s = crate::pets::PetSettings::load(&store);
+        match t {
+            Toggle::Desktop(on) => {
+                s.desktop = on;
+                if on {
+                    s.enabled = true;
+                }
+            }
+            Toggle::Through(on) => s.through = on,
+        }
+        if let Err(e) = s.save(&store) {
+            tracing::warn!(error = ?e, "改宠物设置失败");
+        }
+    }
+}
+
+/// 不挡操作时按什么键抓宠物：`ctrl`（Windows：单按 Alt 松开会弹出前台程序的菜单栏）/ `option`（macOS：⌃ 点击是右键）；
+/// Linux 读不到按键，None
+pub fn grab_key() -> Option<&'static str> {
+    if cfg!(windows) {
+        Some("ctrl")
+    } else if cfg!(target_os = "macos") {
+        Some("option")
+    } else {
+        None
+    }
+}
+
+/// 现在 Ctrl（Windows）/ ⌥（macOS）按着没有（不用宠物窗口有焦点）
+#[allow(dead_code)]
+pub fn grab_key_down() -> bool {
+    #[cfg(windows)]
+    {
+        #[link(name = "user32")]
+        extern "system" {
+            fn GetAsyncKeyState(key: i32) -> i16;
+        }
+        const VK_CONTROL: i32 = 0x11;
+        // SAFETY: 只读全局按键状态
+        unsafe { (GetAsyncKeyState(VK_CONTROL) as u16 & 0x8000) != 0 }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        #[link(name = "CoreGraphics", kind = "framework")]
+        extern "C" {
+            fn CGEventSourceFlagsState(state: i32) -> u64;
+        }
+        const COMBINED_SESSION: i32 = 0;
+        const ALTERNATE: u64 = 0x0008_0000;
+        // SAFETY: 只读当前修饰键状态，不需要辅助功能权限
+        unsafe { CGEventSourceFlagsState(COMBINED_SESSION) & ALTERNATE != 0 }
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        false
+    }
 }
 
 static OPEN: std::sync::OnceLock<watch::Sender<u64>> = std::sync::OnceLock::new();

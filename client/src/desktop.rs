@@ -291,9 +291,13 @@ fn pet_windows_open(app: &AppHandle, url: Url) -> tauri::Result<()> {
             .visible_on_all_workspaces(true)
             .skip_taskbar(true)
             .focused(false)
+            // 点、拖宠物不抢焦点：Windows 上是 WS_EX_NOACTIVATE，Linux 上不接受焦点；macOS 还要改成不激活的面板（见 pet_panel）
+            .focusable(false)
             .accept_first_mouse(true)
             .visible(false)
             .build()?;
+        #[cfg(target_os = "macos")]
+        pet_panel(&w);
         // 铺满这块屏幕的工作区（不盖任务栏 / 程序坞）
         let a = m.work_area();
         w.set_position(a.position)?;
@@ -304,29 +308,88 @@ fn pet_windows_open(app: &AppHandle, url: Url) -> tauri::Result<()> {
     Ok(())
 }
 
-/// 每 40 ms 看一次鼠标在不在宠物身上：在就让宠物所在的窗口接鼠标，不在就穿透到下面的窗口；别的屏幕上的宠物窗口一直穿透
+/// macOS：点普通窗口会把整个应用激活（主窗口也跟着跑到前面），只有带 NonactivatingPanel 的 NSPanel 不会。
+/// 把宠物窗口的类换成 NSPanel 的子类（不能成为焦点 / 主窗口），再加上这个样式（tauri-nspanel 也是这么做的）。
+#[cfg(target_os = "macos")]
+fn pet_panel(w: &tauri::WebviewWindow) {
+    use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
+    use objc2::{msg_send, sel};
+    struct Cls(&'static AnyClass);
+    // SAFETY: 类对象注册后不变，可以跨线程共享
+    unsafe impl Send for Cls {}
+    unsafe impl Sync for Cls {}
+    static CLS: std::sync::OnceLock<Option<Cls>> = std::sync::OnceLock::new();
+    extern "C-unwind" fn no(_: &AnyObject, _: Sel) -> Bool {
+        Bool::NO
+    }
+    let cls = CLS.get_or_init(|| {
+        let mut b = ClassBuilder::new(c"LooklookPetPanel", AnyClass::get(c"NSPanel")?)?;
+        // SAFETY: 签名和 NSWindow 的 canBecomeKeyWindow / canBecomeMainWindow 一致（无参数，返回 BOOL）
+        unsafe {
+            b.add_method(sel!(canBecomeKeyWindow), no as extern "C-unwind" fn(_, _) -> _);
+            b.add_method(sel!(canBecomeMainWindow), no as extern "C-unwind" fn(_, _) -> _);
+        }
+        Some(Cls(b.register()))
+    });
+    let (Some(Cls(cls)), Ok(ptr)) = (cls, w.ns_window()) else {
+        tracing::warn!("桌面宠物窗口没能改成面板，点它会激活看看");
+        return;
+    };
+    let obj = ptr.cast::<AnyObject>();
+    const NONACTIVATING_PANEL: usize = 1 << 7;
+    // SAFETY: obj 是活着的 NSWindow（在主线程上），NSPanel 是 NSWindow 的子类、没有多出来的实例变量
+    unsafe {
+        objc2::ffi::object_setClass(obj, *cls);
+        let mask: usize = msg_send![obj, styleMask];
+        let _: () = msg_send![obj, setStyleMask: mask | NONACTIVATING_PANEL];
+        // 面板默认在应用失去激活时藏起来；宠物要一直在
+        let _: () = msg_send![obj, setHidesOnDeactivate: false];
+        let _: () = msg_send![obj, setBecomesKeyOnlyIfNeeded: true];
+        // 窗口建好以后再改成 NonactivatingPanel，有的系统版本上窗口服务器那边没跟着变（点了照样激活应用）：私有接口补一下
+        let sel = sel!(_setPreventsActivation:);
+        let can: bool = msg_send![obj, respondsToSelector: sel];
+        if can {
+            let _: () = msg_send![obj, _setPreventsActivation: true];
+        }
+    }
+}
+
+/// 每 40 ms 看一次鼠标在不在宠物身上：在就让宠物所在的窗口接鼠标，不在就穿透到下面的窗口；别的屏幕上的宠物窗口一直穿透。
+/// 开了“不挡操作”：只有按着抓宠物的键（`desk_pet::grab_key`）、或头上有能点的提醒气泡时才接。
+/// 鼠标在宠物身上（能抓）就告诉页面（`hot`），半透明的宠物变实
 async fn pet_hover(app: AppHandle, stop: CancellationToken) {
-    let mut through: std::collections::HashMap<usize, bool> = std::collections::HashMap::new();
+    let through = crate::desk_pet::through();
+    let mut ignore: std::collections::HashMap<usize, bool> = std::collections::HashMap::new();
     loop {
         tokio::select! {
             _ = stop.cancelled() => return,
             _ = tokio::time::sleep(Duration::from_millis(40)) => {}
         }
         let st = crate::desk_pet::get();
+        let thru = *through.borrow();
+        let key = thru && crate::desk_pet::grab_key_down();
+        let mut hot = false;
         for (i, w) in pet_windows(&app) {
-            let inside = i == st.owner
-                && (st.grab
-                    || match (st.hit, app.cursor_position(), w.outer_position(), w.scale_factor()) {
-                        (Some([x, y, wd, ht]), Ok(c), Ok(o), Ok(k)) if k > 0.0 => {
-                            let (cx, cy) = ((c.x - o.x as f64) / k, (c.y - o.y as f64) / k);
-                            cx >= x && cx <= x + wd && cy >= y && cy <= y + ht
-                        }
-                        _ => false,
-                    });
-            if through.get(&i).copied() != Some(!inside) {
-                through.insert(i, !inside);
+            let on_pet = i == st.owner
+                && match (st.hit, app.cursor_position(), w.outer_position(), w.scale_factor()) {
+                    (Some([x, y, wd, ht]), Ok(c), Ok(o), Ok(k)) if k > 0.0 => {
+                        let (cx, cy) = ((c.x - o.x as f64) / k, (c.y - o.y as f64) / k);
+                        cx >= x && cx <= x + wd && cy >= y && cy <= y + ht
+                    }
+                    _ => false,
+                };
+            let grabbable = on_pet && (!thru || key);
+            let inside = i == st.owner && (st.grab || grabbable || (on_pet && st.tap));
+            if i == st.owner {
+                hot = st.grab || grabbable;
+            }
+            if ignore.get(&i).copied() != Some(!inside) {
+                ignore.insert(i, !inside);
                 let _ = w.set_ignore_cursor_events(!inside);
             }
+        }
+        if hot != st.hot {
+            crate::desk_pet::update(|s| s.hot = hot);
         }
     }
 }
@@ -449,6 +512,9 @@ struct Items {
     start: MenuItem<Wry>,
     stop: MenuItem<Wry>,
     auto: CheckMenuItem<Wry>,
+    /// 桌面宠物开关、不挡操作（和宠物设置同步）：宠物不挡操作又抓不到时（Linux 上没有抓宠物的键）从这里关
+    pet: CheckMenuItem<Wry>,
+    pet_through: CheckMenuItem<Wry>,
 }
 
 fn tray(app: &AppHandle) -> tauri::Result<Items> {
@@ -456,10 +522,14 @@ fn tray(app: &AppHandle) -> tauri::Result<Items> {
     let start = MenuItem::with_id(app, "start", tr("启动服务", "Start service"), false, None::<&str>)?;
     let stop = MenuItem::with_id(app, "stop", tr("停止服务", "Stop service"), true, None::<&str>)?;
     let auto = CheckMenuItem::with_id(app, "autostart", tr("开机启动", "Launch at startup"), true, autostart::is_enabled(), None::<&str>)?;
+    let pet = CheckMenuItem::with_id(app, "pet", tr("桌面宠物", "Desktop pet"), true, *crate::desk_pet::wanted().borrow(), None::<&str>)?;
+    let pet_through =
+        CheckMenuItem::with_id(app, "pet_through", tr("宠物不挡操作", "Pet stays out of the way"), true, *crate::desk_pet::through().borrow(), None::<&str>)?;
     let exit = MenuItem::with_id(app, "exit", tr("退出", "Exit"), true, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&open, &start, &stop, &sep1, &auto, &sep2, &exit])?;
+    let sep3 = PredefinedMenuItem::separator(app)?;
+    let menu = Menu::with_items(app, &[&open, &start, &stop, &sep1, &pet, &pet_through, &sep2, &auto, &sep3, &exit])?;
     let mut tray = TrayIconBuilder::with_id("main").menu(&menu).tooltip(tr("看看客户端", "Looklook client"));
     if let Some(icon) = app.default_window_icon() {
         tray = tray.icon(icon.clone());
@@ -474,7 +544,29 @@ fn tray(app: &AppHandle) -> tauri::Result<Items> {
         });
     }
     tray.build(app)?;
-    Ok(Items { start, stop, auto })
+    tauri::async_runtime::spawn(pet_menu_sync(pet.clone(), pet_through.clone()));
+    Ok(Items { start, stop, auto, pet, pet_through })
+}
+
+/// 设置页里改了桌面宠物、不挡操作：托盘菜单的勾跟着变
+async fn pet_menu_sync(pet: CheckMenuItem<Wry>, through: CheckMenuItem<Wry>) {
+    let (mut a, mut b) = (crate::desk_pet::wanted(), crate::desk_pet::through());
+    loop {
+        let _ = pet.set_checked(*a.borrow_and_update());
+        let _ = through.set_checked(*b.borrow_and_update());
+        tokio::select! {
+            r = a.changed() => {
+                if r.is_err() {
+                    return;
+                }
+            }
+            r = b.changed() => {
+                if r.is_err() {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 fn on_menu(app: &AppHandle, event: MenuEvent) {
@@ -501,6 +593,8 @@ fn on_menu(app: &AppHandle, event: MenuEvent) {
                 let _ = item.set_checked(!on);
             }
         }
+        "pet" => crate::desk_pet::toggle(crate::desk_pet::Toggle::Desktop(app.state::<Items>().pet.is_checked().unwrap_or(false))),
+        "pet_through" => crate::desk_pet::toggle(crate::desk_pet::Toggle::Through(app.state::<Items>().pet_through.is_checked().unwrap_or(false))),
         "exit" | "quit" => app.exit(0),
         id => page_command(app, id),
     }

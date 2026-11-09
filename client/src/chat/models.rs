@@ -137,6 +137,26 @@ fn catalog(ctx: &Ctx, state: &Value) -> Option<Value> {
     best.map(|(_, _, v)| v["catalog"].clone())
 }
 
+/// Claude Code 缓存的公开模型目录（`cache/model-catalog/published-*.json`，不用登录也会取）里的模型，取最新的一份
+fn published_models(ctx: &Ctx) -> Option<Value> {
+    let dir = ctx.config_dir.join("cache").join("model-catalog");
+    let mut best: Option<(i64, Value)> = None;
+    for e in std::fs::read_dir(dir).ok()?.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !name.starts_with("published-") || name == "published-floor.json" || !name.ends_with(".json") {
+            continue;
+        }
+        let Some(v) = read_json(&e.path()) else { continue };
+        let cfg = &v["document"]["surfaces"]["cc"]["model_selector_config"];
+        let Some(models) = cfg.as_array().and_then(|a| a.iter().find(|c| c["id"] == "cc").or(a.first())).map(|c| c["models"].clone()).filter(Value::is_array) else { continue };
+        let at = v["fetchedAt"].as_i64().unwrap_or(0);
+        if best.as_ref().is_none_or(|(t, _)| at > *t) {
+            best = Some((at, models));
+        }
+    }
+    best.map(|(_, m)| m)
+}
+
 fn efforts_of(m: &Value) -> Vec<String> {
     let opts = m["thinking"]["effort_options"].as_array().map(|a| a.iter().filter_map(|o| o["id"].as_str().map(String::from)).collect::<Vec<_>>()).unwrap_or_default();
     if opts.is_empty() {
@@ -263,7 +283,8 @@ pub fn options(ctx: &Ctx) -> Vec<Opt> {
 }
 
 /// 上下文窗口：settings 里给这个模型设的自动压缩窗口（`modelSettings.<id>.autoCompactWindow`），
-/// 否则目录里这个模型的输入上限，都没有时按 20 万算。
+/// 否则 `CLAUDE_CODE_MAX_CONTEXT_TOKENS`，否则目录（账号的，没有就公开的）里这个模型的输入上限，都没有时按 20 万算。
+/// 对话模式下优先用 Claude Code 自己在 `result` 里报的（见 `SdkSt::windows`）。
 pub fn context_window(ctx: &Ctx, model: &str) -> u64 {
     let base = base_id(model);
     for s in settings(ctx).iter().rev() {
@@ -271,10 +292,15 @@ pub fn context_window(ctx: &Ctx, model: &str) -> u64 {
             return w;
         }
     }
+    // 用户自己指定的窗口（不认识的模型、第三方接口常这么设）
+    let set = ctx.var("CLAUDE_CODE_MAX_CONTEXT_TOKENS").or_else(|| settings(ctx).iter().rev().find_map(|s| s["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"].as_str().map(String::from)));
+    if let Some(w) = set.and_then(|v| v.trim().parse::<u64>().ok()).filter(|&w| w > 0) {
+        return w;
+    }
     let state = read_json(&ctx.state_file).unwrap_or(Value::Null);
-    let from_catalog = catalog(ctx, &state).and_then(|c| {
-        c["config"]["models"].as_array()?.iter().find(|m| m["id"].as_str().is_some_and(|id| base_id(id) == base)).and_then(|m| m["runtime"]["max_input_tokens"].as_u64())
-    });
+    let find = |models: &Value| models.as_array()?.iter().find(|m| m["id"].as_str().is_some_and(|id| base_id(id) == base)).and_then(|m| m["runtime"]["max_input_tokens"].as_u64());
+    // 账号的模型目录；没有（第三方接口不登录账号）时用 Claude Code 缓存的公开目录
+    let from_catalog = catalog(ctx, &state).and_then(|c| find(&c["config"]["models"])).or_else(|| published_models(ctx).and_then(|m| find(&m)));
     if model.contains("[1m]") {
         return from_catalog.unwrap_or(1_000_000).max(1_000_000);
     }
@@ -662,6 +688,22 @@ mod tests {
         assert_eq!(vals, ["default", "opus", "sonnet", "haiku", "fable"]);
         let p = provider_options(&o, &["glm-4.6".into(), "bad id".into(), "kimi-k2".into()]);
         assert_eq!(p.iter().map(|x| x.value.as_str()).collect::<Vec<_>>(), ["glm-4.6", "kimi-k2"]);
+    }
+
+    #[test]
+    fn window_without_account_catalog() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join(".claude");
+        let mut ctx = Ctx { config_dir: cfg.clone(), state_file: tmp.path().join(".claude.json"), workdir: tmp.path(), env: HashMap::new() };
+        assert_eq!(context_window(&ctx, "claude-opus-5-5"), 200_000);
+        // 第三方接口：没有账号的目录，用公开目录
+        let models = json!([{ "id": "claude-opus-5-5", "runtime": { "max_input_tokens": 1_000_000 } }]);
+        write(&cfg.join("cache/model-catalog/published-abc.json"), &json!({ "fetchedAt": 1, "document": { "surfaces": { "cc": { "model_selector_config": [{ "id": "cc", "models": models }] } } } }));
+        write(&cfg.join("cache/model-catalog/published-floor.json"), &json!({ "version": 1 }));
+        assert_eq!(context_window(&ctx, "claude-opus-5-5-20261001"), 1_000_000);
+        assert_eq!(context_window(&ctx, "glm-4.6"), 200_000);
+        ctx.env.insert("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), "128000".into());
+        assert_eq!(context_window(&ctx, "glm-4.6"), 128_000);
     }
 
     #[test]

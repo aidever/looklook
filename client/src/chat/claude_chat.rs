@@ -23,7 +23,7 @@ use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
 
 use super::claude_sdk::{self, Incoming, Proc};
-use super::{board, lock, Chat, Event, Inst, Pending, Phase, PermissionAnswer};
+use super::{board, lock, models, Chat, Event, Inst, Pending, Phase, PermissionAnswer};
 use crate::error::LocalError;
 
 /// 正在输出时最多每隔这么久推一次状态
@@ -43,6 +43,8 @@ const QUICK_EXIT: Duration = Duration::from_secs(15);
 const LIMIT_SLACK_MS: i64 = 60_000;
 /// 不知道什么时候重置：过这么久试一次（还没重置会再失败，按新的失败再等）
 const LIMIT_RETRY_MS: i64 = 30 * 60_000;
+/// 等重置时隔这么久看一次用量：没到点但额度已经回来了（比如等着 5 小时窗口，周额度提前刷新了；官方提前重置）就提前继续
+const LIMIT_POLL_MS: i64 = 10 * 60_000;
 
 #[derive(Default)]
 pub struct Hub {
@@ -84,6 +86,12 @@ pub struct SdkSt {
     pub(super) limit_resume: Option<i64>,
     /// 到点了、正在发 continue
     limit_firing: bool,
+    /// 等重置期间下次看用量的时间（毫秒）；None 不看。`limit_since` 之前取的用量不算数（那时还没用完）
+    limit_poll: Option<i64>,
+    limit_since: i64,
+    limit_checking: bool,
+    /// 这次 continue 是看用量提前发的：要是马上又撞上限额（用量里看不出来的限额，比如单个模型的周额度），这一轮就只等到点
+    limit_early: bool,
     /// Stop hook 的 `session_crons` 不是空的：这段对话里有定时任务（/loop、CronCreate、ScheduleWakeup），
     /// 都在 claude 进程里，进程结束就没了，所以不能当空闲结束
     pub(super) crons: bool,
@@ -93,6 +101,9 @@ pub struct SdkSt {
     fast_on: bool,
     /// 最近一次 init 的 `ultrathink_typed_raises`：用户手打了 ultrathink 时要在消息上说明（见 [`Chat::sdk_input`]）
     ultrathink: bool,
+    /// 最近一轮 `result` 的 `modelUsage` 里 Claude Code 自己认的各模型上下文窗口（模型 → token 数）：
+    /// 第三方接口没有账号的模型目录，看看自己推算不出来，以它为准
+    pub(super) windows: HashMap<String, u64>,
 }
 
 /// 用户登录 shell 里的这些变量不带给 claude：这个 shell 自己的（目录、层数、终端）、看看的终端标识、
@@ -464,6 +475,11 @@ impl Chat {
                     st.sdk.fast_on = matches!(f, "on" | "cooldown");
                 }
                 st.compacting = None;
+                for (m, u) in v["modelUsage"].as_object().into_iter().flatten() {
+                    if let Some(w) = u["contextWindow"].as_u64().filter(|&w| w > 0) {
+                        st.sdk.windows.insert(models::base_id(m), w);
+                    }
+                }
                 if v["is_error"] == true && v["subtype"] != "error_during_execution" {
                     let msg = v["result"].as_str().map(String::from).or_else(|| v["errors"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n")));
                     // StopFailure 先到，已经记下了是哪种错（billing_error、authentication_failed……）：保留它，
@@ -483,6 +499,7 @@ impl Chat {
                 }
                 // `claude -p` 不像 TUI 那样自己起名（transcript 里没有 ai-title）：看看照着做
                 if st.error.is_none() {
+                    st.sdk.limit_early = false;
                     st.sdk.title_turns += 1;
                     let due = st.sdk.title_at.is_none_or(|t| st.sdk.title_turns >= TITLE_TURNS && t.elapsed() >= TITLE_GAP);
                     if due && !st.sdk.titling {
@@ -890,6 +907,9 @@ impl Chat {
             return;
         }
         tracing::info!(id = %inst.id, at, "额度用完了，等重置后自动继续");
+        let poll = !std::mem::take(&mut st.sdk.limit_early);
+        st.sdk.limit_since = now;
+        st.sdk.limit_poll = poll.then_some(now + LIMIT_POLL_MS);
         self.limit_set(&inst, &mut st, Some(at));
     }
 
@@ -913,7 +933,16 @@ impl Chat {
     pub(super) fn sdk_limit_tick(self: &Arc<Self>, inst: &Arc<Inst>) {
         let mut st = lock(&inst.st);
         let Some(at) = st.sdk.limit_resume else { return };
-        if st.sdk.limit_firing || crate::util::system_ms() < at {
+        let now = crate::util::system_ms();
+        if st.sdk.limit_firing {
+            return;
+        }
+        if now < at {
+            if st.sdk.limit_poll.is_some_and(|p| now >= p) && !st.sdk.limit_checking && matches!(st.phase, Phase::Idle | Phase::Detached) {
+                st.sdk.limit_checking = true;
+                drop(st);
+                tokio::spawn(self.clone().sdk_limit_check(inst.clone()));
+            }
             return;
         }
         if !matches!(st.phase, Phase::Idle | Phase::Detached) {
@@ -935,6 +964,24 @@ impl Chat {
         });
     }
 
+    /// 等重置期间看一眼用量：用完的窗口都回来了就把自动继续提前到现在（下一次 [`Chat::sdk_limit_tick`] 发）。
+    /// 用量是 Claude Code 自己的缓存，旧了会在后台去取，这次看不到下次（[`LIMIT_POLL_MS`] 后）就看到了
+    async fn sdk_limit_check(self: Arc<Self>, inst: Arc<Inst>) {
+        let u = self.usage(&inst.id).await.ok();
+        let now = crate::util::system_ms();
+        let mut st = lock(&inst.st);
+        st.sdk.limit_checking = false;
+        if st.sdk.limit_resume.is_none_or(|at| at <= now) || st.sdk.limit_poll.is_none() {
+            return;
+        }
+        st.sdk.limit_poll = Some(now + LIMIT_POLL_MS);
+        if u.as_ref().is_some_and(|u| limit_back(u, st.sdk.limit_since)) {
+            tracing::info!(id = %inst.id, "还没到重置时间，但用量里额度已经回来了，提前自动继续");
+            st.sdk.limit_early = true;
+            self.limit_set(&inst, &mut st, Some(now));
+        }
+    }
+
     /// 客户端启动时：重启前在等额度重置的会话接着等
     pub(super) fn sdk_limit_restore(&self) {
         for r in self.store.instances().unwrap_or_default() {
@@ -947,6 +994,9 @@ impl Chat {
             let inst = self.inst(&r.id);
             let mut st = lock(&inst.st);
             st.sdk.limit_resume = Some(at);
+            let now = crate::util::system_ms();
+            st.sdk.limit_since = now;
+            st.sdk.limit_poll = Some(now + LIMIT_POLL_MS);
             st.error = Some("rate_limit".into());
             Self::guard_turn(&mut st);
         }
@@ -1106,6 +1156,17 @@ fn limit_reset_in(u: &Value) -> Option<i64> {
     ["five_hour", "seven_day"].iter().map(|k| &l[*k]).filter(|w| w["used"].as_f64().is_some_and(|x| x >= 100.0)).filter_map(at).max()
 }
 
+/// 用量（[`Chat::usage`]）说额度已经回来了：`since`（毫秒）之后取的，有 5 小时或 7 天的数，而且没有一个用满。
+/// 过了重置时间的窗口在用量里是 null（[`models::limits`]），也算回来了
+fn limit_back(u: &Value, since: i64) -> bool {
+    let l = &u["limits"];
+    let fresh = l["fetched_at"].as_i64().is_none_or(|t| t >= since);
+    let wins = [&l["five_hour"], &l["seven_day"]];
+    let known = wins.iter().any(|w| w["used"].is_number());
+    let full = wins.iter().any(|w| w["used"].as_f64().is_some_and(|x| x >= 100.0));
+    fresh && known && !full
+}
+
 /// 工具结果里的后台任务 id：`Command running in background with ID: b14bc2oy7.`
 fn task_id_in(content: &str) -> Option<String> {
     let rest = content.split("with ID: ").nth(1)?;
@@ -1197,6 +1258,24 @@ mod tests {
         } });
         assert_eq!(limit_reset_in(&u), Some(1_794_193_200));
         assert_eq!(limit_reset_in(&json!({ "limits": { "five_hour": { "used": 10.0, "resets_at": "2026-11-07T15:00:00Z" } } })), None);
+    }
+
+    #[test]
+    fn limit_back_early() {
+        let u = |five: Value, week: Value, at: i64| json!({ "limits": { "five_hour": five, "seven_day": week, "fetched_at": at } });
+        let w = |used: f64| json!({ "used": used, "resets_at": "2999-01-01T00:00:00Z" });
+        // 周额度用完，在等；周额度提前刷新了（新取的用量里不满了）→ 提前继续
+        assert!(limit_back(&u(w(30.0), w(2.0), 200), 100));
+        // 5 小时窗口还满着：接着等
+        assert!(!limit_back(&u(w(100.0), w(2.0), 200), 100));
+        assert!(!limit_back(&u(w(30.0), w(100.0), 200), 100));
+        // 撞上限额之前取的旧用量不算
+        assert!(!limit_back(&u(w(30.0), w(2.0), 50), 100));
+        // 什么数都没有（没取到）不算
+        assert!(!limit_back(&u(Value::Null, Value::Null, 200), 100));
+        assert!(!limit_back(&json!({ "limits": null }), 100));
+        // 过了重置时间的窗口是 null：另一个不满就算回来了
+        assert!(limit_back(&u(w(10.0), Value::Null, 200), 100));
     }
 
     #[test]

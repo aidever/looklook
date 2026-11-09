@@ -2348,14 +2348,15 @@ impl Chat {
         let inst = self.inst(id);
         self.poll(&inst).await;
         let totals = inst.tr.lock().await.as_ref().and_then(Reader::claude).map(|t| t.totals).unwrap_or_default();
-        let (model, context, version) = {
+        let (model, context, version, reported) = {
             let st = lock(&inst.st);
-            (st.actual_model.clone(), st.context, st.version.clone())
+            let reported = st.actual_model.as_deref().and_then(|m| st.sdk.windows.get(&models::base_id(m)).copied());
+            (st.actual_model.clone(), st.context, st.version.clone(), reported)
         };
         let profile = crate::claude_profiles::for_instance(&self.store, id);
         let (config_dir, state_file) = crate::claude_profiles::config_paths(&self.paths.home, &profile);
         let ctx = models::Ctx { config_dir, state_file, workdir: &workdir, env: HashMap::new() };
-        let (window, mut limits) = tokio::task::block_in_place(|| (model.as_deref().map(|m| models::context_window(&ctx, m)), models::limits(&ctx)));
+        let (window, mut limits) = tokio::task::block_in_place(|| (reported.or_else(|| model.as_deref().map(|m| models::context_window(&ctx, m))), models::limits(&ctx)));
         // 订阅用量只读 Claude Code 自己的缓存；缓存没有或旧了，请它自己去取（第三方接口没有订阅用量）。
         // 一点都没有时等它取完再读，否则在后台取，下次来取就是新的
         // 第三方接口：服务商的套餐用量（认得的几家，见 provider_quota.rs），带着服务商的名字

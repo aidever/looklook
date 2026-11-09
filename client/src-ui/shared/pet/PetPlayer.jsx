@@ -50,7 +50,7 @@ function readPos(key) {
  * onHit(rect, grab)：人物占的框变了（桌面宠物窗口据此决定哪里能点）。
  */
 const PetPlayer = forwardRef(function PetPlayer(
-  { manifest: m, fileUrl, agent, height = 130, lines = true, gen, lang = 'zh-CN', label, storeKey, page = false, home, onInteract, onHit, onState, pad: PAD = PAD_DEFAULT, roam = false, idleTalk = true, edges, onExit, children },
+  { manifest: m, fileUrl, agent, height = 130, lines = true, gen, lang = 'zh-CN', label, storeKey, page = false, home, onInteract, onHit, onState, pad: PAD = PAD_DEFAULT, roam = false, idleTalk = true, edges, onExit, onMenu, alpha = 1, children },
   ref,
 ) {
   const layer = useRef(null);
@@ -77,7 +77,7 @@ const PetPlayer = forwardRef(function PetPlayer(
   // 这个浏览器能不能动：视频要有对应格式的文件
   const canMove = !still && (isSprite || (fmt && Object.values(m.clips).some((c) => c[fmt])));
   const cb = useRef({});
-  cb.current = { onInteract, onHit, home, onExit, edges };
+  cb.current = { onInteract, onHit, home, onExit, edges, onMenu };
 
   const b = box ?? DEFAULT_BOX;
   const stageW = m.stage?.width || 640;
@@ -118,10 +118,10 @@ const PetPlayer = forwardRef(function PetPlayer(
       const up = tapBubble.current ? 90 : 30;
       const wide = tapBubble.current ? Math.max(charW, 240) : charW;
       const r = [Math.round(pos.current.x - wide / 2), Math.round(top - up), Math.round(wide), Math.round(b[3] * H + up)];
-      const k = `${r.join(',')}|${grab}`;
+      const k = `${r.join(',')}|${grab}|${tapBubble.current}`;
       if (k === lastHit.current) return;
       lastHit.current = k;
-      f(r, grab);
+      f(r, grab, tapBubble.current);
     },
     [charW, H, b, ground],
   );
@@ -760,7 +760,16 @@ const PetPlayer = forwardRef(function PetPlayer(
   };
 
   // 试播、右键菜单、外面插话用
+  const toggleSleep = () => {
+    const br = brainRef.current;
+    const p = br?.sleeping ? br.click(now()) : br?.sleepNow(now());
+    if (p) show(p);
+  };
   useImperativeHandle(ref, () => ({
+    /** 在睡觉没有 */
+    sleeping: () => Boolean(brainRef.current?.sleeping),
+    /** 睡着就叫醒，醒着就睡 */
+    toggleSleep,
     play(kind, arg) {
       const br = brainRef.current;
       if (!br) return;
@@ -820,7 +829,7 @@ const PetPlayer = forwardRef(function PetPlayer(
       <div
         className="pet"
         ref={wrap}
-        style={{ width: W, height: H, '--bx': `${b[0] * 100}%`, '--by': `${b[1] * 100}%`, '--bw': `${b[2] * 100}%`, '--bh': `${b[3] * 100}%` }}
+        style={{ width: W, height: H, '--pet-alpha': alpha, '--bx': `${b[0] * 100}%`, '--by': `${b[1] * 100}%`, '--bw': `${b[2] * 100}%`, '--bh': `${b[3] * 100}%` }}
         data-faded={faded ? '' : undefined}
       >
         {canMove ? (
@@ -845,8 +854,9 @@ const PetPlayer = forwardRef(function PetPlayer(
           onPointerCancel={onPointerUp}
           onContextMenu={(e) => {
             e.preventDefault();
-            const p = brainRef.current?.sleeping ? brainRef.current.click(now()) : brainRef.current?.sleepNow(now());
-            if (p) show(p);
+            // 桌面宠物：右键出菜单（透明度、不挡操作……）；页面里的：右键睡觉 / 叫醒
+            if (cb.current.onMenu) cb.current.onMenu({ x: e.clientX, y: e.clientY });
+            else toggleSleep();
           }}
           aria-label={label}
           title={label}

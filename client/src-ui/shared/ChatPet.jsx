@@ -115,7 +115,11 @@ export function useDeskNotify(open) {
           const o = r?.open;
           if (o?.seq != null && o.seq !== seen) {
             // 刚开起来时只认最近几秒的（点了气泡、主窗口是那时才开的）
-            if (seen != null || Date.now() - (o.at ?? 0) < 10000) openRef.current?.(o.id);
+            if (seen != null || Date.now() - (o.at ?? 0) < 10000) {
+              // 桌面宠物右键菜单里点了“宠物设置”
+              if (o.kind === 'settings') window.dispatchEvent(new CustomEvent('ll-menu', { detail: 'pet_settings' }));
+              else openRef.current?.(o.id);
+            }
             seen = o.seq;
           } else if (seen == null) seen = o?.seq ?? 0;
         } catch {
@@ -253,7 +257,7 @@ const XP = { clicks: 1, pets: 3, turns: 2, tests: 1, fixes: 3, commits: 2, hello
  * 一只活的宠物：跟着对话状态和条目走、记好感度、碎碎念。对话页和桌面宠物窗口共用。
  * `home`：没记住位置时放在哪；`onHit`：桌面窗口用。
  */
-export function LivePet({ pet, cfg, status, items, fileUrl, height, page, storeKey, home, onHit, playerRef, roam = true, pad, edges, onExit, children }) {
+export function LivePet({ pet, cfg, status, items, fileUrl, height, page, storeKey, home, onHit, playerRef, roam = true, pad, edges, onExit, onMenu, alpha, children }) {
   const { t, i18n } = useTranslation();
   const own = useRef(null);
   const player = playerRef ?? own;
@@ -394,6 +398,8 @@ export function LivePet({ pet, cfg, status, items, fileUrl, height, page, storeK
       pad={pad}
       edges={edges}
       onExit={onExit}
+      onMenu={onMenu}
+      alpha={alpha}
     >
       {children}
     </PetPlayer>

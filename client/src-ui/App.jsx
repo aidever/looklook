@@ -545,6 +545,7 @@ function ConsoleLayout({ path, stale, children }) {
     };
     const onMenu = (e) => {
       if (e.detail === 'settings') navigate('/settings');
+      else if (e.detail === 'pet_settings') navigate('/ai#pet');
       else if (e.detail === 'new_session') ui.newSession();
     };
     window.addEventListener('keydown', onKey);

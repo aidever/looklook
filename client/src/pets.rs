@@ -787,6 +787,10 @@ pub struct PetSettings {
     pub desktop: bool,
     /// 应用里的会话通知（做完了、在等你）由宠物说，不再弹右上角的卡片
     pub notify: bool,
+    /// 桌面宠物平时的不透明度（0.2–1）；鼠标放上去、拖着、说着能点的话时总是不透明
+    pub opacity: f64,
+    /// 桌面宠物不挡操作：鼠标直接穿过它，按住 Ctrl（Windows）/ ⌥（macOS）才能抓它（Linux 读不到按键，只能从托盘、设置里关）
+    pub through: bool,
     /// 生成台词：用哪个、哪个模型、什么风格（上次选的，下次打开还是它）
     pub gen: GenCfg,
     /// 生成人设文案用的自配接口；没配就用本机的 Claude Code / Codex
@@ -796,7 +800,7 @@ pub struct PetSettings {
 
 impl Default for PetSettings {
     fn default() -> Self {
-        Self { enabled: true, default: None, by_agent: BTreeMap::new(), size: 1.0, lines: true, chatter: true, desktop: true, notify: true, gen: GenCfg::default(), api: None }
+        Self { enabled: true, default: None, by_agent: BTreeMap::new(), size: 1.0, lines: true, chatter: true, desktop: true, notify: true, opacity: 1.0, through: false, gen: GenCfg::default(), api: None }
     }
 }
 
@@ -882,12 +886,14 @@ impl PetSettings {
             return Err(LocalError::invalid("pet", "gen"));
         }
         self.size = if self.size.is_finite() { self.size.clamp(0.5, 2.0) } else { 1.0 };
+        self.opacity = if self.opacity.is_finite() { self.opacity.clamp(0.2, 1.0) } else { 1.0 };
         self.by_agent.clear();
         if !self.default.as_ref().is_none_or(|k| k.len() <= 200 && k.contains(':')) {
             return Err(LocalError::invalid("pet", "format"));
         }
         store.set(SETTINGS_KEY, &self)?;
         crate::desk_pet::set_wanted(self.enabled && self.desktop);
+        crate::desk_pet::set_through(self.through);
         changed();
         Ok(self.masked())
     }
@@ -912,6 +918,8 @@ pub fn current(home: &Path, store: &crate::store::Store) -> Value {
         "chatter": s.chatter,
         "desktop": s.desktop,
         "notify": s.notify,
+        "opacity": s.opacity,
+        "through": s.through,
         "gen": pack.as_ref().map(|p| gen_lines(store, &p.key())),
         "ver": ver(),
     })

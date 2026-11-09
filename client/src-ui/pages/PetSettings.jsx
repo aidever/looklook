@@ -273,6 +273,19 @@ function SettingsCard({ s, usable, save, error }) {
           {s.lines !== false && sw('chatter', t('pet.chatter'), t('pet.chatter_hint'))}
           {s.lines !== false && sw('notify', t('pet.notify'), t('pet.notify_hint'))}
           {inDesktopMain() && sw('desktop', t('pet.desktop'), t('pet.desktop_hint'))}
+          {inDesktopMain() && s.desktop !== false && (
+            <>
+              <Field label={t('pet.alpha')} hint={t('pet.alpha_hint')}>
+                <Seg
+                  value={[1, 0.7, 0.5, 0.3].reduce((a, b) => (Math.abs(b - (Number(s.opacity) || 1)) < Math.abs(a - (Number(s.opacity) || 1)) ? b : a))}
+                  label={t('pet.alpha')}
+                  onChange={(v) => save({ ...s, opacity: v })}
+                  options={[1, 0.7, 0.5, 0.3].map((n) => [n, n === 1 ? t('pet.alpha_off') : `${Math.round((1 - n) * 100)}%`])}
+                />
+              </Field>
+              {sw('through', t('pet.through'), t('pet.through_hint'), false)}
+            </>
+          )}
         </>
       )}
       <ErrorNote error={error} />

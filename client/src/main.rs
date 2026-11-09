@@ -613,7 +613,9 @@ async fn run(home: Option<PathBuf>, listen: Option<SocketAddr>, server: Option<S
     {
         let p = pets::PetSettings::load(&store);
         desk_pet::set_wanted(p.enabled && p.desktop);
+        desk_pet::set_through(p.through);
     }
+    tokio::spawn(desk_pet::apply_toggles(store.clone()));
     let ui = listen::bind(listen, &store).await?;
     hardening::check_self_integrity(&store);
     let account = Account::new(store.clone(), paths.clone(), &hardening::default_server(), &hardening::builtin_platform_keys())?;

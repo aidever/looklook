@@ -180,7 +180,14 @@ export function createBrain(m, { rng = Math.random, now = 0, roam = false } = {}
     // 分了左右的段（精灵图）自己就朝那边，不镜像；否则按走的方向定朝向
     if (!c.dir) s.facing = dir;
     s.walked = dir;
-    return play(p, LAYER.idle, { mirror: c.dir ? false : mirrored() && c.mirror !== false, move: { dx: dir === 'left' ? -dist : dist, lead: w.lead, tail: w.tail, pace: w.pace, looped: Boolean(c.loop) } });
+    // 不只横着走：屏幕上下有地方时，多半顺带往上或往下斜着走一段（room 带 up / down 时才有，单位同 dx，往上为正）
+    let dy = 0;
+    if (roam && room && (room.up != null || room.down != null) && rng() < 0.7) {
+      const up = Math.min(room.up ?? 0, dist * 0.8);
+      const down = Math.min(room.down ?? 0, dist * 0.8);
+      if (up + down >= 20) dy = rng() * (up + down) - down;
+    }
+    return play(p, LAYER.idle, { mirror: c.dir ? false : mirrored() && c.mirror !== false, move: { dx: dir === 'left' ? -dist : dist, dy: Math.round(dy), lead: w.lead, tail: w.tail, pace: w.pace, looped: Boolean(c.loop) } });
   };
 
   const startSleep = (sets) => {

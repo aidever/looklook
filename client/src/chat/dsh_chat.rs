@@ -769,6 +769,7 @@ impl Chat {
         let conn = self.dsh_attach(id).await?;
         let Some(session) = lock(&inst.st).binding.as_ref().map(|b| b.session_id.clone()) else { return Ok(()) };
         conn.call("session/cancel", json!({ "request": { "sessionId": session } })).await?;
+        Self::stop_tool(&inst, &mut lock(&inst.st));
         Ok(())
     }
 

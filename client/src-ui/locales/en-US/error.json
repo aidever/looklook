@@ -267,6 +267,7 @@
   "CODEX_HOOKS_CHANGED": "These hooks changed again. Review the new version, then confirm.",
   "CODEX_UPDATE_MANUAL": "This Codex wasn't installed with npm. Update it the way you installed it.",
   "CHAT_TERMINAL_ONLY": "The chat can't reach Codex right now; use the terminal for now",
+  "CHAT_TERMINAL_BUSY": "Claude Code in the terminal didn't exit. Exit it there (press Ctrl+C twice), then send again",
   "CODEX_TERMINAL_BUSY": "The program in the terminal didn't exit. Quit it in the terminal, then reconnect",
   "CODEX_TERMINAL_STOPPED": "The terminal isn't running. Start it first",
   "SYNC_NEED_RTC": "Settings sync only runs between computers over the end-to-end channel.",

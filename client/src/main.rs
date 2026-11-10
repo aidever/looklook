@@ -58,6 +58,7 @@ mod ports;
 mod proctree;
 mod session_probe;
 mod idle_stop;
+mod claude_prices;
 mod pricing;
 mod prompts;
 mod provider_quota;

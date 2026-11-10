@@ -215,6 +215,11 @@ pub async fn adopt(State(app): State<App>, Path(id): Path<String>) -> R<StatusCo
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// 对话模式的 Claude Code 打开了终端标签：对话交给终端里的 TUI
+pub async fn to_terminal(State(app): State<App>, Path(id): Path<String>) -> R<Json<Value>> {
+    Ok(Json(app.chat.to_terminal(&id).await?))
+}
+
 /// Codex 终端标签上的“重新连接终端”
 pub async fn codex_terminal(State(app): State<App>, Path(id): Path<String>) -> R<StatusCode> {
     app.chat.codex_reconnect_terminal(&id).await?;

@@ -3,6 +3,9 @@
 //!
 //! 用在两处：用量统计按 API 价格估算费用（[`crate::usage_stats`]），常见服务商的快速配置列出这家现在有哪些模型
 //! （[`crate::model_presets`]）。只留下用得到的字段（全量 6 MB，留下的不到十分之一）。
+//!
+//! Claude 的模型另外以本机装的 Claude Code 自带的价格表为准（[`crate::claude_prices`]，服务商 `claude-code`）：
+//! 新模型发布当天 Claude Code 就带着价格，models.dev 常常要晚几天；Claude Code 换了版本就重新读。
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -13,8 +16,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const URL: &str = "https://models.dev/api.json";
-/// 多久取一次
-const REFRESH: Duration = Duration::from_secs(24 * 3600);
+/// 多久取一次（新模型的价格要尽快跟上）
+const REFRESH: Duration = Duration::from_secs(6 * 3600);
+/// Claude Code 自带价格表的服务商 id
+pub const CLAUDE_CODE: &str = "claude-code";
 /// 取失败后多久再试
 const RETRY: Duration = Duration::from_secs(3600);
 
@@ -28,6 +33,64 @@ pub struct Cost {
     pub cache_read: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write: Option<f64>,
+    /// 写 1 小时缓存（没有时按输入的两倍）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h: Option<f64>,
+    /// 每次联网搜索（美元 / 次，不是每百万 token）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search: Option<f64>,
+    /// 长提示词另一档价格：一次请求的提示词（输入 + 读写缓存）超过 `above` 时整次按这一档算
+    /// （models.dev 的 `tiers` / `context_over_200k`，Claude Code 的 `long_prompt`）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub long: Option<Long>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct Long {
+    pub above: u64,
+    #[serde(default)]
+    pub input: f64,
+    #[serde(default)]
+    pub output: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h: Option<f64>,
+}
+
+impl Cost {
+    /// 提示词有 `prompt` 个 token 的一次请求按哪一档算
+    pub fn at(&self, prompt: u64) -> Cost {
+        match self.long {
+            Some(l) if l.above > 0 && prompt >= l.above && (l.input > 0.0 || l.output > 0.0) => Cost {
+                input: l.input,
+                output: l.output,
+                cache_read: l.cache_read.or(self.cache_read),
+                cache_write: l.cache_write.or_else(|| self.cache_write.map(|_| l.input * 1.25)),
+                cache_write_1h: l.cache_write_1h.or_else(|| self.cache_write_1h.map(|_| l.input * 2.0)),
+                web_search: self.web_search,
+                long: None,
+            },
+            _ => *self,
+        }
+    }
+}
+
+/// models.dev 的 `cost` → [`Cost`]：长提示词那一档优先看 `tiers`（`{tier: {type: context, size}}`），其次 `context_over_200k`
+fn md_cost(c: &Value) -> Option<Cost> {
+    let mut cost = serde_json::from_value::<Cost>(c.clone()).ok()?;
+    let long = |v: &Value, above: u64| -> Option<Long> {
+        let mut l = serde_json::from_value::<Long>(v.clone()).ok()?;
+        l.above = above;
+        Some(l)
+    };
+    cost.long = c["tiers"]
+        .as_array()
+        .and_then(|a| a.iter().filter(|t| t["tier"]["type"] == "context").find_map(|t| long(t, t["tier"]["size"].as_u64()?)))
+        .or_else(|| c.get("context_over_200k").and_then(|v| long(v, 200_000)));
+    Some(cost)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,8 +130,45 @@ pub fn catalog() -> Option<Arc<Catalog>> {
     CURRENT.read().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
-fn set(c: Catalog) {
-    *CURRENT.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(c));
+/// 换上新取的 models.dev 目录：Claude Code 的价格表（不存进文件，每次启动重新读）留着
+fn set(mut c: Catalog) {
+    let mut g = CURRENT.write().unwrap_or_else(|e| e.into_inner());
+    if let Some(cc) = g.as_ref().and_then(|old| old.providers.get(CLAUDE_CODE)) {
+        c.providers.entry(CLAUDE_CODE.into()).or_insert_with(|| cc.clone());
+    }
+    *g = Some(Arc::new(c));
+}
+
+/// 换上 Claude Code 的价格表（`None`：读不到，去掉）
+fn set_claude_code(p: Option<Provider>) {
+    let mut g = CURRENT.write().unwrap_or_else(|e| e.into_inner());
+    let mut c = g.as_deref().cloned().unwrap_or_default();
+    match p {
+        Some(p) => c.providers.insert(CLAUDE_CODE.into(), p),
+        None => c.providers.remove(CLAUDE_CODE),
+    };
+    *g = Some(Arc::new(c));
+}
+
+/// 看一眼本机的 Claude Code 换没换版本，换了就重新读它的价格表（阻塞：要读 Claude Code 的程序文件）
+pub fn check_claude_code() {
+    if let Some(p) = crate::claude_prices::load_if_changed() {
+        tracing::info!(models = p.as_ref().map_or(0, |p| p.models.len()), "已读到 Claude Code 自带的模型价格");
+        set_claude_code(p);
+    }
+}
+
+/// 界面上点“刷新价格”：马上重新取 models.dev、重新读 Claude Code 的价格表。返回取到的时间（models.dev 取不到时是旧的）
+pub async fn refresh_now(home: &Path) -> Option<String> {
+    crate::claude_prices::forget();
+    let _ = tokio::task::spawn_blocking(check_claude_code).await;
+    if let Some(c) = fetch().await {
+        if let Ok(b) = serde_json::to_vec(&c) {
+            let _ = std::fs::write(file(home), b);
+        }
+        set(c);
+    }
+    catalog().map(|c| c.fetched_at.clone())
 }
 
 /// models.dev 的原始 JSON → 只留用得到的
@@ -81,7 +181,7 @@ fn parse(v: &Value, now: String) -> Option<Catalog> {
             .map(|(mid, m)| {
                 let info = ModelInfo {
                     name: m["name"].as_str().unwrap_or(mid).to_string(),
-                    cost: m.get("cost").and_then(|c| serde_json::from_value::<Cost>(c.clone()).ok()),
+                    cost: m.get("cost").and_then(md_cost),
                     release_date: m["release_date"].as_str().unwrap_or_default().to_string(),
                     context: m["limit"]["context"].as_u64(),
                 };
@@ -115,6 +215,13 @@ pub async fn run(home: PathBuf) {
     if let Some(c) = std::fs::read(file(&home)).ok().and_then(|b| serde_json::from_slice::<Catalog>(&b).ok()) {
         set(c);
     }
+    // Claude Code 的价格表：启动时读一次，之后每 10 分钟看看它换没换版本
+    tokio::spawn(async {
+        loop {
+            let _ = tokio::task::spawn_blocking(check_claude_code).await;
+            tokio::time::sleep(Duration::from_secs(600)).await;
+        }
+    });
     loop {
         let fresh = catalog().is_some_and(|c| age(&c) < REFRESH);
         let wait = if fresh {
@@ -145,6 +252,7 @@ pub fn provider_for_url(c: &Catalog, base_url: &str) -> Option<String> {
 
 /// 没有服务商线索时按模型名先找这几家（国内用户多，有 `-cn` 的先用 `-cn`）
 const PREFERRED: &[&str] = &[
+    CLAUDE_CODE,
     "anthropic", "openai", "google", "deepseek", "zhipuai", "moonshotai-cn", "minimax-cn", "alibaba-cn", "volcengine", "xiaomi", "zai", "moonshotai", "minimax", "alibaba", "xai", "mistral",
 ];
 
@@ -183,12 +291,42 @@ pub fn price(c: &Catalog, provider: Option<&str>, model: &str) -> Option<(Cost, 
         return None;
     }
     let try_p = |id: &str| c.providers.get(id).and_then(|p| find_in(p, &model)).map(|cost| (*cost, id.to_string()));
+    // Claude 的模型：Claude Code 自带的价格表最新、最准（官方账号的提示是 anthropic）
+    if provider.is_none_or(|p| p == "anthropic") {
+        if let Some(found) = try_p(CLAUDE_CODE) {
+            return Some(found);
+        }
+    }
     if let Some(found) = provider.and_then(try_p) {
         return Some(found);
     }
     PREFERRED.iter().find_map(|id| try_p(id)).or_else(|| {
         c.providers.iter().filter_map(|(id, p)| find_in(p, &model).filter(|cost| cost.input > 0.0 || cost.output > 0.0).map(|cost| (*cost, id.clone()))).next()
     })
+}
+
+/// 刚发布、哪里都还没有价格的 Claude 模型（`claude-opus-6` 之类）：先按同一系列（opus / sonnet / haiku……）最新一个的价格估，
+/// 界面上标“估算”。不是 Claude 的不猜
+pub fn guess_price(c: &Catalog, model: &str) -> Option<(Cost, String)> {
+    let model = normalize(model);
+    let family = model.strip_prefix("claude-")?.split('-').next()?.to_string();
+    if family.is_empty() || family.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    let prefix = format!("claude-{family}-");
+    [CLAUDE_CODE, "anthropic"].iter().find_map(|id| {
+        let p = c.providers.get(*id)?;
+        p.models
+            .iter()
+            .filter(|(k, m)| normalize(k).starts_with(&prefix) && m.cost.is_some_and(|x| x.input > 0.0))
+            .max_by(|a, b| a.1.release_date.cmp(&b.1.release_date).then_with(|| version_key(a.0).cmp(&version_key(b.0))))
+            .and_then(|(_, m)| m.cost.map(|x| (x, format!("{id}~"))))
+    })
+}
+
+/// 模型名里的版本号（`claude-opus-4-8` → [4, 8]）：同一天发布的按版本号比新旧；带日期的后缀不算
+fn version_key(m: &str) -> Vec<u64> {
+    normalize(m).split('-').filter(|p| p.len() < 8).filter_map(|p| p.parse().ok()).collect()
 }
 
 #[cfg(test)]

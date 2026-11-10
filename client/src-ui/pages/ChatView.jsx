@@ -144,7 +144,7 @@ import { formatBytes } from '../shared/xfer.js';
 import { inputHistory, rememberInput, searchInputs } from '../shared/inputHistory.js';
 import PopMenu from '../shared/PopMenu.jsx';
 import ChatPet from '../shared/ChatPet.jsx';
-import { Button, CopyButton, useConfirm, useLoad, useToast } from '../shared/ui.jsx';
+import { Button, CopyButton, Spinner, useConfirm, useLoad, useToast } from '../shared/ui.jsx';
 import { KindIcon, profileName } from './ClaudeProfiles.jsx';
 import { FindBar, MessageSheet, OutlineTab, UserActs, fillInput, useChatKeys, useLongPress } from './ChatTools.jsx';
 import { LaunchIcon } from '../shared/brands.jsx';
@@ -1753,7 +1753,10 @@ function PendingCard({ id, pending, active }) {
   const { t, i18n } = useT();
   const { id: agentId, caps } = useContext(AgentCtx);
   const toast = useToast();
-  const [busy, setBusy] = useState(false);
+  const [sending, setSending] = useState(false);
+  // 答复已经送到、等状态更新把卡片收走：这段时间按钮一直转圈、不能再点（不然看着像没点上，用户会连点）
+  const [sent, setSent] = useState(null);
+  const busy = sending || sent === pending.id;
   const [reason, setReason] = useState('');
   const [change, setChange] = useState('');
   const [open, setOpen] = useState(false);
@@ -1762,28 +1765,28 @@ function PendingCard({ id, pending, active }) {
     setChange('');
     setOpen(false);
   }, [pending.id]);
-  const answer = async (decision, extra = {}) => {
-    setBusy(true);
+  // 一直没收走（状态更新丢了）：过一会儿让用户能再点
+  useEffect(() => {
+    if (sent !== pending.id) return undefined;
+    const tm = setTimeout(() => setSent(null), 12_000);
+    return () => clearTimeout(tm);
+  }, [sent, pending.id]);
+  const send = async (url, body, after) => {
+    setSending(true);
     try {
-      await api.post(`/instances/${id}/chat/permission`, { id: pending.id, decision, ...extra });
+      await api.post(url, body);
+      setSent(pending.id);
+      after?.();
     } catch (e) {
       // 已经在别处答过了：卡片会随状态更新消失
-      if (e.code !== 'CHAT_STALE') toast(errorText(t, e), 'error');
+      if (e.code === 'CHAT_STALE') setSent(pending.id);
+      else toast(errorText(t, e), 'error');
     } finally {
-      setBusy(false);
+      setSending(false);
     }
   };
-  const plan = async (choice, feedback) => {
-    setBusy(true);
-    try {
-      await api.post(`/instances/${id}/chat/plan`, { choice, feedback });
-      setChange('');
-    } catch (e) {
-      toast(errorText(t, e), 'error');
-    } finally {
-      setBusy(false);
-    }
-  };
+  const answer = (decision, extra = {}) => send(`/instances/${id}/chat/permission`, { id: pending.id, decision, ...extra });
+  const plan = (choice, feedback) => send(`/instances/${id}/chat/plan`, { choice, feedback }, () => setChange(''));
   const kind = pending.kind;
   const enter = useCallback(() => {
     if (busy) return;
@@ -1894,10 +1897,15 @@ function PendingCard({ id, pending, active }) {
   const title = kind === 'question' ? t('chat.q_title') : kind === 'plan' ? t('chat.plan_title') : t('chat.perm_title', { tool: pending.tool });
   const Icon = kind === 'permission' ? ShieldCheck : kind === 'plan' ? ListTodo : MessageCircleQuestion;
   return (
-    <section className="chat-ask" aria-live="polite">
+    <section className="chat-ask" aria-live="polite" aria-busy={busy || undefined}>
       <header>
         <Icon size={16} aria-hidden="true" />
         <b>{title}</b>
+        {sent === pending.id && (
+          <span className="chat-ask-sent">
+            <Spinner size={14} /> {t('chat.ask_sent')}
+          </span>
+        )}
       </header>
       <div className="chat-ask-body">{body}</div>
     </section>
@@ -2153,7 +2161,7 @@ function OtherScreen({ id, onTab }) {
 
 /** 额度用完、在等重置后自动继续。`waiting`：TUI 里 Claude Code 自己在等（屏幕上的原话）；
  *  `resumeAt`：对话模式（stream-json）里看看替它等，到这个时间（毫秒）自动发“继续” */
-function LimitWait({ id, waiting, resumeAt }) {
+function LimitWait({ id, waiting, resumeAt, guess }) {
   const { t } = useT();
   const toast = useToast();
   const [busy, setBusy] = useState(false);
@@ -2174,9 +2182,12 @@ function LimitWait({ id, waiting, resumeAt }) {
         {t('chat.limit.waiting')}
       </span>
       <div className="chat-limit-when">
-        <LimitReset id={id} />
+        {!guess && <LimitReset id={id} />}
         {waiting ? (
           <span className="chat-note">{t('chat.limit.terminal_says', { when: waiting })}</span>
+        ) : guess ? (
+          // 第三方接口多半不说什么时候重置：照实说是试试看，不装作知道
+          <span className="chat-note">{t('chat.limit.guess_at', { when: clockAt(resumeAt) })}</span>
         ) : (
           <span className="chat-note">{t('chat.limit.resume_at', { when: clockAt(resumeAt) })}</span>
         )}
@@ -2193,7 +2204,7 @@ function LimitWait({ id, waiting, resumeAt }) {
 }
 
 /** 这一轮因为账号的问题停了（StopFailure 的 error，官方 hooks 文档）：订阅到期 / 欠费、账号被暂停、登录失效、余额不足、额度用完后没在等 */
-const ACCOUNT_ERRORS = ['oauth_org_not_allowed', 'account_on_hold', 'billing_error', 'authentication_failed', 'rate_limit'];
+const ACCOUNT_ERRORS = ['oauth_org_not_allowed', 'account_on_hold', 'billing_error', 'authentication_failed', 'rate_limit', 'quota_expired'];
 
 /** 账号用不了、这一轮停下了：输入框上面一张卡片，可以换个账号接着这段对话 */
 function AccountFail({ id, error }) {
@@ -3140,9 +3151,11 @@ function Composer({ id, active, status, phase, touch, offline, models, usage, it
     });
   };
   const stop = async () => {
+    markStop(id, true);
     try {
       await api.post(`/instances/${id}/chat/interrupt`);
     } catch (e) {
+      markStop(id, false);
       toast(errorText(t, e), 'error');
     }
   };
@@ -4779,7 +4792,30 @@ function CodexGlyph({ launch = 'codex' }) {
   );
 }
 
-function Live({ status, items, since }) {
+/** 点了停止、这一轮还没真正停下：Live 改说“正在停止…”，不再挂着上一个工具名 */
+const stopAt = new Map();
+function markStop(id, on) {
+  if (on) stopAt.set(id, Date.now());
+  else stopAt.delete(id);
+  window.dispatchEvent(new CustomEvent('ll-chat-stop', { detail: id }));
+}
+function useStopping(id) {
+  const [, bump] = useReducer((n) => n + 1, 0);
+  useEffect(() => {
+    const f = (e) => e.detail === id && bump();
+    window.addEventListener('ll-chat-stop', f);
+    // Live 只在运行中挂着：卸掉 = 这一轮结束了
+    return () => {
+      window.removeEventListener('ll-chat-stop', f);
+      stopAt.delete(id);
+    };
+  }, [id]);
+  const at = stopAt.get(id);
+  return !!at && Date.now() - at < 15000;
+}
+
+function Live({ id, status, items, since }) {
+  const stopping = useStopping(id);
   const { t, i18n } = useT();
   const agent = useContext(AgentCtx).id;
   // 已经跑了多久，每秒更新
@@ -4795,7 +4831,11 @@ function Live({ status, items, since }) {
   const head = preview.slice(0, 30);
   const shown = preview && !(head && lastText.replace(/\s+/g, '').includes(head.replace(/\s+/g, '')));
   // Claude Code 的状态行（`Unraveling… (8s · ↓ 22 tokens)`）：中文界面把动词换成中文；Codex 的另有说法
-  const act = status?.agent === 'claude' || !status?.agent ? spinnerText(status?.activity, i18n.language) : codexActivity(t, status?.activity, status?.tool);
+  const act = stopping
+    ? { text: t('chat.stopping'), detail: '', orig: '' }
+    : status?.agent === 'claude' || !status?.agent
+      ? spinnerText(status?.activity, i18n.language)
+      : codexActivity(t, status?.activity, status?.tool);
   return (
     <>
       {/* stream-json、Codex 的预览是 Markdown 原文：和写完的回复一样排版（换成正式消息时不跳）；TUI 抓屏的已经排过版，照原样 */}
@@ -5193,7 +5233,7 @@ export default function ChatView({ id, launch, active, touch, offline = false, o
               </EditCtx.Provider>
               {first && <FirstSend id={id} first={first} onBack={onDraftBack} />}
               {echo && !first && <SentEcho echo={echo} />}
-              {phase === 'running' && <Live status={status} items={items} since={since} />}
+              {phase === 'running' && <Live id={id} status={status} items={items} since={since} />}
               {/* 推荐的下一句放在对话最后：点一下填进输入框（电脑上也可以按 Tab） */}
               {phase === 'idle' && status?.suggestion && items.length > 0 && (
                 <div className="chat-next-row">
@@ -5254,7 +5294,24 @@ export default function ChatView({ id, launch, active, touch, offline = false, o
           )}
           {/* 第一句在等它起来：上面已经写着“正在启动”，这里不再说一遍 */}
           {phase === 'detached' && !first && <Detached id={id} status={status} />}
-          {(status?.limit?.waiting || status?.limit?.resume_at > 0) && phase !== 'tui' && <LimitWait id={id} waiting={status.limit.waiting} resumeAt={status.limit.resume_at} />}
+          {/* 交给终端了：终端里的 Claude Code 在接着，这里照常显示；发消息会收回来 */}
+          {status?.in_terminal && (
+            <div className="chat-limit chat-in-term" role="status">
+              <span className="chat-limit-head">
+                <SquareTerminal size={15} aria-hidden="true" />
+                {t('chat.in_terminal')}
+              </span>
+              <p className="chat-note">{t('chat.in_terminal_hint')}</p>
+              {onTab && (
+                <div className="chat-acts">
+                  <Button variant="ghost" onClick={() => onTab('term')}>
+                    {t('chat.in_terminal_open')}
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
+          {(status?.limit?.waiting || status?.limit?.resume_at > 0) && phase !== 'tui' && <LimitWait id={id} waiting={status.limit.waiting} resumeAt={status.limit.resume_at} guess={status.limit.guess} />}
           {status?.other && phase !== 'tui' && phase !== 'detached' && <OtherScreen id={id} onTab={onTab} />}
           {agentId === 'claude' && phase === 'idle' && !status?.limit?.waiting && !status?.limit?.resume_at && ACCOUNT_ERRORS.includes(status?.error) && <AccountFail id={id} error={status.error} />}
           {agentId === 'codex' && status != null && <CodexSetup id={id} phase={phase} onTab={onTab} />}

@@ -627,6 +627,11 @@ fn user_items(v: &Value, key: &dyn Fn(usize) -> String, ts: Option<String>) -> V
     if trimmed.starts_with("[Request interrupted by user") {
         return vec![Item { key: key(0), ts, body: Body::Interrupt }];
     }
+    // 选技能 / 自定义命令（`<command-message>gpt-worker</command-message><command-name>/gpt-worker</command-name><command-args>继续</command-args>`）
+    // 是用户这一轮说的话：显示成用户消息「/gpt-worker 继续」，不要把标签原样露出来
+    if let Some(text) = skill_prompt(trimmed) {
+        return vec![Item { key: key(0), ts, body: Body::User { text, images, truncated, mid: false } }];
+    }
     if let Some(cmd) = command_text(trimmed) {
         // /clear（/new、/reset）是新会话记录里的第一条：对话界面上新会话应该是空的首页，不显示它
         if cmd.is_empty() || cmd == "/clear" || cmd.starts_with("/clear\n") {
@@ -701,6 +706,21 @@ fn task_note(v: &Value) -> Option<(String, Note)> {
     };
     let id = tag("tool-use-id").filter(|s| !s.is_empty())?;
     Some((id, Note { status: tag("status").unwrap_or_default(), summary: truncate(&tag("summary").unwrap_or_default(), 2_000).0, output_file: tag("output-file") }))
+}
+
+/// 以 `<command-message>` 开头的技能 / 自定义命令调用 → 「/名字 参数」。
+fn skill_prompt(s: &str) -> Option<String> {
+    if !s.starts_with("<command-message>") {
+        return None;
+    }
+    let tag = |t: &str| {
+        let open = format!("<{t}>");
+        let rest = &s[s.find(&open)? + open.len()..];
+        Some(rest[..rest.find(&format!("</{t}>"))?].trim().to_string())
+    };
+    let name = tag("command-name").filter(|n| !n.is_empty()).or_else(|| tag("command-message").map(|m| format!("/{}", m.trim_start_matches('/'))))?;
+    let args = tag("command-args").unwrap_or_default();
+    Some(if args.is_empty() { name } else { format!("{name} {args}") })
 }
 
 /// 斜杠命令、`!` 命令的记录（`<command-name>/model</command-name>`、`<local-command-stdout>…`、`<bash-input>`）
@@ -1187,6 +1207,15 @@ mod tests {
         assert_eq!(kinds(&t), ["user", "interrupt", "command", "command", "turn"]);
         assert_eq!(items[2].body, Body::Command { text: "/model".into() });
         assert_eq!(items[3].body, Body::Command { text: "Kept model as `Haiku 5.5`".into() });
+    }
+
+    #[test]
+    fn skill_invocation_is_a_user_prompt() {
+        let mut t = Transcript::new("/nonexistent".into());
+        let s = user("u1", None, json!("<command-message>gpt-worker</command-message>\n<command-name>/gpt-worker</command-name>\n<command-args>继续</command-args>"));
+        t.feed(s.as_bytes());
+        let items = t.items(0, t.len());
+        assert!(matches!(&items[0].body, Body::User { text, .. } if text == "/gpt-worker 继续"), "{:?}", items[0].body);
     }
 
     #[test]

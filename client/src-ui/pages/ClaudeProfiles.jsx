@@ -95,6 +95,8 @@ function UsageLine({ limits }) {
         <span key={key} className={w.used > 85 ? 'cprof-warn' : 'muted'} title={w.resets_at ? t('cprof.usage_reset', { at: formatTime(w.resets_at) }) : undefined}>
           {i > 0 && ' · '}
           {t(`cprof.${key}`, { used: Math.round(w.used) })}
+          {/* 用完了：直接写出什么时候重置；服务商没给时间就照实说不知道 */}
+          {w.used >= 100 && ` (${w.resets_at ? t('cprof.usage_reset', { at: formatTime(w.resets_at) }) : t('cprof.usage_reset_unknown')})`}
         </span>
       ))}
       {/* 开了额外用量（额度用完后按量付费）：这个月花了多少 */}
@@ -536,11 +538,14 @@ function ProfileRow({ agent, p, isDefault, busy, nonce, onDefault, onLogin, onEd
   const [usage, setUsage] = useState(null);
   const q = useAction();
   const name = profileName(t, p, agent);
+  const take = (r) => {
+    if (r.status && !r.status.error) setFresh(r.status);
+    setUsage(r.state === 'ok' ? { ...r, at: Date.now() } : r.state === 'logged_out' ? { state: 'logged_out' } : null);
+  };
   const queryUsage = async () => {
     const r = await q.run(() => api.post(`${cfg.base}/${p.id}/usage`, {}));
     if (!r) return;
-    if (r.status && !r.status.error) setFresh(r.status);
-    setUsage(r.state === 'ok' ? r : r.state === 'logged_out' ? { state: 'logged_out' } : null);
+    take(r);
     if (r.state === 'logged_out') toast(t('cprof.expired_toast', { name }), 'error');
     else if (r.state === 'no_limits') toast(t(official ? 'cprof.usage_none' : 'cprof.usage_none_api'), 'error');
     else if (r.state === 'failed') toast(t('cprof.usage_failed'), 'error');
@@ -549,6 +554,36 @@ function ProfileRow({ agent, p, isDefault, busy, nonce, onDefault, onLogin, onEd
     if (q.error) toast(errorText(t, q.error), 'error');
   }, [q.error]);
   const loggedIn = Boolean(s?.logged_in);
+  // 定时自动查用量：打开页面时查一次，开着时第三方接口每 5 分钟、官方账号每 10 分钟（要起一次 claude）再查；
+  // 页面在后台时不查，回到前台时过了间隔就补一次。自动查的不弹提示，失败了保留上次的数
+  const autoQuery = claudeLogin ? loggedIn : !official && p.quota && p.key_set;
+  const every = claudeLogin ? 10 * 60_000 : 5 * 60_000;
+  useEffect(() => {
+    if (!autoQuery) return undefined;
+    let alive = true;
+    let last = 0;
+    const run = async () => {
+      if (document.hidden || Date.now() - last < every - 5_000) return;
+      last = Date.now();
+      try {
+        const r = await api.post(`${cfg.base}/${p.id}/usage`, {});
+        if (alive && r && r.state !== 'failed' && r.state !== 'no_limits') take(r);
+      } catch {
+        /* 自动查的：不打扰 */
+      }
+    };
+    // 几个配置错开一点，不同时起好几个 claude
+    const first = setTimeout(run, 300 + Math.random() * 1500);
+    const iv = setInterval(run, every);
+    const vis = () => !document.hidden && run();
+    document.addEventListener('visibilitychange', vis);
+    return () => {
+      alive = false;
+      clearTimeout(first);
+      clearInterval(iv);
+      document.removeEventListener('visibilitychange', vis);
+    };
+  }, [autoQuery, p.id, agent]);
   const model = agent === 'codex' ? p.model : p.models?.main;
   return (
     <li className={isDefault ? 'cprof-default' : ''}>
@@ -589,6 +624,7 @@ function ProfileRow({ agent, p, isDefault, busy, nonce, onDefault, onLogin, onEd
         {(loggedIn || !official) && usage?.state === 'ok' && (
           <span className="small" style={{ display: 'block' }}>
             <UsageLine limits={usage.limits} />
+            {usage.at && <span className="muted"> · {t('cprof.usage_auto_at', { at: new Date(usage.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) })}</span>}
           </span>
         )}
       </span>

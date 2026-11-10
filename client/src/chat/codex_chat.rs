@@ -1296,6 +1296,7 @@ impl Chat {
         };
         let (Some(thread), Some(turn)) = (thread, turn) else { return Ok(()) };
         server.call("turn/interrupt", json!({ "threadId": thread, "turnId": turn })).await?;
+        Self::stop_tool(&inst, &mut lock(&inst.st));
         Ok(())
     }
 

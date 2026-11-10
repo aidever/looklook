@@ -208,6 +208,26 @@ function useSideTabs(id, tab, setTab, chat, frame, enabled = true) {
   return { seen, reveal, insert, insertTo: chat ? 'chat' : 'term' };
 }
 
+/**
+ * 对话模式的 Claude Code（stream-json）：切到终端标签时把这段对话交给终端——终端里打开 `claude --resume` 接着聊，
+ * 对话页只看；在对话页发消息时收回来（docs/CLAUDE_SDK.md「终端里接着」）。一段对话同时只能有一个 Claude Code 在写，所以是交接
+ */
+function useClaudeHandoff(id, inst, tab) {
+  const { t } = useTranslation();
+  const toast = useToast();
+  const on = tab === 'term' && inst?.launch === 'claude' && hasChat(inst) && !inst?.container && inst?.running;
+  useEffect(() => {
+    if (!on) return;
+    api.post(`/instances/${id}/chat/to-terminal`).then(
+      (r) => {
+        if (r?.state === 'after_turn') toast(t('term.handoff_after_turn'));
+        else if (r?.state === 'busy') toast(t('term.handoff_busy'), 'error');
+      },
+      () => {},
+    );
+  }, [on, id]);
+}
+
 /** 带对话界面的 Claude Code 终端（docs/CLAUDE_UI.md） */
 export const hasChat = (inst) => Boolean(CHAT_LAUNCHES.includes(inst?.launch) && inst?.chat_ui);
 
@@ -425,6 +445,7 @@ export function TermPane({ id, inst, active, missing, offline = false, onStart, 
   const tab = inst?.container ? 'term' : tab0;
   const side = useSideTabs(id, tab, setTab, chat, frame, !inst?.container);
   useTabKeys(active, chat, Boolean(inst?.container), setTab);
+  useClaudeHandoff(id, inst, active ? tab : null);
   const link = { src: termSrc(id) };
   const allowed = status.account.allowed;
   const running = Boolean(inst?.running && allowed);
@@ -663,6 +684,7 @@ function TermPage({ id }) {
   const tab = inst?.container ? 'term' : tab0;
   const side = useSideTabs(id, tab, setTab, chat, frame, !inst?.container);
   useTabKeys(true, chat, Boolean(inst?.container), setTab);
+  useClaudeHandoff(id, inst, tab);
   const allowed = status.account.allowed;
   const running = inst?.running;
   const live = Boolean(running && allowed);

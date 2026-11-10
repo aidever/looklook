@@ -1378,6 +1378,20 @@ impl Instances {
         Some(self.model_wrap(&row, &crate::shells::adapt_for(&cmd, shell.family), shell.family))
     }
 
+    /// 对话模式（stream-json）的 Claude Code 交给终端：在面板的 shell 里用同一个账号、同样的权限参数打开
+    /// `claude --resume <会话>` 的 TUI（不带对话界面的 hooks：这时对话页只看，见 `chat::claude_chat` 的“交给终端”）。
+    pub fn claude_tui_resume_line(&self, id: &str, session: &str) -> Result<String, LocalError> {
+        let row = self.store.instance(id)?.ok_or_else(LocalError::not_found)?;
+        if !self.claude_sdk_mode(&row) || !crate::history::valid_id(session) {
+            return Err(LocalError::new("CHAT_UNAVAILABLE"));
+        }
+        let cmd = launch_command_line(&row, self.opts(id), crate::platform::is_root()).ok_or_else(|| LocalError::new("CHAT_UNAVAILABLE"))?;
+        let cmd = format!("{} --resume {session}", self.with_terminal_settings(&row, cmd));
+        let shell = crate::shells::resolve(&row.shell, &Settings::load(&self.store).default_shell)?;
+        let cmd = with_launch_program(&row, &cmd, shell.family);
+        Ok(self.model_wrap(&row, &crate::shells::adapt_for(&cmd, shell.family), shell.family))
+    }
+
     /// 对话界面“以对话模式重新启动”：在面板的 shell 里接着某个会话启动 Claude Code / Codex（带 hooks、全部权限等原来的参数）。
     pub fn chat_relaunch_command(&self, id: &str, session: Option<&str>) -> Result<String, LocalError> {
         let row = self.store.instance(id)?.ok_or_else(LocalError::not_found)?;

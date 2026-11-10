@@ -267,6 +267,7 @@
   "CODEX_HOOKS_CHANGED": "这些 hook 刚刚又改过了，请看过新的内容再确认",
   "CODEX_UPDATE_MANUAL": "这个 Codex 不是用 npm 装的，请用你安装它的方式更新",
   "CHAT_TERMINAL_ONLY": "对话页暂时连不上 Codex，可以先在终端里用",
+  "CHAT_TERMINAL_BUSY": "终端里的 Claude Code 没有退出，请在终端里手动退出（Ctrl+C 两次）后再发",
   "CODEX_TERMINAL_BUSY": "终端里的程序没有退出，请在终端里手动退出后再重新连接",
   "CODEX_TERMINAL_STOPPED": "终端没在运行，请先启动",
   "SYNC_NEED_RTC": "设置同步只能在电脑之间经端到端通道进行。",

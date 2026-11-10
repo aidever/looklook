@@ -486,6 +486,8 @@ impl Chat {
             "dialog": st.dialog,
             "phase": st.phase,
             "reason": st.reason,
+            // 对话交给终端了（对话模式的 Claude Code）：终端里的 TUI 在接着，这里只看；发消息会收回来
+            "in_terminal": st.sdk.term.is_some(),
             "tool": st.tool,
             "mode": st.mode,
             "model": st.model,
@@ -503,7 +505,7 @@ impl Chat {
             // Codex：Tab 排到这一轮之后的（这一轮结束后作为下一轮发出）
             "later": st.codex.later.iter().map(|(t, i)| json!({ "text": t, "images": i.len() })).collect::<Vec<_>>(),
             "limit": (st.limit_wait.is_some() || st.limit_auto_at.is_some() || st.sdk.limit_resume.is_some())
-                .then(|| json!({ "waiting": st.limit_wait, "auto_at": st.limit_auto_at, "resume_at": st.sdk.limit_resume })),
+                .then(|| json!({ "waiting": st.limit_wait, "auto_at": st.limit_auto_at, "resume_at": st.sdk.limit_resume, "guess": st.sdk.limit_guess })),
             "effort": st.effort,
             // 终端里开着这里读不出来的界面（只提示，phase 不变）
             "other": st.other,
@@ -531,6 +533,25 @@ impl Chat {
 
     fn emit_status(inst: &Inst, st: &State) {
         let _ = inst.tx.send(Event::Status(Self::status_of(inst, st)));
+    }
+
+    /// 审批答完：清掉挂起的、换状态。状态本来就是这个时 `set_phase` 不发更新，界面上的卡片会一直挂着（点了像没反应），这里总要发一次
+    fn settle(inst: &Inst, st: &mut State, phase: Phase) {
+        st.pending = None;
+        let same = st.phase == phase && st.reason.is_none();
+        Self::set_phase(inst, st, phase, None);
+        if same {
+            Self::emit_status(inst, st);
+        }
+    }
+
+    /// 点了停止：不再显示“正在使用 X…”（停下来的那一刻不一定有 hook / 结果告诉我们）
+    fn stop_tool(inst: &Inst, st: &mut State) {
+        if st.tool.is_some() || st.doing.is_some() {
+            st.tool = None;
+            st.doing = None;
+            Self::emit_status(inst, st);
+        }
     }
 
     fn set_phase(inst: &Inst, st: &mut State, phase: Phase, reason: Option<&'static str>) {
@@ -621,7 +642,11 @@ impl Chat {
             }
             let agent = ev["agent_id"].as_str().filter(|_| !ev["agent_type"].as_str().unwrap_or("").is_empty()).map(String::from);
             let rebound = self.rebind(&inst, &mut st, &ev, &name);
+            // 交给终端了（stream-json 的 Claude Code，见 claude_chat 的 sdk_to_terminal）：这些事件来自终端里的 TUI，
+            // 对话页照着显示在干活 / 空闲。结束会话的（看看起的进程被结束、TUI 退出）不算：TUI 退出由后台看终端发现
+            let term = st.sdk.term.is_some();
             match name.as_str() {
+                "SessionEnd" if term => {}
                 "SessionStart" => {
                     // 自动压缩发生在一轮当中，不能改成空闲
                     if ev["source"] != "compact" {
@@ -659,6 +684,14 @@ impl Chat {
                     // 命令规则挂起的确认还在等：同时跑的另一条命令结束了，不能把它放掉
                     if st.pending.as_ref().is_some_and(|p| Some(&p.tool) == tool.as_ref() && p.guard.is_none()) {
                         Self::drop_pending(&mut st);
+                    }
+                    // 工具跑完了就别再挂着“正在使用 X…”，下一个工具开始时再显示
+                    if st.tool.is_some() && (tool.is_none() || st.tool == tool) {
+                        st.tool = None;
+                        st.doing = None;
+                        if st.phase == Phase::Running {
+                            Self::emit_status(&inst, &st);
+                        }
                     }
                     Self::set_phase(&inst, &mut st, Phase::Running, None);
                 }
@@ -733,6 +766,10 @@ impl Chat {
             let _ = inst.tx.send(Event::Reset);
         }
         if name == "PermissionRequest" {
+            // 交给终端了：终端里的人自己在 TUI 里答
+            if lock(&inst.st).sdk.term.is_some() {
+                return String::new();
+            }
             return self.permission_request(&inst, tool.unwrap_or_default(), &ev).await;
         }
         if name == "UserPromptSubmit" {
@@ -930,7 +967,8 @@ impl Chat {
         self.require(id)?;
         let inst = self.inst(id);
         inst.sdk.store(self.is_sdk(id), Ordering::Relaxed);
-        if inst.sdk.load(Ordering::Relaxed) {
+        // 交给终端了：不起进程（发消息时才收回来）
+        if inst.sdk.load(Ordering::Relaxed) && lock(&inst.st).sdk.term.is_none() {
             if let Err(e) = self.sdk_attach(id).await {
                 let mut st = lock(&inst.st);
                 st.error = Some(e.params.get("detail").and_then(Value::as_str).map(String::from).unwrap_or_else(|| e.code.to_string()).chars().take(500).collect());
@@ -1269,7 +1307,7 @@ impl Chat {
             "activity": st.live.activity,
             "turn": turn,
             "limit": (st.limit_wait.is_some() || st.limit_auto_at.is_some() || st.sdk.limit_resume.is_some())
-                .then(|| json!({ "waiting": st.limit_wait, "auto_at": st.limit_auto_at, "resume_at": st.sdk.limit_resume })),
+                .then(|| json!({ "waiting": st.limit_wait, "auto_at": st.limit_auto_at, "resume_at": st.sdk.limit_resume, "guess": st.sdk.limit_guess })),
             // 这一轮做完了、后台还有任务（shell、子代理……，Claude Code 状态栏上的个数）：做完会接着回来，会话列表上算在干活。
             // 不并进 board：看板上的“正在干活”是这一轮还没完（卡住提醒、停止都按它），后台开着的开发服务器不该算
             "background": st.background.iter().map(|(n, kind)| json!({ "n": n, "kind": kind })).collect::<Vec<_>>(),
@@ -1338,6 +1376,7 @@ impl Chat {
     /// - 补上一轮结束时的摘要、记下标题，改过的存进数据库。
     pub async fn background(self: Arc<Self>) {
         self.sdk_limit_restore();
+        self.sdk_term_restore();
         let mut tick = 0u32;
         loop {
             tokio::time::sleep(Duration::from_secs(3)).await;
@@ -1349,6 +1388,9 @@ impl Chat {
                 if sdk {
                     self.sdk_reap(&inst);
                     self.sdk_limit_tick(&inst);
+                    if tick.is_multiple_of(3) {
+                        self.sdk_term_tick(&inst).await;
+                    }
                 }
                 if tick.is_multiple_of(20) && inst.agent.launch() == "codex" {
                     self.codex_reap(&inst).await;
@@ -1822,7 +1864,9 @@ impl Chat {
             }
         }
         self.instances.send_keys(id, &["Escape"]).await?;
-        lock(&inst.st).last_hook = None;
+        let mut st = lock(&inst.st);
+        st.last_hook = None;
+        Self::stop_tool(&inst, &mut st);
         Ok(())
     }
 
@@ -1839,8 +1883,7 @@ impl Chat {
         if inst.agent.launch() == "dsh" {
             let result = dsh_chat::decision(p.kind, &p.input, req)?;
             p.resolve(result.map(|r| r.to_string()).unwrap_or_default());
-            st.pending = None;
-            Self::set_phase(&inst, &mut st, Phase::Running, None);
+            Self::settle(&inst, &mut st, Phase::Running);
             return Ok(());
         }
         // Codex：答复直接是 app-server 请求的结果
@@ -1851,8 +1894,7 @@ impl Chat {
             }
             let result = codex_chat::decision(&p.tool, p.kind, &p.input, req)?;
             p.resolve(result.to_string());
-            st.pending = None;
-            Self::set_phase(&inst, &mut st, Phase::Running, None);
+            Self::settle(&inst, &mut st, Phase::Running);
             // 拒绝时写的理由：Codex 的拒绝不带话，接着插一句给它
             let msg = req.message.as_deref().map(str::trim).filter(|m| !m.is_empty() && req.decision == "deny").map(String::from);
             if let Some(msg) = msg {
@@ -1870,20 +1912,17 @@ impl Chat {
                 _ => return Err(LocalError::invalid("decision", "invalid")),
             };
             p.resolve(out);
-            st.pending = None;
-            Self::set_phase(&inst, &mut st, Phase::Running, None);
+            Self::settle(&inst, &mut st, Phase::Running);
             return Ok(());
         }
         if req.decision == "terminal" {
             p.resolve(String::new());
-            st.pending = None;
-            Self::set_phase(&inst, &mut st, Phase::Tui, None);
+            Self::settle(&inst, &mut st, Phase::Tui);
             return Ok(());
         }
         let decision = inst.agent.decision(&PendingView { tool: &p.tool, input: &p.input, suggestions: &p.suggestions }, p.kind, req)?;
         p.resolve(json!({ "hookSpecificOutput": { "hookEventName": "PermissionRequest", "decision": decision } }).to_string());
-        st.pending = None;
-        Self::set_phase(&inst, &mut st, Phase::Running, None);
+        Self::settle(&inst, &mut st, Phase::Running);
         Ok(())
     }
 
@@ -1948,6 +1987,17 @@ impl Chat {
     }
 
     // ---------------- 以前的会话转到对话模式 ----------------
+
+    /// 打开终端标签（对话模式的 Claude Code）：对话交给终端里的 TUI，见 `claude_chat::sdk_to_terminal`。
+    /// 别的会话（TUI 本来就在终端里、Codex 另有一套）返回 `state: not_sdk`
+    pub async fn to_terminal(&self, id: &str) -> Result<Value, LocalError> {
+        self.require(id)?;
+        if !self.is_sdk(id) {
+            return Ok(json!({ "state": "not_sdk" }));
+        }
+        self.inst(id).sdk.store(true, Ordering::Relaxed);
+        self.me.upgrade().ok_or_else(|| LocalError::new("CHAT_UNAVAILABLE"))?.sdk_to_terminal(id).await
+    }
 
     /// 界面上的“现在就转过来”：不等空闲，退出终端里以前的 Claude Code / Codex，接着同一段对话转到对话模式
     pub async fn adopt(&self, id: &str) -> Result<(), LocalError> {

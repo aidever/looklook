@@ -147,10 +147,17 @@ const PetPlayer = forwardRef(function PetPlayer(
   }, [bounds, b, W, H, ground, reportHit]);
 
   const room = useCallback(() => {
-    const { minX, maxX } = bounds();
+    const { minX, maxX, maxY } = bounds();
     const x = pos.current.x ?? maxX;
+    const y = pos.current.y ?? 0;
     const e = cb.current.edges;
-    return { left: e?.left ? 4000 : Math.max(0, (x - minX) / scale), right: e?.right ? 4000 : Math.max(0, (maxX - x) / scale) };
+    return {
+      left: e?.left ? 4000 : Math.max(0, (x - minX) / scale),
+      right: e?.right ? 4000 : Math.max(0, (maxX - x) / scale),
+      // 上下能走多远（离底边的高度 y 往上为正）
+      up: Math.max(0, (maxY - y) / scale),
+      down: Math.max(0, y / scale),
+    };
   }, [bounds, scale]);
 
   const savePos = useCallback(() => {
@@ -237,7 +244,9 @@ const PetPlayer = forwardRef(function PetPlayer(
   const startWalk = (mv, durSec, onDone) => {
     stopMotion();
     const x0 = pos.current.x;
+    const y0 = pos.current.y ?? 0;
     const dx = mv.dx * scale;
+    const dy = (mv.dy ?? 0) * scale;
     const t0 = performance.now();
     const span = Math.max(0.2, durSec - mv.lead - mv.tail);
     const pace = Math.max(10, mv.pace * scale);
@@ -245,9 +254,10 @@ const PetPlayer = forwardRef(function PetPlayer(
     const step = (now) => {
       const t = (now - t0) / 1000;
       let k;
-      if (mv.looped) k = Math.min(1, (t * pace) / Math.max(1, Math.abs(dx)));
+      if (mv.looped) k = Math.min(1, (t * pace) / Math.max(1, Math.hypot(dx, dy)));
       else k = Math.min(1, Math.max(0, (t - mv.lead) / span));
       pos.current.x = x0 + dx * k;
+      if (dy) pos.current.y = y0 + dy * k;
       place();
       if (k >= 1) {
         motion.current = null;

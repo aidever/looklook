@@ -1,11 +1,11 @@
 // AI 助手 → 账号 → 用量统计：Claude Code、Codex 的会话记录里的 token 用量，按 models.dev 的 API 价格估算费用
-// （usage_stats.rs，后台每 10 分钟扫一遍；价格每天取一次）。订阅用户看到的是“按 API 价格折算”的数。
+// （usage_stats.rs，后台每 10 分钟扫一遍；价格每 6 小时取一次，Claude 的以本机 Claude Code 自带的为准，可以手动刷新）。订阅用户看到的是“按 API 价格折算”的数。
 // 只在这台电脑上统计，不上传。
 //
 // 参考了 ccusage（按天 / 会话 / 项目、按工具分）、OpenRouter Activity（缓存命中率、按维度切、导出）、
 // Claude Code Usage Monitor（今天按小时看消耗速度）：上面是合计和环比，中间是按天（今天按小时）的柱子，
 // 下面按 工具 / 账号 / 模型 / 项目 / 会话 分开看。
-import { Download, RefreshCw } from 'lucide-react';
+import { ArrowLeft, Download, RefreshCw, Tag } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -51,8 +51,9 @@ function Delta({ now, prev }) {
   return <span className={`small usage-delta ${d > 0 ? 'up' : 'down'}`}>{t(d > 0 ? 'usage.delta_up' : 'usage.delta_down', { p: pct(Math.abs(d)) })}</span>;
 }
 
-/** 柱子：一根一天（或今天的一个小时），按工具叠起来；悬停看明细 */
-function Bars({ items, metric, label }) {
+/** 柱子：一根一天（或一个小时），按工具叠起来；悬停看明细，点一下（手机上没有悬停）在下面列出这一根的明细，
+ *  按天的柱子再点“看这一天”按小时展开 */
+function Bars({ items, metric, label, picked, onPick, onOpen }) {
   const { t } = useTranslation();
   const val = (x) => (metric === 'cost' ? x.cost : x.tokens);
   const fmt = metric === 'cost' ? money : (n) => `${tokens(n)} tokens`;
@@ -65,19 +66,29 @@ function Bars({ items, metric, label }) {
       ...Object.entries(d.agents ?? {}).map(([a, v]) => `${agentName(a)}: ${money(v.cost)} · ${tokens(v.tokens)}`),
     ].join('\n');
   const mid = items[Math.floor((items.length - 1) / 2)];
+  const sel = items.find((d) => d.label === picked);
   return (
-    <div className="usage-chart" role="img" aria-label={label}>
+    <div className="usage-chart" aria-label={label}>
       <span className="usage-max small muted">{fmt(max)}</span>
-      <div className="usage-bars">
+      <div className="usage-bars" role="group" aria-label={label}>
         {items.map((d) => (
-          <span key={d.label} className="usage-bar-hit" title={tip(d)}>
+          <button
+            type="button"
+            key={d.label}
+            className="usage-bar-hit"
+            title={tip(d)}
+            aria-label={tip(d)}
+            aria-pressed={d.label === picked}
+            onClick={() => onPick?.(d.label === picked ? null : d.label)}
+            onDoubleClick={() => onOpen?.(d)}
+          >
             <span className="usage-bar" style={{ height: `${Math.max((val(d) / max) * 100, val(d) ? 2 : 0)}%` }}>
               {order.map((a) => {
                 const v = d.agents?.[a];
                 return v && val(v) ? <i key={a} style={{ flexGrow: val(v), background: agentColor(a) }} /> : null;
               })}
             </span>
-          </span>
+          </button>
         ))}
       </div>
       <div className="usage-axis small muted">
@@ -85,6 +96,24 @@ function Bars({ items, metric, label }) {
         {items.length > 4 && <span>{mid?.short}</span>}
         <span>{items[items.length - 1]?.short}</span>
       </div>
+      {sel && (
+        <div className="usage-pick" role="status">
+          <b>{sel.label}</b>
+          <span>
+            {money(sel.cost)} · {tokens(sel.tokens)} tokens · {t('usage.requests', { n: sel.requests })}
+          </span>
+          {Object.entries(sel.agents ?? {}).map(([a, v]) => (
+            <span key={a} className="small muted">
+              <i className="usage-dot" style={{ background: agentColor(a) }} aria-hidden="true" /> {agentName(a)}: {money(v.cost)} · {tokens(v.tokens)}
+            </span>
+          ))}
+          {onOpen && sel.date && sel.tokens > 0 && (
+            <Button variant="ghost" onClick={() => onOpen(sel)}>
+              {t('usage.open_day')}
+            </Button>
+          )}
+        </div>
+      )}
       {order.length > 1 && (
         <div className="usage-legend small muted">
           {order.map((a) => (
@@ -187,26 +216,43 @@ export default function UsageStatsCard() {
   const [days, setDays] = useState(30);
   const [view, setView] = useState('agents');
   const [metricPick, setMetric] = useState(null);
+  // 点开的那一天（按小时看，明细也只算这一天）、图上选中的那根柱子
+  const [day, setDay] = useState(null);
+  const [bar, setBar] = useState(null);
   // 按界面所在时区分天
   const tz = -new Date().getTimezoneOffset();
-  const [data, error, reload] = useLoad(() => api.get(`/usage-stats?days=${days}&tz=${tz}`), [days]);
+  const q = `days=${days}&tz=${tz}${day ? `&date=${day}` : ''}`;
+  const [loaded, error, reload] = useLoad(() => api.get(`/usage-stats?${q}`), [q]);
+  const [fresh, setFresh] = useState(null);
+  const data = fresh?.q === q ? fresh.data : loaded;
   const { busy, error: scanErr, run } = useAction();
+  const price = useAction();
   const rescan = async () => {
-    if (await run(() => api.post(`/usage-stats/scan?days=${days}&tz=${tz}`, {}))) reload();
+    if (await run(() => api.post(`/usage-stats/scan?${q}`, {}))) reload();
+  };
+  // 新模型的价格没跟上：马上重新取价格（models.dev、本机 Claude Code 自带的价格表）
+  const repricing = async () => {
+    const r = await price.run(() => api.post(`/usage-stats/pricing?${q}`, {}));
+    if (r) setFresh({ q, data: r });
   };
   const ready = data?.ready;
+  const openDay = (d) => {
+    setBar(null);
+    setDay(d.date);
+  };
   // 没选时：算得出费用就按费用看，都是 0（套餐、本机模型）就按 token 看
   const metric = metricPick ?? (ready && !data.total.cost && data.total.tokens ? 'tokens' : 'cost');
 
   const bars = useMemo(() => {
     if (!ready) return [];
-    if (days === 1) return (data.hours ?? []).map((h) => ({ ...h, label: `${String(h.hour).padStart(2, '0')}:00`, short: `${h.hour}:00` }));
+    if (days === 1 || day) return (data.hours ?? []).map((h) => ({ ...h, label: `${String(h.hour).padStart(2, '0')}:00`, short: `${h.hour}:00` }));
     return data.days.map((d) => ({ ...d, label: d.date, short: d.date.slice(5) }));
   }, [data, days, ready]);
 
   const totalVal = ready ? (metric === 'cost' ? data.total.cost : data.total.tokens) : 0;
   const hit = ready ? hitRate(data.total) : null;
-  const lastHour = days === 1 && bars.length ? bars[bars.length - 1] : null;
+  const hourly = days === 1 || Boolean(day);
+  const lastHour = days === 1 && !day && bars.length ? bars[bars.length - 1] : null;
 
   const tables = ready && {
     agents: {
@@ -252,11 +298,21 @@ export default function UsageStatsCard() {
       rows: data.models.map((m) => ({
         key: `${m.agent}/${m.model}`,
         raw: m,
-        costTitle: m.price_from ? t('usage.price_from', { provider: m.price_from }) : undefined,
+        costTitle: m.price_from ? t(m.estimated ? 'usage.price_estimated' : 'usage.price_from', { provider: m.price_from }) : undefined,
         label: (
           <>
             <span className="mono">{m.model}</span>
             <span className="muted"> · {agentName(m.agent)}</span>
+            {m.estimated && (
+              <span className="badge" title={t('usage.price_estimated', { provider: m.price_from })}>
+                {t('usage.estimated')}
+              </span>
+            )}
+            {m.fast > 0 && (
+              <span className="badge" title={t('usage.fast_hint', { n: m.fast })}>
+                {t('usage.fast')}
+              </span>
+            )}
           </>
         ),
       })),
@@ -303,10 +359,13 @@ export default function UsageStatsCard() {
         actions={
           <>
             {ready && (
-              <Button variant="ghost" icon={Download} onClick={() => exportCsv(data, days)} title={t('usage.export_hint')}>
+              <Button variant="ghost" icon={Download} onClick={() => exportCsv(data, day ? 1 : days)} title={t('usage.export_hint')}>
                 {t('usage.export')}
               </Button>
             )}
+            <Button variant="ghost" icon={Tag} busy={price.busy} onClick={repricing} title={t('usage.reprice_hint')}>
+              {t('usage.reprice')}
+            </Button>
             <Button variant="ghost" icon={RefreshCw} busy={busy} onClick={rescan} title={t('usage.rescan_hint')}>
               {t('usage.rescan')}
             </Button>
@@ -314,18 +373,39 @@ export default function UsageStatsCard() {
         }
       >
         <p className="muted small">{t('usage.intro')}</p>
-        <ErrorNote error={error ?? scanErr} />
+        <ErrorNote error={error ?? scanErr ?? price.error} />
         {!data && !error && <Skeleton height={160} />}
         {data && !ready && <p className="small muted">{t('usage.not_ready')}</p>}
         {ready && (
           <>
             <div className="usage-controls">
-              <Seg value={days} label={t('usage.range')} onChange={setDays} options={RANGES.map((d) => [d, d === 1 ? t('usage.today') : t('usage.days', { n: d })])} />
+              {day ? (
+                <Button
+                  variant="secondary"
+                  icon={ArrowLeft}
+                  onClick={() => {
+                    setDay(null);
+                    setBar(null);
+                  }}
+                >
+                  {t('usage.back_range', { day, n: days })}
+                </Button>
+              ) : (
+                <Seg
+                  value={days}
+                  label={t('usage.range')}
+                  onChange={(d) => {
+                    setBar(null);
+                    setDays(d);
+                  }}
+                  options={RANGES.map((d) => [d, d === 1 ? t('usage.today') : t('usage.days', { n: d })])}
+                />
+              )}
               <Seg value={metric} label={t('usage.metric')} onChange={setMetric} options={[['cost', t('usage.metric_cost')], ['tokens', 'Token']]} />
             </div>
             <div className="usage-tiles">
               <div className="usage-tile">
-                <span className="small muted">{days === 1 ? t('usage.today') : t('usage.period', { n: days })}</span>
+                <span className="small muted">{day ?? (days === 1 ? t('usage.today') : t('usage.period', { n: days }))}</span>
                 <b>{money(data.total.cost)}</b>
                 <Delta now={data.total.cost || data.total.tokens} prev={data.total.cost ? data.prev?.cost : data.prev?.tokens} />
               </div>
@@ -336,7 +416,7 @@ export default function UsageStatsCard() {
                   {hit == null ? t('usage.requests', { n: data.total.requests }) : t('usage.hit', { p: pct(hit) })}
                 </span>
               </div>
-              {days === 1 ? (
+              {day ? null : days === 1 ? (
                 <div className="usage-tile">
                   <span className="small muted">{t('usage.this_hour')}</span>
                   <b>{money(lastHour?.cost)}</b>
@@ -355,7 +435,7 @@ export default function UsageStatsCard() {
                 <span className="small muted">{t('usage.requests', { n: data.total.requests })}</span>
               </div>
             </div>
-            <Bars items={bars} metric={metric} label={t(days === 1 ? 'usage.chart_label_hour' : 'usage.chart_label')} />
+            <Bars items={bars} metric={metric} label={t(hourly ? 'usage.chart_label_hour' : 'usage.chart_label')} picked={bar} onPick={setBar} onOpen={hourly ? undefined : openDay} />
             {tbl && (
               <>
                 <div className="usage-controls">
@@ -368,6 +448,7 @@ export default function UsageStatsCard() {
             <p className="muted small" style={{ margin: '12px 0 0' }}>
               {t('usage.note')} {view === 'accounts' && data.accounts?.length > 1 ? t('usage.accounts_note') : ''}
               {data.pricing ? ` ${t('usage.pricing_at', { at: formatTime(data.pricing.fetched_at) })}` : ` ${t('usage.pricing_none')}`}
+              {data.pricing?.claude_code && ` ${t('usage.pricing_claude_code')}`}
               {data.scanned_at && ` ${t('usage.scanned_at', { at: formatTime(data.scanned_at) })}`}
             </p>
           </>

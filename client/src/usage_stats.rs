@@ -23,8 +23,11 @@ use serde_json::{json, Value};
 
 const SCAN_EVERY: Duration = Duration::from_secs(10 * 60);
 const VERSION: u32 = 1;
-/// 每个文件解析的版本：旧版本解析的（没记工作目录、标题）文件还在时重读一遍；删掉的就留着旧的
-const PARSE_V: u32 = 2;
+/// 每个文件解析的版本：旧版本解析的文件还在时重读一遍；删掉的就留着旧的。
+/// 2：记工作目录、标题；3：长提示词、快速模式、联网搜索、顾问（advisor）的用量分开记
+const PARSE_V: u32 = 3;
+/// 长提示词按提示词大小分几档（千 token）：价格表里长提示词那一档的门槛（Haiku 5.5 是 10 万，models.dev 多是 20 万、GPT 是 27.2 万）
+const PROMPT_TIERS: [u32; 3] = [100, 200, 272];
 /// 会话表最多列多少个
 const TOP_SESSIONS: usize = 50;
 
@@ -51,6 +54,40 @@ struct Row {
     /// 请求数
     #[serde(default)]
     n: u64,
+    /// 这些请求的提示词（输入 + 读写缓存）至少多少千 token（[`PROMPT_TIERS`] 里的一档，0 是不到最小那档）：长提示词另算价钱
+    #[serde(default, skip_serializing_if = "is_zero")]
+    x: u32,
+    /// 快速模式（Claude Code `usage.speed == "fast"`）：价钱是平时的几倍（[`fast_rate`]）
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    f: bool,
+    /// 联网搜索次数（按次收费）
+    #[serde(default, skip_serializing_if = "is_zero64")]
+    w: u64,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+fn is_zero64(n: &u64) -> bool {
+    *n == 0
+}
+
+/// 提示词 token 数 → 档（[`Row::x`]）
+fn prompt_tier(prompt: u64) -> u32 {
+    PROMPT_TIERS.iter().rev().copied().find(|&t| prompt >= u64::from(t) * 1000).unwrap_or(0)
+}
+
+/// 快速模式是平时价钱的几倍：同 Claude Code（2.1.321）自己算钱的表——Opus 4.6 / 4.7 是 6 倍，
+/// 之后的 Opus 4.8、5、5.5 和 Fable / Mythos 5.2 是 2 倍；别的模型没有快速模式的价，按平时算
+fn fast_rate(model: &str) -> f64 {
+    let m = model.trim().to_ascii_lowercase();
+    let m = m.split('[').next().unwrap_or(&m);
+    match m {
+        _ if m.starts_with("claude-opus-4-6") || m.starts_with("claude-opus-4-7") => 6.0,
+        _ if ["claude-opus-4-8", "claude-opus-5", "claude-fable-5-2", "claude-mythos-5-2"].iter().any(|p| m.starts_with(p)) => 2.0,
+        _ => 1.0,
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -110,18 +147,20 @@ struct Parsed {
     cwd: Option<String>,
     title: Option<String>,
     sid: Option<String>,
-    rows: HashMap<(i64, String), Row>,
+    rows: HashMap<(i64, String, u32, bool), Row>,
     ids: Vec<u64>,
 }
 
 impl Parsed {
     fn add(&mut self, h: i64, model: &str, r: Row) {
-        let e = self.rows.entry((h, model.to_string())).or_insert_with(|| Row { h, m: model.to_string(), ..Default::default() });
+        let x = prompt_tier(r.i + r.cr + r.cw + r.c1);
+        let e = self.rows.entry((h, model.to_string(), x, r.f)).or_insert_with(|| Row { h, m: model.to_string(), x, f: r.f, ..Default::default() });
         e.i += r.i;
         e.o += r.o;
         e.cr += r.cr;
         e.cw += r.cw;
         e.c1 += r.c1;
+        e.w += r.w;
         e.n += 1;
     }
 }
@@ -175,10 +214,20 @@ fn parse_claude(text: &str, seen: &HashSet<u64>) -> Parsed {
         }
     }
     let mut out = Parsed { cwd, title: custom.or(ai).map(|t| t.trim().to_string()).filter(|t| !t.is_empty()), ..Default::default() };
-    for (id, (h, model, u)) in best {
+    let row = |u: &Value| {
         let c1 = n(&u["cache_creation"], "ephemeral_1h_input_tokens");
-        let cw = n(&u, "cache_creation_input_tokens").saturating_sub(c1);
-        out.add(h, &model, Row { i: n(&u, "input_tokens"), o: n(&u, "output_tokens"), cr: n(&u, "cache_read_input_tokens"), cw, c1, ..Default::default() });
+        let cw = n(u, "cache_creation_input_tokens").saturating_sub(c1);
+        Row { i: n(u, "input_tokens"), o: n(u, "output_tokens"), cr: n(u, "cache_read_input_tokens"), cw, c1, ..Default::default() }
+    };
+    for (id, (h, model, u)) in best {
+        let fast = u["speed"] == "fast";
+        out.add(h, &model, Row { f: fast, w: n(&u["server_tool_use"], "web_search_requests"), ..row(&u) });
+        // 顾问（advisor 工具）：用的是另一个模型，用量单独记在 iterations 里，不含在上面的数里（Claude Code 也是另算钱）
+        for it in u["iterations"].as_array().into_iter().flatten().filter(|it| it["type"] == "advisor_message") {
+            if let Some(m) = it["model"].as_str().filter(|m| !m.is_empty()) {
+                out.add(h, m, row(it));
+            }
+        }
         out.ids.push(id);
     }
     out
@@ -438,10 +487,16 @@ fn account_info(c: Option<&crate::pricing::Catalog>, store: &crate::store::Store
     }
 }
 
+/// 按价格算钱：长提示词那一档、快速模式的倍数、联网搜索按次（Claude 没写价时 1 美分一次）
 fn cost_of(r: &Row, p: &crate::pricing::Cost) -> f64 {
+    let p = p.at(u64::from(r.x) * 1000);
     let read = p.cache_read.unwrap_or(p.input);
     let write = p.cache_write.unwrap_or(p.input * 1.25);
-    (r.i as f64 * p.input + r.o as f64 * p.output + r.cr as f64 * read + r.cw as f64 * write + r.c1 as f64 * p.input * 2.0) / 1_000_000.0
+    let write_1h = p.cache_write_1h.unwrap_or(p.input * 2.0);
+    let tokens = (r.i as f64 * p.input + r.o as f64 * p.output + r.cr as f64 * read + r.cw as f64 * write + r.c1 as f64 * write_1h) / 1_000_000.0;
+    let rate = if r.f { fast_rate(&r.m) } else { 1.0 };
+    let search = p.web_search.or_else(|| r.m.to_ascii_lowercase().starts_with("claude-").then_some(0.01)).unwrap_or(0.0);
+    tokens * rate + r.w as f64 * search
 }
 
 #[derive(Default, Clone)]
@@ -501,16 +556,20 @@ struct Sess {
 }
 
 /// 最近 `days` 天的统计。`tz` 是界面所在时区比 UTC 早多少分钟（东八区是 480），按当地的日期分天。
-/// 另带上一个同样长的时间段的合计（`prev`，看涨了还是降了）和今天每小时的用量（`hours`）。
-pub fn report(store: &crate::store::Store, days: u32, tz: i32) -> Value {
+/// 另带上一个同样长的时间段的合计（`prev`，看涨了还是降了）和最后一天每小时的用量（`hours`）。
+/// `on`（当地日期 YYYY-MM-DD）：只看那一天（`days` 不管），`prev` 是前一天
+pub fn report(store: &crate::store::Store, days: u32, tz: i32, on: Option<&str>) -> Value {
     let guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
     let Some(st) = guard.as_ref() else { return json!({ "ready": false }) };
     let cat = crate::pricing::catalog();
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
     let tz_secs = i64::from(tz.clamp(-14 * 60, 14 * 60)) * 60;
     let today = (now + tz_secs).div_euclid(86400);
-    let span = i64::from(days.clamp(1, 366));
-    let first = today - span + 1;
+    let picked = on.and_then(|d| time::Date::parse(d, time::macros::format_description!("[year]-[month]-[day]")).ok()).map(|d| i64::from(d.to_julian_day()) - 2_440_588).filter(|&d| d <= today);
+    // 最后一天：一般是今天，点了某一天时是那一天
+    let end = picked.unwrap_or(today);
+    let span = if picked.is_some() { 1 } else { i64::from(days.clamp(1, 366)) };
+    let first = end - span + 1;
     let date = |d: i64| time::OffsetDateTime::from_unix_timestamp(d * 86400).map(|t| t.date().to_string()).unwrap_or_default();
     let hour_ts = |h: i64| time::OffsetDateTime::from_unix_timestamp(h * 3600).ok().and_then(|t| t.format(&time::format_description::well_known::Rfc3339).ok());
 
@@ -518,7 +577,7 @@ pub fn report(store: &crate::store::Store, days: u32, tz: i32) -> Value {
     // 今天当地的第几个小时 → 助手 → 用量
     let mut by_hour: BTreeMap<i64, BTreeMap<String, Sum>> = BTreeMap::new();
     // (助手, 模型) → (用量, 价格来自哪家)
-    let mut by_model: BTreeMap<(String, String), (Sum, Option<String>)> = BTreeMap::new();
+    let mut by_model: BTreeMap<(String, String), (Sum, Option<String>, u64)> = BTreeMap::new();
     // 助手（Claude Code、Codex）→ 用量
     let mut by_agent: BTreeMap<String, Sum> = BTreeMap::new();
     // (助手, 账号) → 用量
@@ -546,10 +605,11 @@ pub fn report(store: &crate::store::Store, days: u32, tz: i32) -> Value {
         let hint = info_of.entry((f.agent.clone(), account.clone())).or_insert_with(|| account_info(cat.as_deref(), store, &f.agent, &account)).2.clone();
         for r in &f.rows {
             let day = (r.h * 3600 + tz_secs).div_euclid(86400);
-            if day < first - span {
+            if day < first - span || day > end {
                 continue;
             }
-            let priced = cat.as_ref().and_then(|c| crate::pricing::price(c, hint.as_deref(), &r.m));
+            // 哪里都还没有价格的新 Claude 模型：按同一系列最新的估（price_from 带 `~`，界面上标“估算”）
+            let priced = cat.as_ref().and_then(|c| crate::pricing::price(c, hint.as_deref(), &r.m).or_else(|| crate::pricing::guess_price(c, &r.m)));
             let cost = priced.as_ref().map(|(p, _)| cost_of(r, p)).unwrap_or(0.0);
             if day < first {
                 prev.add(r, cost);
@@ -562,6 +622,9 @@ pub fn report(store: &crate::store::Store, days: u32, tz: i32) -> Value {
             e.0.add(r, cost);
             if let Some((_, pid)) = priced {
                 e.1 = Some(pid);
+            }
+            if r.f {
+                e.2 += r.n;
             }
             let p = by_project.entry(project.clone()).or_insert_with(|| (Sum::default(), f.cwd.clone().unwrap_or_default(), HashSet::new()));
             p.0.add(r, cost);
@@ -577,22 +640,26 @@ pub fn report(store: &crate::store::Store, days: u32, tz: i32) -> Value {
                 s.cwd = f.cwd.clone();
             }
             total.add(r, cost);
-            if day == today {
+            if day == end {
                 today_sum.add(r, cost);
-                let hour = (r.h * 3600 + tz_secs).div_euclid(3600) - today * 24;
+                let hour = (r.h * 3600 + tz_secs).div_euclid(3600) - end * 24;
                 by_hour.entry(hour).or_default().entry(f.agent.clone()).or_default().add(r, cost);
             }
         }
     }
-    let names = |pid: &Option<String>| pid.as_ref().and_then(|p| cat.as_ref()?.providers.get(p).map(|x| x.name.clone()));
+    let names = |pid: &Option<String>| pid.as_ref().and_then(|p| cat.as_ref()?.providers.get(p.trim_end_matches('~')).map(|x| x.name.clone()));
     let mut models: Vec<Value> = by_model
         .iter()
-        .map(|((agent, model), (s, pid))| {
+        .map(|((agent, model), (s, pid, fast))| {
             let mut v = s.view();
             v["agent"] = json!(agent);
             v["model"] = json!(model);
             v["priced"] = json!(pid.is_some());
             v["price_from"] = json!(names(pid));
+            // 没有这个模型的价格，按同一系列最新的估的
+            v["estimated"] = json!(pid.as_deref().is_some_and(|p| p.ends_with('~')));
+            // 快速模式的请求数（价钱另算）
+            v["fast"] = json!(fast);
             v
         })
         .collect();
@@ -650,14 +717,14 @@ pub fn report(store: &crate::store::Store, days: u32, tz: i32) -> Value {
         .collect();
     sessions.sort_by(by_cost);
     sessions.truncate(TOP_SESSIONS);
-    let days: Vec<Value> = (first..=today)
+    let days: Vec<Value> = (first..=end)
         .map(|d| {
             let mut v = bucket_view(by_day.get(&d));
             v["date"] = json!(date(d));
             v
         })
         .collect();
-    let now_hour = (now + tz_secs).div_euclid(3600) - today * 24;
+    let now_hour = if end == today { (now + tz_secs).div_euclid(3600) - today * 24 } else { 23 };
     let hours: Vec<Value> = (0..=now_hour)
         .map(|h| {
             let mut v = bucket_view(by_hour.get(&h));
@@ -667,8 +734,9 @@ pub fn report(store: &crate::store::Store, days: u32, tz: i32) -> Value {
         .collect();
     json!({
         "ready": true,
+        "date": picked.map(|_| date(end)),
         "scanned_at": st.scanned_at,
-        "pricing": cat.as_ref().map(|c| json!({ "source": "models.dev", "fetched_at": c.fetched_at })),
+        "pricing": cat.as_ref().map(|c| json!({ "source": "models.dev", "fetched_at": c.fetched_at, "claude_code": c.providers.contains_key(crate::pricing::CLAUDE_CODE) })),
         "total": total.view(),
         "prev": prev.view(),
         "today": today_sum.view(),
@@ -750,7 +818,7 @@ mod tests {
         let t = std::time::Instant::now();
         scan_blocking(&home);
         let store = crate::store::Store::open(&home.join("t.db")).unwrap();
-        let r = report(&store, 30, 480);
+        let r = report(&store, 30, 480, None);
         println!("首次 {first:?}，再扫 {:?}；文件 {}", t.elapsed(), STATE.lock().unwrap().as_ref().unwrap().files.len());
         println!("合计 {}\n今天 {}", r["total"], r["today"]);
         for m in r["models"].as_array().unwrap().iter().take(12) {
@@ -817,7 +885,7 @@ mod tests {
         let home = std::env::temp_dir().join(format!("ll-usage-rep-{}", std::process::id()));
         std::fs::create_dir_all(&home).unwrap();
         let store = crate::store::Store::open(&home.join("t.db")).unwrap();
-        let r = report(&store, 7, 0);
+        let r = report(&store, 7, 0, None);
         *STATE.lock().unwrap() = None;
         let _ = std::fs::remove_dir_all(&home);
         assert_eq!((r["total"]["output"].as_u64(), r["prev"]["output"].as_u64(), r["today"]["output"].as_u64()), (Some(14), Some(5), Some(14)));
@@ -842,10 +910,34 @@ mod tests {
 
     #[test]
     fn cost_formula() {
-        let p = crate::pricing::Cost { input: 3.0, output: 15.0, cache_read: Some(0.3), cache_write: Some(3.75) };
+        let p = crate::pricing::Cost { input: 3.0, output: 15.0, cache_read: Some(0.3), cache_write: Some(3.75), ..Default::default() };
         let r = Row { i: 1_000_000, o: 1_000_000, cr: 1_000_000, cw: 1_000_000, c1: 1_000_000, ..Default::default() };
         assert!((cost_of(&r, &p) - (3.0 + 15.0 + 0.3 + 3.75 + 6.0)).abs() < 1e-9);
         let no_cache = crate::pricing::Cost { input: 1.0, output: 2.0, ..Default::default() };
         assert!((cost_of(&Row { cr: 1_000_000, ..Default::default() }, &no_cache) - 1.0).abs() < 1e-9, "没有缓存价时按输入价");
+        // 快速模式、联网搜索
+        let opus = crate::pricing::Cost { input: 4.0, output: 20.0, ..Default::default() };
+        let fast = Row { m: "claude-opus-5-5".into(), o: 1_000_000, f: true, w: 3, ..Default::default() };
+        assert!((cost_of(&fast, &opus) - (40.0 + 0.03)).abs() < 1e-9);
+        assert!((cost_of(&Row { m: "claude-opus-4-6".into(), o: 1_000_000, f: true, ..Default::default() }, &opus) - 120.0).abs() < 1e-9);
+        // 长提示词那一档
+        let haiku = crate::pricing::Cost { input: 0.1, output: 0.5, long: Some(crate::pricing::Long { above: 100_000, input: 0.5, output: 2.5, ..Default::default() }), ..Default::default() };
+        assert!((cost_of(&Row { i: 1_000_000, x: 100, ..Default::default() }, &haiku) - 0.5).abs() < 1e-9);
+        assert!((cost_of(&Row { i: 1_000_000, ..Default::default() }, &haiku) - 0.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn claude_fast_long_advisor() {
+        let mut s = String::new();
+        let usage = json!({ "input_tokens": 2, "output_tokens": 10, "cache_read_input_tokens": 150_000, "cache_creation_input_tokens": 0, "speed": "fast",
+            "server_tool_use": { "web_search_requests": 2 },
+            "iterations": [{ "type": "message", "input_tokens": 2, "output_tokens": 10 }, { "type": "advisor_message", "model": "claude-fable-5-2", "input_tokens": 500, "output_tokens": 40, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0 }] });
+        s += &line(json!({ "type": "assistant", "timestamp": "2026-10-27T10:17:26.913Z", "requestId": "r1", "message": { "id": "m1", "model": "claude-opus-5-5", "usage": usage } }));
+        let p = parse_claude(&s, &HashSet::new());
+        let main = p.rows.values().find(|r| r.m == "claude-opus-5-5").unwrap();
+        assert_eq!((main.x, main.f, main.w), (100, true, 2));
+        let adv = p.rows.values().find(|r| r.m == "claude-fable-5-2").unwrap();
+        assert_eq!((adv.i, adv.o, adv.f, adv.x), (500, 40, false, 0));
+        assert_eq!(p.ids.len(), 1);
     }
 }

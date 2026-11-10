@@ -90,6 +90,7 @@ pub fn routes(app: App) -> Router<App> {
         .route("/instances/{id}/chat/relaunch", post(super::chat::relaunch))
         .route("/instances/{id}/chat/switch-profile", post(super::chat::switch_profile))
         .route("/instances/{id}/chat/codex-terminal", post(super::chat::codex_terminal))
+        .route("/instances/{id}/chat/to-terminal", post(super::chat::to_terminal))
         .route("/instances/{id}/chat/adopt", post(super::chat::adopt))
         .route("/instances/{id}/chat/setting", post(super::chat::setting))
         .route("/instances/{id}/chat/tasks", get(super::chat::tasks))
@@ -240,6 +241,7 @@ pub fn routes(app: App) -> Router<App> {
         .route("/codex-profiles/{id}/usage", post(codex_profile_usage))
         .route("/usage-stats", get(usage_stats))
         .route("/usage-stats/scan", post(usage_stats_scan))
+        .route("/usage-stats/pricing", post(usage_stats_pricing))
         .route("/claude-profiles", get(get_claude_profiles).post(add_claude_profile))
         .route("/claude-profiles/default", put(set_default_claude_profile))
         .route("/claude-profiles/{id}", put(update_claude_profile).delete(delete_claude_profile))
@@ -2822,6 +2824,9 @@ struct UsageQ {
     /// 界面所在时区比 UTC 早多少分钟
     #[serde(default)]
     tz: i32,
+    /// 只看这一天（当地日期 YYYY-MM-DD，点了图上的一根柱子）：这一天按小时，明细也只算这一天
+    #[serde(default)]
+    date: Option<String>,
 }
 
 fn default_days() -> u32 {
@@ -2829,13 +2834,20 @@ fn default_days() -> u32 {
 }
 
 async fn usage_stats(State(app): State<App>, Query(q): Query<UsageQ>) -> Json<Value> {
-    Json(crate::usage_stats::report(&app.store, q.days, q.tz))
+    Json(crate::usage_stats::report(&app.store, q.days, q.tz, q.date.as_deref()))
 }
 
 /// 马上重新扫一遍
 async fn usage_stats_scan(State(app): State<App>, Query(q): Query<UsageQ>) -> Json<Value> {
     crate::usage_stats::scan(app.paths.home.clone()).await;
-    Json(crate::usage_stats::report(&app.store, q.days, q.tz))
+    Json(crate::usage_stats::report(&app.store, q.days, q.tz, q.date.as_deref()))
+}
+
+/// 马上更新价格（models.dev、本机 Claude Code 自带的价格表），再扫一遍
+async fn usage_stats_pricing(State(app): State<App>, Query(q): Query<UsageQ>) -> Json<Value> {
+    crate::pricing::refresh_now(&app.paths.home).await;
+    crate::usage_stats::scan(app.paths.home.clone()).await;
+    Json(crate::usage_stats::report(&app.store, q.days, q.tz, q.date.as_deref()))
 }
 
 /// 本机有没有在运行 Ollama（添加第三方接口时一键填好，见 provider_quota.rs）

@@ -837,7 +837,7 @@ export function SessionList({ currentId, onCollapse }) {
           </p>
         )}
         {drafting && <DraftSideRow />}
-        {open && [...x.live, ...shown].filter((r) => !r.m.offline || r.kind === 'conv').map(row)}
+        {open && [...x.live, ...shown].sort(byAt).filter((r) => !r.m.offline || r.kind === 'conv').map(row)}
         {open && more > 0 && !p.offline && (
           <Link to={projectPath(p)} className="slist-more">
             {t('sess.all_in_project', { count: x.count })}
@@ -852,7 +852,7 @@ export function SessionList({ currentId, onCollapse }) {
   } else if (groupBy === 'recent') {
     // 按时间：不分项目，在运行的和停了的、以前的对话放在一起按最近用过排
     const rows = projects.flatMap((x) => [...x.live, ...x.rest].map((r) => ({ ...r, x }))).filter((r) => !r.m.offline || r.kind === 'conv');
-    rows.sort((a, b) => (a.kind === 'inst' && isLive(a.inst) ? 0 : 1) - (b.kind === 'inst' && isLive(b.inst) ? 0 : 1) || b.at - a.at);
+    rows.sort(byAt);
     const max = filtering ? rows.length : 60;
     body = (
       <section className="sproject srecent">

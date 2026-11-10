@@ -77,8 +77,17 @@ export const lastUsed = (i) => Math.max(ts(i.last_activity_at), ts(i.started_at)
 export const startedAt = (i) => ts(i.started_at) || ts(i.created_at);
 /** 会话在运行（终端或后台任务还在）。 */
 export const isActive = (i) => Boolean(i.running || i.task_alive);
-/** 会话列表的顺序：运行中的在前，再按启动时间从新到旧。 */
-export const bySessionOrder = (a, b) => isActive(b) - isActive(a) || startedAt(b) - startedAt(a);
+/**
+ * 会话最近更新的时间（毫秒），列表排序用（和 Codex、Claude 桌面版一样按“最近更新”）：
+ * 对话界面的会话按这段对话最近一轮的开始 / 结束（发消息、做完时往上挪，干活中途不跳）；
+ * 终端按终端最后有输出的时间。
+ */
+export const updatedAt = (i) => {
+  const t = i.chat?.turn;
+  return i.chat ? Math.max(t?.started_at ?? 0, t?.ended_at ?? 0, startedAt(i)) : lastUsed(i);
+};
+/** 会话列表的顺序：最近更新的在前（不再把运行中的单独提到前面）。 */
+export const bySessionOrder = (a, b) => updatedAt(b) - updatedAt(a);
 /** 会话显示的名字：agent 自己的会话名为主，没有时用会话名。 */
 export const sessionTitle = (i) => i?.agent_title || i?.name || '';
 /** 图标用的类型：现在在跑的 AI 工具（普通终端里手动起的 claude、codex 也算，电脑端 session_probe.rs 认的），否则会话的类型 */
@@ -117,7 +126,7 @@ export function projectEntries(p, convs = p.convs) {
   const stopped = p.persistent === true ? p.items.filter((i) => !isActive(i) && AGENTS.includes(i.launch)) : [];
   const terms = p.items.filter((i) => !isActive(i) && !stopped.includes(i));
   const open = convs.filter((c) => !(c.instance_id && liveIds.has(c.instance_id)));
-  const inst = (i) => ({ kind: 'inst', key: i.id, inst: i, at: lastUsed(i) });
+  const inst = (i) => ({ kind: 'inst', key: i.id, inst: i, at: updatedAt(i) });
   const rest = [...terms.map(inst), ...open.map((c) => ({ kind: 'conv', key: `${c.agent}:${c.id}`, conv: c, at: ts(c.updated_at) }))].sort((a, b) => b.at - a.at);
   return { live: live.map(inst), rest, stopped, count: live.length + terms.length + Math.max(p.total, convs.length) - (convs.length - open.length) };
 }
@@ -369,7 +378,7 @@ export function groupProjects(projects, multi) {
  * `full_access` 是在这个项目里新建时选过的，没选过为 null（见 Sessions.jsx 的 fullAccessFor）。
  * `convs` 是这个文件夹里最近的几个以前的对话，`total` / `counts` 是一共多少个（各工具多少个），`convAt` 是最近一个的时间；
  * `persistent` 为 false 时那台电脑不能接着以前的对话（没有会话保持），null 是不知道（旧版客户端）。
- * 置顶的在前，再按有没有在运行、最近用过排；项目里的会话按启动时间。
+ * 置顶的在前，再按最近更新排；项目里的会话按最近更新（updatedAt）。
  */
 function mergeProjects({ devIds, store, items, multi, cache, onlineIds, folders, remotes }) {
   const map = new Map();
@@ -396,7 +405,7 @@ function mergeProjects({ devIds, store, items, multi, cache, onlineIds, folders,
   for (const p of list) {
     p.items.sort(bySessionOrder);
     p.active = p.items.some(isActive);
-    p.used = Math.max(p.used, ...p.items.map(startedAt), 0);
+    p.used = Math.max(p.used, ...p.items.map(updatedAt), 0);
     const fs = !p.offline && !p.container ? folders[p.device ?? ''] : null;
     const f = fs?.items.find((x) => dirKey(x.workdir) === dirKey(p.workdir));
     if (fs) p.persistent = fs.persistent;
@@ -410,7 +419,8 @@ function mergeProjects({ devIds, store, items, multi, cache, onlineIds, folders,
     if (!p.launch) p.launch = p.items[0]?.launch ?? f?.items[0]?.agent ?? 'claude';
     if (!p.offline && !p.container) p.remote = remotes[p.device ?? '']?.[p.workdir] ?? null;
   }
-  return list.sort((a, b) => b.pinned - a.pinned || b.active - a.active || b.used - a.used || a.name.localeCompare(b.name));
+  // 和主流 agent 客户端一样：置顶的在前，其余按最近更新（会话或以前的对话里最新的那个），不按在不在运行
+  return list.sort((a, b) => b.pinned - a.pinned || Math.max(b.used, b.convAt) - Math.max(a.used, a.convAt) || a.name.localeCompare(b.name));
 }
 
 export function SessionsProvider({ enabled, children }) {

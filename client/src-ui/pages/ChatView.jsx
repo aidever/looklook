@@ -135,6 +135,7 @@ import ErrorBoundary from '../shared/ErrorBoundary.jsx';
 import { errorText } from '../shared/i18n.js';
 import Markdown from '../shared/Markdown.jsx';
 import ImageViewer from '../shared/ImageViewer.jsx';
+import { useDevices } from '../shared/devices.jsx';
 import { useRouter } from '../shared/router.jsx';
 import { useSessions } from '../shared/sessions.jsx';
 import { formatTime, parseInstant, relativeTime, spanText } from '../shared/time.js';
@@ -1966,11 +1967,11 @@ function CodexUpdate({ id, update, onDone }) {
   useEffect(() => {
     if (!running) return undefined;
     const timer = setInterval(async () => {
-      const j = await api.get('/tools/install/codex').catch(() => null);
+      const j = await deviceApi(terminalDevice(id)).get('/tools/install/codex').catch(() => null);
       if (j) setJob(j);
     }, 1500);
     return () => clearInterval(timer);
-  }, [running]);
+  }, [running, id]);
   const act = async (install) => {
     setBusy(true);
     try {
@@ -2230,7 +2231,22 @@ function SwitchProfile({ id, manage, goOn = true }) {
   const { navigate } = useRouter();
   const toast = useToast();
   const [busy, setBusy] = useState(false);
-  const [data] = useLoad(() => Promise.all([api.get('/claude-profiles'), api.get(`/instances/${id}`)]).catch(() => null), [id]);
+  const devices = useDevices();
+  // 账号是会话所在那台电脑的：多台电脑时 /claude-profiles 默认发给选中的电脑，要先找到会话在哪台、再问它
+  const [data] = useLoad(
+    () =>
+      api
+        .get(`/instances/${id}`)
+        .then(async (inst) => [await deviceApi(terminalDevice(id)).get('/claude-profiles'), inst])
+        .catch(() => null),
+    [id],
+  );
+  // 去“账号”页之前先切到会话那台电脑，不然管的是另一台的账号
+  const manageAccounts = () => {
+    const dev = terminalDevice(id);
+    if (dev && devices.multi && dev !== devices.selected) devices.select(dev);
+    navigate('/ai#claude-accounts');
+  };
   if (!data) return null;
   const [{ profiles, default: def }, inst] = data;
   // 容器里的会话不用看看的账号
@@ -2239,7 +2255,7 @@ function SwitchProfile({ id, manage, goOn = true }) {
   const others = profiles.filter((p) => p.id !== cur);
   if (!others.length) {
     return manage ? (
-      <Button variant="ghost" onClick={() => navigate('/ai#claude-accounts')}>
+      <Button variant="ghost" onClick={manageAccounts}>
         <UserRound size={15} aria-hidden="true" /> {t('chat.limit.add_account')}
       </Button>
     ) : null;
@@ -2270,7 +2286,7 @@ function SwitchProfile({ id, manage, goOn = true }) {
           onClick: () => pick(p),
         })),
         'sep',
-        { label: t('cprof.manage'), onClick: () => navigate('/ai#claude-accounts') },
+        { label: t('cprof.manage'), onClick: manageAccounts },
       ]}
     />
   );
@@ -5171,21 +5187,44 @@ export default function ChatView({ id, launch, active, touch, offline = false, o
   const compact = () => api.post(`/instances/${id}/chat/input`, { text: '/compact', images: [] }).catch((e) => toast(errorText(t, e), 'error'));
   const loading = useRef(false);
   // 往上翻到顶：加载更早的，保持看着的位置不动
-  const onScroll = async (e) => {
-    const el = e.currentTarget;
-    if (el.scrollTop < 40 && chat.start > 0 && !loading.current) {
-      loading.current = true;
-      const before = el.scrollHeight;
-      try {
-        await chat.loadOlder();
-      } finally {
-        requestAnimationFrame(() => {
-          el.scrollTop += el.scrollHeight - before;
-          loading.current = false;
-        });
-      }
+  const loadOlder = useCallback(async () => {
+    const el = list.current;
+    if (!el || chat.start <= 0 || loading.current) return;
+    loading.current = true;
+    const before = el.scrollHeight;
+    try {
+      await chat.loadOlder();
+    } finally {
+      requestAnimationFrame(() => {
+        el.scrollTop += el.scrollHeight - before;
+        loading.current = false;
+      });
     }
+  }, [chat.start, chat.loadOlder]);
+  const onScroll = (e) => {
+    if (e.currentTarget.scrollTop < 40) loadOlder();
   };
+  // 已经在最顶上（或者内容不满一屏、根本滚不动）时不会再有 scroll 事件：往上滚轮、往下拉也算
+  const touchY = useRef(null);
+  const onWheel = (e) => {
+    if (e.deltaY < 0 && e.currentTarget.scrollTop < 40) loadOlder();
+  };
+  const onTouchStart = (e) => {
+    touchY.current = e.touches[0]?.clientY ?? null;
+  };
+  const onTouchMove = (e) => {
+    const y = e.touches[0]?.clientY;
+    if (touchY.current != null && y - touchY.current > 30 && e.currentTarget.scrollTop < 40) loadOlder();
+  };
+  // 条目常被折进“处理过程”，最近的（或刚取到的）可能不满一屏、根本滚不动：接着往前取
+  useEffect(() => {
+    const el = list.current;
+    if (!el || chat.start <= 0) return;
+    const r = requestAnimationFrame(() => {
+      if (!loading.current && el.scrollHeight - el.clientHeight < 40) loadOlder();
+    });
+    return () => cancelAnimationFrame(r);
+  }, [chat.start, items.length, loadOlder]);
   if (chat.error && !status) {
     return (
       <div className="chat-view">
@@ -5207,9 +5246,13 @@ export default function ChatView({ id, launch, active, touch, offline = false, o
         <div className="chat-main">
           {finding && <FindBar list={list} inner={inner} more={chat.start > 0} deps={[items, side]} onClose={() => setFinding(false)} />}
           <SelectionActions id={id} list={list} disabled={phase === 'detached'} />
-          <div className="chat-list" ref={list} onScroll={onScroll} tabIndex={-1}>
+          <div className="chat-list" ref={list} onScroll={onScroll} onWheel={onWheel} onTouchStart={onTouchStart} onTouchMove={onTouchMove} tabIndex={-1}>
             <div className="chat-items" ref={inner}>
-              {chat.start > 0 && <p className="chat-event">{t('chat.older')}</p>}
+              {chat.start > 0 && (
+                <button type="button" className="chat-event chat-older" onClick={loadOlder}>
+                  {t('chat.older')}
+                </button>
+              )}
               {!items.length && status && phase !== 'detached' && !first && !echo && (
                 <div className="chat-empty">
                   <span className="chat-empty-mark" aria-hidden="true">

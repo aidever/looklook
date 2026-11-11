@@ -72,22 +72,12 @@ jobs:
       - name: 构建工具
         run: |
           set -euo pipefail
-          # apt：GitHub 机器常连不上 azure.archive.ubuntu.com（解析失败、一卡二十分钟），加超时重试，
-          # 不行就换成官方源再试一次
-          apt_install() {
-            local o=(-q -y -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
-            if sudo apt-get "${o[@]}" update && sudo apt-get "${o[@]}" install "$@"; then return 0; fi
-            echo "::warning::apt 镜像连不上，换 archive.ubuntu.com 再试"
-            echo 'http://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
-            sudo sed -i 's#azure\.archive\.ubuntu\.com#archive.ubuntu.com#g' /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null || true
-            sudo apt-get "${o[@]}" update && sudo apt-get "${o[@]}" install "$@"
-          }
-          # 字体子集工具从 PyPI 装，不走 apt
-          python3 -m pip install -q --break-system-packages --retries 5 fonttools brotli
+          sudo apt-get update -q
+          sudo apt-get install -y -q python3-fonttools python3-brotli
           # Windows 桌面应用：嵌入图标与清单（windres）、生成 NSIS 安装程序（makensis）。
           # Tauri CLI 在 Linux 宿主上只要开了 tray-icon 就用 pkg-config 查 appindicator（目标是 Windows 也查），
           # 查不到会直接崩溃，所以还要装 libayatana-appindicator3-dev。
-          apt_install binutils-mingw-w64-x86-64 nsis pkg-config libayatana-appindicator3-dev
+          sudo apt-get install -y -q binutils-mingw-w64-x86-64 nsis pkg-config libayatana-appindicator3-dev
           curl -fsSL --retry 3 -o /tmp/zig.tar.xz "https://ziglang.org/download/$ZIG_VERSION/zig-x86_64-linux-$ZIG_VERSION.tar.xz"
           echo "$ZIG_SHA256  /tmp/zig.tar.xz" | sha256sum -c -
           sudo mkdir -p /opt/zig && sudo tar -C /opt/zig -xJf /tmp/zig.tar.xz

@@ -1,14 +1,13 @@
 //! 通知（docs/TASK_BOARD.md §3.3、§6）：人不在电脑前，也能在飞书里收到“等你处理 / 做完了 / 出错了”并直接处理。
 //!
-//! - **配置**放在同步集合 `notify`（`feishu`：应用凭证和绑定的人；`rules`：规则），经“设置同步”在用户自己的电脑之间传；
-//! - **发**：每台电脑只管自己的会话，每 2 秒看一遍各会话的状态（`Chat::brief`），按规则发卡片。
-//!   配置虽然同步，默认只有配飞书的那台电脑（`Feishu::home`）往外发自己会话的提醒，别的电脑在设置里自己打开（本机开关 [`sends_here`]）；
-//!   在飞书里对话的会话（有话题）不管这个开关；
+//! - **配置**放在集合 `notify`（`feishu`：应用凭证和绑定的人；`rules`：规则；`hooks`：渠道；`agent_*`：飞书里对话的记录），
+//!   **只留在配它的那台电脑上，不在电脑之间同步**（2026-11-10 起，`settings_sync::LOCAL_ONLY`；之前同步过来的升级后由 [`localize`] 清掉）；
+//! - **发**：配了的电脑只管自己的会话，每 2 秒看一遍各会话的状态（`Chat::brief`），按规则发卡片。
 //!   “等你处理”解除时把卡片改成灰色（§6.4），同一个会话只留一张能点的卡片；
-//! - **收**：每台电脑都连长连接，飞书把每个回调随机给其中一台（集群模式）。会话在本机就直接处理；
-//!   在别的电脑上就先回一个 toast，再经 WebRTC 用设备签名转给那台（`POST /api/notify/action`），由它处理并更新卡片；
+//! - **收**：只有配了飞书的电脑连长连接，回调都落在它上面。`POST /api/notify/action`（经 WebRTC 转给卡片所在的电脑）
+//!   留给升级前别的电脑发出去的旧卡片，对方没有配置时会回“没配置”；
 //! - **绑定**：设置页显示 6 位绑定码 = HMAC(App Secret, 时间窗) 的前 6 位，私聊机器人发这个码。收到的电脑自己就能校验，不用存。
-//! - **只通知的渠道**（同步项 `notify/hooks`，`push.rs`）：企业微信、钉钉、Server酱、PushPlus、Bark、ntfy，和飞书同时发同样的事，只带“打开”的链接。
+//! - **只通知的渠道**（`notify/hooks`，`push.rs`）：企业微信、钉钉、Server酱、PushPlus、Bark、ntfy，和飞书同时发同样的事，只带“打开”的链接。
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
@@ -44,7 +43,7 @@ const LOCAL_WAIT: Duration = Duration::from_millis(2300);
 const PAIR_WINDOW_MS: i64 = 10 * 60 * 1000;
 const MAX_SKEW_MS: i64 = 5 * 60 * 1000;
 
-/// 飞书应用（同步项 `notify/feishu`）
+/// 飞书应用（`notify/feishu`，只在本机）
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Feishu {
     pub app_id: String,
@@ -60,32 +59,57 @@ pub struct Feishu {
     /// 测试卡片上的按钮点通过：回调配好了
     #[serde(default)]
     pub callback_ok: bool,
-    /// 在哪台电脑上配的（设备 id）。飞书配置会同步到用户的每台电脑，但默认只有这台把自己会话的提醒发到飞书，
-    /// 别的电脑要在设置里自己打开（[`sends_here`]），免得一台电脑配了飞书，别的电脑的会话也都经这个机器人发过来
+    /// 在哪台电脑上配的（设备 id）。配置同步那时（2026-11-10 之前）用来认哪台是配它的电脑，升级时 [`localize`] 按它留下或清掉
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub home: String,
 }
 
-/// 本机的开关（不同步）：这台电脑的会话提醒发不发到飞书等外部渠道
+/// 旧的本机开关“这台电脑的会话也发提醒”（配置同步那时用的）：升级时 [`localize`] 看一眼就删掉
 const HERE_KEY: &str = "notify.here";
+/// [`localize`] 做完了
+const LOCAL_KEY: &str = "notify.local";
 
-/// 这台电脑的会话提醒发不发：自己设过的按设的；没设过时，飞书是在这台电脑上配的（或旧配置没记是哪台）才发
-pub fn sends_here(store: &crate::store::Store, f: Option<&Feishu>, own: &str) -> bool {
-    if let Ok(Some(v)) = store.get::<bool>(HERE_KEY) {
-        return v;
+/// 升级到“通知配置只在本机”（2026-11-10）后第一次：清掉之前从别的电脑同步过来的通知配置，只留在配它的那台。
+/// - 飞书：留在配它的那台（`home`；旧配置没记 `home` 的看是不是本机写的），或者这台自己打开过“也发提醒”的；
+/// - 渠道：本机写的才留；
+/// - 规则、飞书里对话的记录：留下了飞书或渠道就都留，否则本机写的才留。
+///
+/// 要知道本机是哪台电脑（登录了）才做；没做完返回 false，下一轮再试。
+pub fn localize(app: &App) -> bool {
+    let store = &app.store;
+    if store.get::<bool>(LOCAL_KEY).ok().flatten() == Some(true) {
+        return true;
     }
-    f.is_none_or(|f| f.home.is_empty() || f.home == own)
+    let (Ok(recs), Ok(me)) = (settings_sync::records(store, COLLECTION), settings_sync::node_id(store)) else { return false };
+    let mut drop: Vec<String> = recs.iter().filter(|r| r.deleted).map(|r| r.id.clone()).collect();
+    let live: Vec<_> = recs.iter().filter(|r| !r.deleted).collect();
+    if !live.is_empty() {
+        let Some(own) = app.account.session().map(|s| s.device_id) else { return false };
+        let mine = |id: &str| live.iter().any(|r| r.id == id && r.origin == me);
+        let here_on = store.get::<bool>(HERE_KEY).ok().flatten() == Some(true);
+        let feishu = load_feishu(store).is_some_and(|f| f.home == own || (f.home.is_empty() && mine("feishu")) || here_on);
+        let hooks = mine("hooks");
+        for r in &live {
+            let keep = match r.id.as_str() {
+                "feishu" => feishu,
+                "hooks" => hooks,
+                _ => feishu || hooks || r.origin == me,
+            };
+            if !keep {
+                drop.push(r.id.clone());
+            }
+        }
+        tracing::info!(feishu, hooks, dropped = drop.len(), "通知：配置改成只在本机，清掉别的电脑同步来的");
+    }
+    if let Err(e) = settings_sync::drop_local(store, COLLECTION, &drop) {
+        tracing::warn!(error = ?e, "通知：清理同步来的配置失败");
+        return false;
+    }
+    let _ = store.remove(HERE_KEY);
+    store.set(LOCAL_KEY, &true).is_ok()
 }
 
-pub fn set_here(store: &crate::store::Store, on: Option<bool>) -> Result<(), LocalError> {
-    match on {
-        Some(v) => store.set(HERE_KEY, &v)?,
-        None => store.remove(HERE_KEY)?,
-    }
-    Ok(())
-}
-
-/// 规则（同步项 `notify/rules`，§6.5）
+/// 规则（`notify/rules`，§6.5）
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Rules {
@@ -180,10 +204,9 @@ pub fn load_rules(store: &crate::store::Store) -> Rules {
     settings_sync::values(store, COLLECTION).ok().and_then(|mut m| m.remove("rules")).and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default()
 }
 
+/// 存一项（只在本机，不同步）
 pub(crate) fn save(app: &App, id: &str, v: Option<Value>) -> Result<(), LocalError> {
-    if settings_sync::write_local(&app.store, app.account.clock.now_ms(), COLLECTION, &[(id, v)])? {
-        app.sync.poke();
-    }
+    settings_sync::write_local(&app.store, app.account.clock.now_ms(), COLLECTION, &[(id, v)])?;
     Ok(())
 }
 
@@ -195,7 +218,7 @@ pub fn save_rules(app: &App, r: &Rules) -> Result<(), LocalError> {
     save(app, "rules", Some(serde_json::to_value(r).unwrap_or_default()))
 }
 
-/// 只通知的渠道（同步项 `notify/hooks`）；格式不对的跳过
+/// 只通知的渠道（`notify/hooks`）；格式不对的跳过
 pub fn load_hooks(store: &crate::store::Store) -> Vec<Hook> {
     let v = settings_sync::values(store, COLLECTION).ok().and_then(|mut m| m.remove("hooks"));
     v.and_then(|v| v.as_array().cloned()).unwrap_or_default().into_iter().filter_map(|h| serde_json::from_value::<Hook>(h).ok()).filter(|h| h.validate().is_ok()).collect()
@@ -506,12 +529,16 @@ impl Notifier {
     /// 后台任务：管长连接、每 2 秒检查一遍会话
     pub async fn run(self: Arc<Self>, app: App, shutdown: CancellationToken) {
         let mut tick = 0u32;
+        let mut local = false;
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => break,
                 _ = tokio::time::sleep(Duration::from_secs(2)) => {}
             }
             tick = tick.wrapping_add(1);
+            if !local {
+                local = localize(&app);
+            }
             let f = load_feishu(&app.store);
             if tick.is_multiple_of(3) {
                 self.keep_connected(&app, f.as_ref());
@@ -601,8 +628,6 @@ impl Notifier {
         let quiet = quiet_now(&rules);
         // 看看开着：外部通知先不发（看看里有提醒）。在飞书里对话的会话照常发
         let fg = rules.fg_quiet && self.fg_until.load(Ordering::SeqCst) > now;
-        // 这台电脑的会话不往外发（飞书是别的电脑配的、同步过来的）：只发在飞书里对话的会话（有话题的）
-        let here = sends_here(&app.store, load_feishu(&app.store).as_ref(), &own);
         let ids = app.chat.ids();
         for id in &ids {
             let Some(brief) = app.chat.brief(id) else { continue };
@@ -621,7 +646,7 @@ impl Notifier {
             let anchor = self.agent.anchor(app, id);
             if let Some(k) = key.as_ref().filter(|_| !busy) {
                 let fresh = live.as_ref().is_none_or(|s| s.key.as_ref() != Some(k));
-                if fresh && !quiet && !(fg && anchor.is_none()) && (here || anchor.is_some()) && attn_due(&brief, now, muted, self.agent.following(id)) {
+                if fresh && !quiet && !(fg && anchor.is_none()) && attn_due(&brief, now, muted, self.agent.following(id)) {
                     if let Some(info) = self.info(app, id, &brief, &rules) {
                         let to = self.target(app, out, id, anchor.clone(), &rules).await;
                         self.send_attn(app, out, &own, id, k, &brief, info, to).await;
@@ -637,7 +662,7 @@ impl Notifier {
             if matches!(notice, EndNotice::Send { .. } | EndNotice::Wait) && turn["ended_at"].as_i64().is_some_and(|e| self.agent.covers(id, e)) {
                 notice = EndNotice::Record;
             }
-            if (fg || !here) && anchor.is_none() && matches!(notice, EndNotice::Send { .. }) {
+            if fg && anchor.is_none() && matches!(notice, EndNotice::Send { .. }) {
                 notice = EndNotice::Record;
             }
             if let (EndNotice::Record | EndNotice::Send { .. }, Some(end)) = (&notice, turn["ended_at"].as_i64()) {
@@ -664,7 +689,7 @@ impl Notifier {
         if !quiet && rules.stall_min > 0 {
             for id in &ids {
                 let anchor = self.agent.anchor(app, id);
-                if (fg || !here) && anchor.is_none() {
+                if fg && anchor.is_none() {
                     continue;
                 }
                 self.check_stall(app, out, &own, id, &rules, now, anchor).await;

@@ -2869,7 +2869,6 @@
   "notify": {
     "hooks_title": "Other channels",
     "hooks_lead": "WeCom, DingTalk, WeChat push, Bark, ntfy: notify only; tap the link in the message to respond.",
-    "hooks_sync_off": "Settings sync is off: these channels stay on this computer, and sessions on your other computers won't send to them.",
     "hook_add": "Add a channel",
     "hook_kind": "Channel",
     "hook_name": "Name",
@@ -2960,7 +2959,6 @@
     "test": "Send a test",
     "test_sent": "Sent. Tap the button on the card in Feishu; setup is done when this shows “button callbacks work”.",
     "unbind": "Unbind",
-    "sync_off": "Settings sync is off: the Feishu setup stays on this computer, and sessions on your other computers won't send notifications.",
     "feishu_error": "Feishu error {{code}}: {{msg}}",
     "feishu_hint_10003": "Wrong App ID or App Secret. Copy them from Credentials & Basic Info.",
     "feishu_hint_10014": "Wrong App Secret. It may have just been reset.",
@@ -3028,10 +3026,7 @@
     "edit_creds": "Change App ID / Secret",
     "hooks_privacy": "Webhook URLs and keys stay on your computers, which send to these services directly, not through LookLook's servers.",
     "rule_auto_groups": "Create project groups automatically",
-    "rule_auto_groups_hint": "Each project you start a session in from Feishu gets a group (just you and the bot). Forward issues into it: each message is a topic with its own session; the project's notifications go there too.",
-    "here": "Send alerts for this computer's sessions",
-    "here_hint": "Feishu and the other channels sync to all your computers. Turn this off and sessions on this computer stop sending alerts (sessions you chat with in Feishu still do).",
-    "here_hint_other": "Feishu was set up on another computer and synced here, so this computer's sessions aren't sent by default. Turn it on if you want them."
+    "rule_auto_groups_hint": "Each project you start a session in from Feishu gets a group (just you and the bot). Forward issues into it: each message is a topic with its own session; the project's notifications go there too."
   },
   "ports": {
     "title": "Ports listening on this computer",
@@ -3377,7 +3372,7 @@
       },
       "sync": {
         "title": "Settings sync",
-        "body": "Terminal look, templates, notifications and more stay in sync across your computers."
+        "body": "Terminal look, templates and more stay in sync across your computers (notification setup stays on the computer where you set it up)."
       },
       "membership": {
         "title": "Membership & invites",

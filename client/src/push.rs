@@ -2,7 +2,7 @@
 //!
 //! - 和飞书发同样的事（等你处理、做完、出错、卡住、汇总），什么时候发由 `notify.rs` 决定，这里只管把一条消息发出去；
 //! - 不能在消息里处理，只带一个“打开”的链接；
-//! - 配置在同步项 `notify/hooks`（一个数组），地址和密钥由你的电脑直接发给对应的服务，不经过看看的服务器；
+//! - 配置在 `notify/hooks`（一个数组，只在配它的电脑上，不同步），地址和密钥由你的电脑直接发给对应的服务，不经过看看的服务器；
 //! - 会话里来的文字（标题、命令、回复）一律转义，不当 markdown 解析，免得混进链接。
 
 use std::time::Duration;
@@ -40,7 +40,7 @@ pub enum Kind {
     Ntfy,
 }
 
-/// 一个渠道（同步项 `notify/hooks` 里的一项）
+/// 一个渠道（`notify/hooks` 里的一项）
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Hook {
     pub id: String,

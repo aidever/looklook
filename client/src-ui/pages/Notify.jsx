@@ -3,7 +3,7 @@
 // - AgentCard：飞书机器人（在飞书里和 AI 对话、自动建项目群、群里 @），用法和少用的选项收起来；
 // - RulesCard：什么时候通知；勿扰、合并、卡住提醒、静音项目收进“少打扰”；
 // - HooksCard：只通知的渠道（企业微信、钉钉、Server酱、PushPlus、Bark、ntfy），每行“发一条测试” + ⋯。
-// 配置经“设置同步”在用户自己的电脑之间传；连接状态是当前这台电脑的。
+// 配置只在这台电脑上（不在电脑之间同步）；连接状态也是这台电脑的。
 import { CheckCircle2, ExternalLink, KeyRound, Link2Off, Pencil, Power, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -366,7 +366,6 @@ export function FeishuCard({ data, reload }) {
         {st.error && <FeishuError error={{ code: 'NOTIFY_FEISHU', params: st.error }} />}
         {/* 一次只一条：连不上时只说连不上 */}
         {f.bound && st.connected && !st.error && !f.callback_ok && <Note>{t(tested ? 'notify.test_sent' : 'notify.callback_pending')}</Note>}
-        {!data.sync_enabled && <Note kind="warn">{t('notify.sync_off')}</Note>}
         {editing && <CredsForm data={data} onSaved={saved} onCancel={() => setEditing(false)} />}
         <ScanSetup data={data} reload={reload} update />
         <ErrorNote error={error && error.code !== 'NOTIFY_FEISHU' ? error : null} />
@@ -509,7 +508,6 @@ export function HooksCard({ data, reload }) {
         <HookRow key={h.id} hook={h} onChanged={reload} />
       ))}
       <div className="stack" style={{ gap: 12, marginTop: hooks.length ? 8 : 0 }}>
-        {hooks.length > 0 && !data.sync_enabled && <Note kind="warn">{t('notify.hooks_sync_off')}</Note>}
         {adding ? (
           <>
             <p className="small muted" style={{ margin: 0 }}>
@@ -538,20 +536,6 @@ export function HooksCard({ data, reload }) {
 }
 
 const QUIET_DEFAULT = { start: '23:00', end: '08:00' };
-
-/** 这台电脑的会话发不发（只管这台电脑；飞书配置是同步的，默认只有配它的那台发） */
-function HereToggle({ here, reload }) {
-  const { t } = useTranslation();
-  const { busy, run } = useAction();
-  const set = async (on) => {
-    if (await run(() => api.put('/notify/here', { on }))) reload();
-  };
-  return (
-    <Row label={t('notify.here')} hint={t(here.home ? 'notify.here_hint' : 'notify.here_hint_other')}>
-      <Switch checked={Boolean(here.on)} disabled={busy} onChange={set} label={t('notify.here')} />
-    </Row>
-  );
-}
 
 export function RulesCard({ data, reload }) {
   const { t } = useTranslation();
@@ -586,7 +570,6 @@ export function RulesCard({ data, reload }) {
   const calmSet = Boolean(quiet) || r.done_batch > 0 || r.stall_min !== 20 || r.muted.length > 0;
   return (
     <Card title={t('notify.rules_title')} sub={t('notify.rules_lead')}>
-      {data.here && <HereToggle here={data.here} reload={reload} />}
       {toggle('done', t('notify.rule_done'), t('notify.rule_done_hint'))}
       {toggle('failed', t('notify.rule_failed'))}
       {toggle('fg_quiet', t('notify.rule_fg_quiet'), t('notify.rule_fg_quiet_hint'))}

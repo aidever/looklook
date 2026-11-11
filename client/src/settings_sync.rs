@@ -30,6 +30,13 @@ use crate::store::Store;
 /// 设置项的集合（id 是 `Settings` 的字段名，见 settings.rs 的 `SYNCED`）。
 pub const SETTINGS: &str = "settings";
 pub const EXCHANGE_PATH: &str = "/api/sync/exchange";
+/// 只存在本机、不在电脑之间传的集合：记录照样放在 `sync_record`（读写和别的集合一样），但不发给别的电脑，
+/// 别的电脑（旧版本）发来的也不收。`notify`：飞书、各通知渠道只留在配它的那台电脑上（2026-11-10，见 notify.rs）。
+const LOCAL_ONLY: &[&str] = &["notify"];
+
+fn local_only(collection: &str) -> bool {
+    LOCAL_ONLY.contains(&collection)
+}
 
 const KV_NODE: &str = "sync_node";
 const KV_SEQ: &str = "sync_seq";
@@ -208,6 +215,33 @@ pub fn values(store: &Store, collection: &str) -> Result<HashMap<String, Value>>
     })
 }
 
+/// 一个集合里的记录（含墓碑），带写入它的节点。
+pub fn records(store: &Store, collection: &str) -> Result<Vec<Record>> {
+    store.tx(|tx| {
+        let mut st = tx.prepare("SELECT collection,id,value,deleted,hlc,origin,seq FROM sync_record WHERE collection=?1")?;
+        let rows = st.query_map([collection], row)?;
+        rows.collect()
+    })
+}
+
+/// 本机的同步节点 id（记录的 `origin` 是它 = 这台电脑上写的）。
+pub fn node_id(store: &Store) -> Result<String> {
+    store.tx(node)
+}
+
+/// 直接删掉本机的记录（不写墓碑）：只给 [`LOCAL_ONLY`] 的集合用，它们不会传给别的电脑。
+pub fn drop_local(store: &Store, collection: &str, ids: &[String]) -> Result<()> {
+    if !local_only(collection) {
+        anyhow::bail!("{collection} 不是只在本机的集合");
+    }
+    store.tx(|tx| {
+        for id in ids {
+            tx.execute("DELETE FROM sync_record WHERE collection=?1 AND id=?2", params![collection, id])?;
+        }
+        Ok(())
+    })
+}
+
 pub fn summary(store: &Store) -> Result<Summary> {
     store.tx(|tx| {
         let mut st = tx.prepare("SELECT origin,max_seq FROM sync_seen")?;
@@ -223,7 +257,7 @@ pub fn missing(store: &Store, theirs: &Summary, limit: usize) -> Result<(Vec<Rec
         let rows = st.query_map([], row)?;
         rows.collect()
     })?;
-    let mut out: Vec<Record> = all.into_iter().filter(|r| r.seq > theirs.get(&r.origin).copied().unwrap_or(0)).collect();
+    let mut out: Vec<Record> = all.into_iter().filter(|r| r.seq > theirs.get(&r.origin).copied().unwrap_or(0) && !local_only(&r.collection)).collect();
     let more = out.len() > limit;
     out.truncate(limit);
     Ok((out, more))
@@ -245,10 +279,11 @@ pub fn merge(store: &Store, records: &[Record]) -> Result<usize> {
     store.tx(|tx| {
         let mut changed = 0;
         for r in records.iter().filter(|r| valid(r)) {
-            let take = match existing(tx, &r.collection, &r.id)? {
-                Some(old) => wins(r, &old),
-                None => true,
-            };
+            let take = !local_only(&r.collection)
+                && match existing(tx, &r.collection, &r.id)? {
+                    Some(old) => wins(r, &old),
+                    None => true,
+                };
             if take {
                 put(tx, r)?;
                 changed += 1;
@@ -521,6 +556,24 @@ mod tests {
         write_local(&b, 10_000_000 - 3_600_000, SETTINGS, &[("theme", Some(json!("light")))]).unwrap();
         sync(&a, &b);
         assert_eq!(theme(&a), Some(json!("light")));
+    }
+
+    #[test]
+    fn local_only_collections_never_travel() {
+        let (a, b) = (store(), store());
+        write_local(&a, 1_000, "notify", &[("feishu", Some(json!({ "app_id": "x" })))]).unwrap();
+        write_local(&a, 2_000, SETTINGS, &[("theme", Some(json!("mint")))]).unwrap();
+        sync(&a, &b);
+        assert!(values(&b, "notify").unwrap().is_empty());
+        assert_eq!(theme(&b), Some(json!("mint")));
+        // 旧版本的电脑发来的也不收，但记下看到了（不会一直重发）
+        let old = records(&a, "notify").unwrap();
+        assert_eq!(merge(&b, &old).unwrap(), 0);
+        assert!(values(&b, "notify").unwrap().is_empty());
+        assert!(missing(&a, &summary(&b).unwrap(), BATCH).unwrap().0.is_empty());
+        drop_local(&a, "notify", &["feishu".into()]).unwrap();
+        assert!(values(&a, "notify").unwrap().is_empty());
+        assert!(drop_local(&a, SETTINGS, &["theme".into()]).is_err());
     }
 
     #[test]

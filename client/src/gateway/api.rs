@@ -199,7 +199,6 @@ pub fn routes(app: App) -> Router<App> {
         .route("/notify/feishu", put(super::notify::put_feishu).delete(super::notify::delete_feishu))
         .route("/notify/feishu/register", post(super::notify::register).delete(super::notify::register_cancel))
         .route("/notify/unbind", post(super::notify::unbind))
-        .route("/notify/here", put(super::notify::put_here))
         .route("/notify/rules", put(super::notify::put_rules))
         .route("/notify/test", post(super::notify::test))
         .route("/notify/foreground", post(super::notify::foreground))

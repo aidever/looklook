@@ -1259,15 +1259,10 @@ async fn find(app: &App, ids: &[String], operator: &str) -> Option<Found> {
     futures_util::future::join_all(asks).await.into_iter().flatten().next()
 }
 
-/// 同一账户在线的其它电脑：(id, 名字)
-async fn peers(app: &App, own: &str) -> Vec<(String, String)> {
-    match app.outbound.devices(&app.account, false).await {
-        Ok(d) => d.items.into_iter().filter(|x| x.online && x.id != own).map(|x| (x.id, x.name)).collect(),
-        Err(e) => {
-            tracing::debug!(error = ?e, "飞书：取不到其它电脑");
-            vec![]
-        }
-    }
+/// 要一起问的其它电脑：没有。飞书配置只在配它的这台电脑上（2026-11-10 起不同步，见 notify.rs），
+/// 别的电脑没有飞书凭证，开不了会话、也发不了卡片，所以在飞书里只能用这台电脑上的项目和会话
+async fn peers(_app: &App, _own: &str) -> Vec<(String, String)> {
+    vec![]
 }
 
 /// 在每台在线的电脑上都问一遍（本机直接做），返回 (电脑 id, 电脑名字, 回答)
@@ -1322,7 +1317,7 @@ fn folder_name(dir: &str) -> String {
     Path::new(dir).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| dir.to_string())
 }
 
-/// 上次开会话选的（同步项 `notify/agent_last`）
+/// 上次开会话选的（`notify/agent_last`，只在本机）
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Last {
     place: String,
@@ -1333,12 +1328,12 @@ fn load_last(app: &App) -> Last {
     crate::settings_sync::values(&app.store, notify::COLLECTION).ok().and_then(|mut m| m.remove("agent_last")).and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default()
 }
 
-/// 同步项 `notify/<key>`
+/// `notify/<key>`（只在本机，不同步）
 fn synced<T: serde::de::DeserializeOwned + Default>(app: &App, key: &str) -> T {
     crate::settings_sync::values(&app.store, notify::COLLECTION).ok().and_then(|mut m| m.remove(key)).and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default()
 }
 
-/// 私聊 / 群里的“当前会话”（同步项 `notify/agent_current`：chat_id → 会话）
+/// 私聊 / 群里的“当前会话”（`notify/agent_current`：chat_id → 会话）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Current {
     dev: String,
@@ -1378,7 +1373,7 @@ fn set_current(app: &App, chat: &str, to: Option<(&str, &str)>) {
     }
 }
 
-/// 项目群（同步项 `notify/agent_projects`：chat_id → 在哪开、用哪个助手）
+/// 项目群（`notify/agent_projects`：chat_id → 在哪开、用哪个助手）
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct Project {
     /// `电脑|文件夹`

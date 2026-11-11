@@ -250,17 +250,19 @@ export const COMMANDS = [
   ['/mcp', 'config'],
   ['/review'],
   ['/init'],
+  ['/doctor'],
   ['/worktree', 'worktree'],
+  ['/share', 'share'],
 ];
 
 /** Codex（走 app-server）认的内置命令：/compact、/clear 由看看换成对应的请求，其余是界面自己的动作 */
-export const CODEX_COMMANDS = ['/compact', '/clear', '/new', '/model', '/permissions', '/resume', '/context', '/usage', '/status', '/worktree'];
+export const CODEX_COMMANDS = ['/compact', '/clear', '/new', '/model', '/permissions', '/resume', '/context', '/usage', '/status', '/worktree', '/share'];
 
 /** Codex 里意思不一样的命令：/permissions 是换权限（打开权限菜单），不是 Claude 的权限规则 */
 export const CODEX_ACTIONS = { '/permissions': 'mode' };
 
 /** DSH（走 dsh web）认的：/clear、/new 开新会话，/model 是界面的模型菜单；别的斜杠命令交给 DSH 自己执行 */
-export const DSH_COMMANDS = ['/clear', '/new', '/model'];
+export const DSH_COMMANDS = ['/clear', '/new', '/model', '/share'];
 
 /** stream-json 的 Claude Code 里用不了的（`claude -p` 回“isn't available in this environment”）：不列。
  *  要回到前面用编辑重发（铅笔）或检查点 */

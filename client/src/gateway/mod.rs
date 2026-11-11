@@ -16,6 +16,7 @@ mod assets;
 mod chat;
 mod chat_mux;
 mod dsh;
+mod input_tap;
 mod notify;
 pub mod mcp;
 mod proxy;
@@ -305,7 +306,10 @@ async fn terminal(State(app): State<App>, req: Request) -> Response {
     if let Some(page) = index.then(assets::term_page).flatten() {
         return page;
     }
-    let opts = proxy::Opts { auth: Some(auth), host: None, inject: index.then_some(proxy::TERM_TAGS), rewrite_location: None, terminal: true };
+    // 终端里按键、粘贴记成用户输入（会话列表按它排，见 Instances::note_input）
+    let insts = app.instances.clone();
+    let on_input: input_tap::OnInput = std::sync::Arc::new(move || insts.note_input(&id));
+    let opts = proxy::Opts { auth: Some(auth), host: None, inject: index.then_some(proxy::TERM_TAGS), rewrite_location: None, terminal: true, on_input: Some(on_input) };
     proxy::forward(&app.http, req, port, opts).await
 }
 

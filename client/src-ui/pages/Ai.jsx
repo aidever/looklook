@@ -1,11 +1,11 @@
-// AI 助手：和 AI 有关的设置都在这一页，按“想做什么”分四块，顶上四张卡片就是目录，各写着现在的状态：
-// - 账号与模型：Claude Code / Codex 账号（换账号、第三方模型服务）、用量；
+// AI 助手：和 AI 有关的设置都在这一页，按“想做什么”分五块，顶上五张卡片就是目录，各写着现在的状态：
+// - 账号与模型：AI 工具的版本与更新（AgentUpdates.jsx）、Claude Code / Codex 账号（换账号、第三方模型服务）、用量；
 // - 离开电脑也能用：AI 做完、要确认时通知你（飞书、Webhook），飞书机器人里直接和会话聊；
 // - 工具与权限：MCP 接口（令牌、一键装进 Codex / Claude Code / OpenCode / DSH）和它给 AI 助手的工具，自动审批；
 // - 宠物：对话界面角落的宠物。
 // 以前在“设置”里的 #ai、#notify、#pet、#claude-accounts 等链接都转到这里（Settings.jsx）。
 // MCP 开关远程也能改；令牌和装进 AI 助手只能直接在这台电脑上看、做（见 PagesMcp.jsx）。
-import { Bell, Globe, MessageSquare, PawPrint, Server, ShieldCheck, UserCog } from 'lucide-react';
+import { Bell, Globe, MessageSquare, PawPrint, Server, ShieldCheck, Sparkles, UserCog } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -14,11 +14,13 @@ import { errorText } from '../shared/i18n.js';
 import { Link, useRouter } from '../shared/router.jsx';
 import { Button, Card, CopyButton, ErrorNote, Skeleton, Switch, useAction, useLoad, useToast } from '../shared/ui.jsx';
 import { More, PageHead, Row } from '../shared/page.jsx';
+import AgentUpdatesCard from './AgentUpdates.jsx';
 import ClaudeProfilesCard, { CodexProfilesCard } from './ClaudeProfiles.jsx';
 import GuardCard from './Guard.jsx';
 import NotifySection from './Notify.jsx';
 import McpCard from './PagesMcp.jsx';
 import PetSection from './PetSettings.jsx';
+import SkillsSection from './Skills.jsx';
 import UsageStatsCard from './UsageStats.jsx';
 
 const PAGE_TOOLS = ['list_mappings', 'find_mapping', 'ensure_mapping'];
@@ -165,6 +167,7 @@ const HUB = [
   { id: 'accounts', icon: UserCog },
   { id: 'remote', icon: Bell },
   { id: 'tools', icon: ShieldCheck },
+  { id: 'skills', icon: Sparkles },
   { id: 'pet', icon: PawPrint },
 ];
 // 别处（包括以前设置页里）的锚点落到哪一块
@@ -174,6 +177,8 @@ const HUB_ALIAS = {
   'claude-accounts': 'accounts',
   'codex-profiles': 'accounts',
   usage: 'accounts',
+  updates: 'accounts',
+  'agent-updates': 'accounts',
   notify: 'remote',
   feishu: 'remote',
   mcp: 'tools',
@@ -188,20 +193,21 @@ function hubOf(hash) {
   return HUB.some((x) => x.id === id) ? id : 'accounts';
 }
 
-/** 顶上四张卡片的状态：取不到（旧版客户端没有接口等）就不写 */
+/** 顶上五张卡片的状态：取不到（旧版客户端没有接口等）就不写 */
 function useHubStatus(version) {
   const { t } = useTranslation();
   const [st, setSt] = useState({});
   useEffect(() => {
     let alive = true;
     const get = (u) => api.get(u).catch(() => null);
-    Promise.all([get('/claude-profiles'), get('/codex-profiles'), get('/notify'), get('/mcp'), get('/pets/settings'), get('/pets')]).then(([cp, xp, n, m, ps, pets]) => {
+    Promise.all([get('/claude-profiles'), get('/codex-profiles'), get('/notify'), get('/mcp'), get('/pets/settings'), get('/pets'), get('/skills')]).then(([cp, xp, n, m, ps, pets, sk]) => {
       if (!alive) return;
       const c = cp?.profiles?.length ?? 0;
       const x = xp?.profiles?.length ?? 0;
       const feishu = n?.feishu;
       const hooks = n?.hooks?.length ?? 0;
       const petCount = pets?.items?.length;
+      const skillCount = sk?.items?.filter((x) => x.source === 'user').length ?? 0;
       setSt({
         accounts: cp || xp ? { text: c + x ? t('ai.hub.accounts_n', { claude: c, codex: x }) : t('ai.hub.accounts_none'), ok: c + x > 0 } : null,
         remote: n
@@ -214,6 +220,7 @@ function useHubStatus(version) {
               : { text: t('ai.hub.remote_none') }
           : null,
         tools: m ? (m.enabled ? { text: t('ai.hub.mcp_on'), ok: true } : { text: t('ai.hub.mcp_off') }) : null,
+        skills: sk ? (skillCount ? { text: t('ai.hub.skills_n', { count: skillCount }), ok: true } : { text: t('ai.hub.skills_none') }) : null,
         pet: ps
           ? ps.enabled && petCount !== 0
             ? { text: t('ai.hub.pet_on'), ok: true }
@@ -236,6 +243,10 @@ export default function AiPage() {
   const [version, setVersion] = useState(0);
   const status = useHubStatus(`${hub}:${version}`);
   const go = (id) => navigate(`/ai#${id}`, { replace: true });
+  // 从设置 → 关于的“AI 工具的更新”过来：滚到版本卡片
+  useEffect(() => {
+    if (hash === '#updates' || hash === '#agent-updates') setTimeout(() => document.getElementById('agent-updates')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
+  }, [hash]);
   return (
     <>
       <PageHead title={t('ai.title')} sub={t('ai.hub.intro')} help="ai" perDevice />
@@ -272,6 +283,7 @@ export default function AiPage() {
       </nav>
       {hub === 'accounts' && (
         <>
+          <AgentUpdatesCard />
           <ClaudeProfilesCard />
           <CodexProfilesCard />
           <UsageStatsCard />
@@ -285,6 +297,7 @@ export default function AiPage() {
           <GuardCard />
         </>
       )}
+      {hub === 'skills' && <SkillsSection onChange={() => setVersion((v) => v + 1)} />}
       {hub === 'pet' && <PetSection />}
     </>
   );

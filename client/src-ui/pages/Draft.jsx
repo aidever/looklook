@@ -257,13 +257,24 @@ function DraftForm() {
   // Claude Code 账号 / Codex 配置（null 用默认）；换了助手就回到默认
   const [profile, setProfile] = useState(null);
   useEffect(() => setProfile(null), [launch]);
-  // 模型、思考强度（空 = 用默认）：会话起来后先设好再发第一句（firstSend.js）
-  const [model, setModel] = useState('');
-  const [effort, setEffort] = useState('');
+  // 模型、思考强度（空 = 用默认）：会话起来后先设好再发第一句（firstSend.js）。
+  // 一开始预先选好上次在看看里选的（按工具 + 账号记，那台电脑的 /draft/models 给的 last）；自己点过菜单就不再跟着它
+  const [model, setModelState] = useState('');
+  const [effort, setEffortState] = useState('');
+  const modelTouched = useRef(false);
+  const setModel = (v) => {
+    modelTouched.current = true;
+    setModelState(v);
+  };
+  const setEffort = (v) => {
+    modelTouched.current = true;
+    setEffortState(v);
+  };
   useEffect(() => {
-    setModel('');
-    setEffort('');
-  }, [launch, device]);
+    modelTouched.current = false;
+    setModelState('');
+    setEffortState('');
+  }, [launch, device, profile]);
   const [picking, setPicking] = useState(false);
   const [dirPick, setDirPick] = useState(false);
   const [adv, setAdv] = useState(false);
@@ -355,7 +366,17 @@ function DraftForm() {
   const modeName = t(willChat ? 'sess.mode.chat' : 'sess.mode.term_short');
   // 选模型：那台电脑上的 Claude Code / Codex 自己列的（对话界面才能先选好）
   const pickModel = willChat && (launch === 'claude' || launch === 'codex');
-  const [models] = useLoad(() => (pickModel ? client.get(`/draft/models?agent=${launch}`).catch(() => null) : Promise.resolve(null)), [pickModel, launch, device]);
+  const [models] = useLoad(
+    () => (pickModel ? client.get(`/draft/models?agent=${launch}${profile ? `&profile=${encodeURIComponent(profile)}` : ''}`).catch(() => null) : Promise.resolve(null)),
+    [pickModel, launch, device, profile],
+  );
+  // 上次选的（这个账号现在用不了的电脑那边已经去掉了）
+  const last = models?.last ?? null;
+  useEffect(() => {
+    if (modelTouched.current || !last) return;
+    setModelState(last.model ?? '');
+    setEffortState(last.effort ?? '');
+  }, [models]);
   const modelOpts = (models?.options ?? []).filter((o) => o.value && o.value !== 'default');
   const curModel = modelOpts.find((o) => o.value === model);
   const baseOpt = curModel ?? modelOpts.find((o) => o.default) ?? (launch === 'claude' ? modelOpts[0] : null);
@@ -368,11 +389,16 @@ function DraftForm() {
   const modelItems = [
     efforts.length > 0 && { head: t('pet.gen_effort') },
     efforts.length > 0 && { label: defEffort ? t('draft.effort_default_is', { name: effortName(defEffort) }) : t('pet.gen_effort_default'), checked: !effort, onClick: () => setEffort('') },
-    ...efforts.map((x) => ({ label: effortName(x), checked: effort === x, onClick: () => setEffort(x) })),
+    ...efforts.map((x) => ({ label: effortName(x), hint: last?.effort === x ? t('draft.model_last') : undefined, checked: effort === x, onClick: () => setEffort(x) })),
     { head: t('chat.model') },
     { label: t('draft.model_default'), checked: !model, onClick: () => setModel('') },
-    ...modelOpts.map((o) => ({ label: o.label, hint: o.description || undefined, checked: model === o.value, onClick: () => setModel(o.value) })),
+    ...modelOpts.map((o) => {
+      const hint = [last?.model === o.value && t('draft.model_last'), o.description].filter(Boolean).join(' · ');
+      return { label: o.label, hint: hint || undefined, checked: model === o.value, onClick: () => setModel(o.value) };
+    }),
   ];
+  // 按钮上的选择正是上次用的（没另选）：标一下，免得以为默认就是这个
+  const usingLast = Boolean(last && !modelTouched.current && (model || effort) && (last.model ?? '') === model && (last.effort ?? '') === effort);
   // 按钮上始终是“模型 · 强度”
   const modelText = [curModel?.label ?? t('draft.model_default'), efforts.length > 0 && (effort ? effortName(effort) : defEffort ? effortName(defEffort) : t('draft.effort_default'))].filter(Boolean).join(' · ');
   // @ 文件、/ 和 $ 技能的提示（和对话页输入框一样）：按要开的工具、项目目录取
@@ -460,6 +486,8 @@ function DraftForm() {
       });
       if (device && r.id) rememberTerminals(device, [r]);
       const preset = pickModel && (model || effort) ? { model, effort } : null;
+      // 点过模型菜单：这次选的记下来（选回默认就忘掉），下次新建时预先选好；那台电脑的客户端太旧时没有这个接口
+      if (pickModel && modelTouched.current) client.post('/draft/model_memory', { agent: launch, profile: profile ?? '', model, effort }).catch(() => {});
       if (willChat && r.chat_ui && (body || files.length || preset)) queueFirst(r.id, body, files.map((f) => f.file), preset);
       // 全部权限只在能选的类型（AI 会话）上记
       if (!container) s.touchProject(device, r.workdir ?? workdir, { launch, shell: shell.trim(), auto_start: autoStart, ...(canFull ? { full_access: fullAccess } : {}) });
@@ -745,7 +773,14 @@ function DraftForm() {
               items={typeItems}
             />
             {pickModel && (
-              <PopMenu sheet className="draft-chip draft-model" icon={(p) => <Brain {...p} />} text={modelText} label={t('chat.model_pick')} items={modelItems} />
+              <PopMenu
+                sheet
+                className="draft-chip draft-model"
+                icon={(p) => <Brain {...p} />}
+                text={modelText}
+                label={usingLast ? t('draft.model_pick_last') : t('chat.model_pick')}
+                items={modelItems}
+              />
             )}
             {launch === 'claude' && !container && <ClaudeProfilePick client={client} device={device} value={profile} onChange={setProfile} className="draft-chip" />}
             {launch === 'codex' && !container && <CodexProfilePick client={client} device={device} value={profile} onChange={setProfile} className="draft-chip" />}

@@ -55,7 +55,7 @@ impl Agent {
     }
 
     /// 配置目录：`~/.claude` / `~/.codex` / `~/.config/opencode` / `~/.dsh`
-    fn dir(self) -> PathBuf {
+    pub(crate) fn dir(self) -> PathBuf {
         let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
         match self {
             Agent::Claude => env("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home().join(".claude")),
@@ -104,7 +104,7 @@ pub fn claude_fallback() -> Option<String> {
 /// Claude 桌面版自带的 Claude Code：`<配置目录>/Claude/claude-code/<版本>/<…>/claude(.exe)`
 /// （Windows 是 `%APPDATA%\Claude\…`，macOS 是 `~/Library/Application Support/Claude/…`）。
 /// 桌面版更新时会放进新的版本目录，取版本号最大的那个；和桌面版共用 `~/.claude`，登录状态也是同一个。
-fn claude_desktop_bundled() -> Option<PathBuf> {
+pub(crate) fn claude_desktop_bundled() -> Option<PathBuf> {
     let exe = if cfg!(windows) { "claude.exe" } else { "claude" };
     let base = dirs::config_dir()?.join("Claude").join("claude-code");
     let mut versions: Vec<(Vec<u64>, PathBuf)> = std::fs::read_dir(&base)
@@ -178,6 +178,11 @@ impl Skill {
             Skill::Auto => "looklook-pages-auto",
             Skill::Ask => "looklook-pages-ask",
         }
+    }
+
+    /// 目录名是不是看看自己装的技能（技能管理里标“看看装的”）
+    pub fn ours(dir: &str) -> bool {
+        Self::ALL.iter().any(|s| s.name() == dir)
     }
 
     pub fn content(self) -> &'static str {

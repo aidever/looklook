@@ -282,16 +282,13 @@ pub fn options(ctx: &Ctx) -> Vec<Opt> {
     out
 }
 
-/// 上下文窗口：settings 里给这个模型设的自动压缩窗口（`modelSettings.<id>.autoCompactWindow`），
-/// 否则 `CLAUDE_CODE_MAX_CONTEXT_TOKENS`，否则目录（账号的，没有就公开的）里这个模型的输入上限，都没有时按 20 万算。
+/// 上下文窗口（模型本身能装多少）：`CLAUDE_CODE_MAX_CONTEXT_TOKENS`，否则目录（账号的，没有就公开的）里这个模型的输入上限，
+/// 都没有时按 20 万算；`CLAUDE_CODE_DISABLE_1M_CONTEXT=1` 时最多 20 万。
 /// 对话模式下优先用 Claude Code 自己在 `result` 里报的（见 `SdkSt::windows`）。
+/// 注意 settings 里的 `autoCompactWindow` 不是窗口，是“到多少时自动压缩”，见 [`compact`]。
 pub fn context_window(ctx: &Ctx, model: &str) -> u64 {
     let base = base_id(model);
-    for s in settings(ctx).iter().rev() {
-        if let Some(w) = s["modelSettings"].as_object().and_then(|m| m.iter().find(|(k, _)| base_id(k) == base)).and_then(|(_, v)| v["autoCompactWindow"].as_u64()) {
-            return w;
-        }
-    }
+    let cap = |w: u64| if truthy(ctx.var("CLAUDE_CODE_DISABLE_1M_CONTEXT")) { w.min(200_000) } else { w };
     // 用户自己指定的窗口（不认识的模型、第三方接口常这么设）
     let set = ctx.var("CLAUDE_CODE_MAX_CONTEXT_TOKENS").or_else(|| settings(ctx).iter().rev().find_map(|s| s["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"].as_str().map(String::from)));
     if let Some(w) = set.and_then(|v| v.trim().parse::<u64>().ok()).filter(|&w| w > 0) {
@@ -302,9 +299,121 @@ pub fn context_window(ctx: &Ctx, model: &str) -> u64 {
     // 账号的模型目录；没有（第三方接口不登录账号）时用 Claude Code 缓存的公开目录
     let from_catalog = catalog(ctx, &state).and_then(|c| find(&c["config"]["models"])).or_else(|| published_models(ctx).and_then(|m| find(&m)));
     if model.contains("[1m]") {
-        return from_catalog.unwrap_or(1_000_000).max(1_000_000);
+        return cap(from_catalog.unwrap_or(1_000_000).max(1_000_000));
     }
-    from_catalog.unwrap_or(200_000)
+    cap(from_catalog.unwrap_or(200_000))
+}
+
+fn truthy(v: Option<String>) -> bool {
+    v.is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+}
+
+/// “400k”“1M”“400000”→ token 数（Claude Code 的 `/autocompact`、`CLAUDE_CODE_AUTO_COMPACT_WINDOW` 都认 k/M 后缀）
+fn token_count(s: &str) -> Option<u64> {
+    let s = s.trim().to_ascii_lowercase().replace(['_', ','], "");
+    let (num, mul) = match s.chars().last()? {
+        'k' => (&s[..s.len() - 1], 1_000.0),
+        'm' => (&s[..s.len() - 1], 1_000_000.0),
+        _ => (s.as_str(), 1.0),
+    };
+    let n: f64 = num.parse().ok()?;
+    (n > 0.0).then(|| (n * mul).round() as u64)
+}
+
+/// 自动压缩、闲时压缩：Claude Code 照什么设置来（官方 model-config「Set the auto-compact window」、settings-reference 的
+/// `autoCompactEnabled` / `autoCompactWindow` / `modelSettings` / `idleCompaction`）
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Compact {
+    /// 自动压缩开着（`DISABLE_AUTO_COMPACT` / `DISABLE_COMPACT` 或 `autoCompactEnabled: false` 都会关）
+    pub enabled: bool,
+    /// 自己设的压缩点（token，已按窗口封顶）；`None` = 没设，Claude Code 按模型自己定（接近窗口时压缩）
+    pub at: Option<u64>,
+    /// 压缩点从哪来：`env`（启动环境 `CLAUDE_CODE_AUTO_COMPACT_WINDOW`）或设置文件的路径
+    pub source: Option<String>,
+    /// 来源是 `modelSettings` 里给这个模型单独设的（`/autocompact` 存在这里）
+    pub per_model: bool,
+    /// 闲时压缩开着：只在交互式的终端里会发生（对话模式是非交互的 stream-json，不会），闲置约 1 小时、上下文超过 `idle_min` 时
+    pub idle: bool,
+    /// 闲时压缩的门槛：`CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS`，默认 20 万，最少 10 万
+    pub idle_min: u64,
+}
+
+/// 设置文件从高到低（本项目个人的、本项目共享的、用户的），带上显示用的路径（家目录写成 ~）
+fn settings_ranked(ctx: &Ctx) -> Vec<(String, Value)> {
+    let proj = ctx.workdir.join(".claude");
+    let home = home();
+    [proj.join("settings.local.json"), proj.join("settings.json"), ctx.config_dir.join("settings.json")]
+        .into_iter()
+        .filter_map(|p| {
+            let v = read_json(&p)?;
+            let shown = p.strip_prefix(&home).map(|r| format!("~/{}", r.display())).unwrap_or_else(|_| p.display().to_string());
+            Some((shown, v))
+        })
+        .collect()
+}
+
+/// 这个模型的自动压缩设置。`window`：模型的上下文窗口（压缩点封顶用）；`model` 为空时只看所有模型共用的设置
+pub fn compact(ctx: &Ctx, model: &str, window: u64) -> Compact {
+    let ranked = settings_ranked(ctx);
+    let base = base_id(model);
+    let off_env = truthy(ctx.var("DISABLE_AUTO_COMPACT")) || truthy(ctx.var("DISABLE_COMPACT"));
+    let off_file = ranked.iter().find_map(|(_, s)| s["autoCompactEnabled"].as_bool()) == Some(false);
+    let enabled = !off_env && !off_file;
+    let idle_min = ctx.var("CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS").and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(200_000).max(100_000);
+    let idle = enabled && ranked.iter().find_map(|(_, s)| s["idleCompaction"].as_bool()) != Some(false);
+    // 环境变量最优先（看不懂的值 Claude Code 不理，照下面的设置）；10 万以下按 10 万、100 万以上按 100 万
+    let from_env = ctx.var("CLAUDE_CODE_AUTO_COMPACT_WINDOW").and_then(|v| token_count(&v)).map(|n| n.clamp(100_000, 1_000_000));
+    let (mut at, mut source, mut per_model) = (from_env, from_env.map(|_| "env".to_string()), false);
+    if at.is_none() {
+        // 设置文件从高到低，第一份设了的说了算；同一份里给这个模型单独设的优先于共用的。"auto" = 交给 Claude Code
+        let value = |v: &Value| match v {
+            Value::Number(n) => n.as_u64().map(Some),
+            Value::String(s) if s.trim().eq_ignore_ascii_case("auto") => Some(None),
+            Value::String(s) => token_count(s).map(Some),
+            _ => None,
+        };
+        for (path, s) in &ranked {
+            let mine = (!base.is_empty())
+                .then(|| s["modelSettings"].as_object().and_then(|m| m.iter().find(|(k, _)| base_id(k) == base)).and_then(|(_, v)| value(&v["autoCompactWindow"])))
+                .flatten();
+            let found = mine.map(|v| (v, true)).or_else(|| value(&s["autoCompactWindow"]).map(|v| (v, false)));
+            if let Some((v, m)) = found {
+                at = v.map(|n| n.clamp(100_000, 1_000_000));
+                source = Some(path.clone());
+                per_model = m;
+                break;
+            }
+        }
+    }
+    Compact { enabled, at: at.map(|n| n.min(window)), source: at.and(source), per_model, idle, idle_min }
+}
+
+/// 用户自己的配置文件里和上下文、压缩有关的设置（“模型设置”里各项不填时 Claude Code 照的就是这些）。
+/// 只看设置文件和它们的 `env`、看看自己的启动环境，不含看看按“模型设置”加的环境变量。
+pub fn user_tuning(ctx: &Ctx) -> Value {
+    let all = compact(ctx, "", 1_000_000);
+    let mut per_model: Vec<Value> = vec![];
+    for (_, s) in settings_ranked(ctx) {
+        for k in s["modelSettings"].as_object().map(|m| m.keys().cloned().collect::<Vec<_>>()).unwrap_or_default() {
+            let base = base_id(&k);
+            if per_model.iter().any(|v| v["model"] == base.as_str()) {
+                continue;
+            }
+            let c = compact(ctx, &base, 1_000_000);
+            if c.per_model {
+                per_model.push(serde_json::json!({ "model": base, "at": c.at, "source": c.source }));
+            }
+        }
+    }
+    let num = |k: &str| ctx.var(k).and_then(|v| token_count(&v));
+    serde_json::json!({
+        "compact": all,
+        "compact_models": per_model,
+        "no_1m": truthy(ctx.var("CLAUDE_CODE_DISABLE_1M_CONTEXT")),
+        "context_window": num("CLAUDE_CODE_MAX_CONTEXT_TOKENS"),
+        "max_output": num("CLAUDE_CODE_MAX_OUTPUT_TOKENS"),
+        "model": settings_ranked(ctx).iter().find_map(|(_, s)| s["model"].as_str().map(String::from)),
+    })
 }
 
 /// 订阅的用量（5 小时、7 天）：Claude Code 自己缓存在 `.claude.json` 里的（只认当前登录的账号的），
@@ -518,7 +627,8 @@ pub fn claude_env(pane_pid: u32) -> HashMap<String, String> {
             .filter_map(|kv| {
                 let s = String::from_utf8_lossy(kv);
                 let (k, v) = s.split_once('=')?;
-                (k.starts_with("ANTHROPIC_") || k.starts_with("CLAUDE_")).then(|| (k.to_string(), v.to_string()))
+                (k.starts_with("ANTHROPIC_") || k.starts_with("CLAUDE_") || matches!(k, "DISABLE_AUTO_COMPACT" | "DISABLE_COMPACT"))
+                    .then(|| (k.to_string(), v.to_string()))
             })
             .collect()
     }
@@ -704,6 +814,50 @@ mod tests {
         assert_eq!(context_window(&ctx, "glm-4.6"), 200_000);
         ctx.env.insert("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), "128000".into());
         assert_eq!(context_window(&ctx, "glm-4.6"), 128_000);
+    }
+
+    #[test]
+    fn compact_follows_settings_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join(".claude");
+        let proj = tmp.path().join("proj");
+        let mut ctx = Ctx { config_dir: cfg.clone(), state_file: tmp.path().join(".claude.json"), workdir: &proj, env: HashMap::new() };
+        let c = compact(&ctx, "claude-opus-5-5", 1_000_000);
+        assert!(c.enabled && c.idle && c.at.is_none() && c.source.is_none());
+        assert_eq!(c.idle_min, 200_000);
+        // 用户的 settings.json：给 Opus 单独设的优先于共用的（就是用户本机的那份）
+        write(&cfg.join("settings.json"), &json!({ "autoCompactWindow": 300000, "modelSettings": { "claude-opus-5-5": { "effortLevel": "medium", "autoCompactWindow": 400000 } } }));
+        let c = compact(&ctx, "claude-opus-5-5[1m]", 1_000_000);
+        assert_eq!((c.at, c.per_model), (Some(400_000), true));
+        assert!(c.source.as_deref().unwrap().ends_with("settings.json"));
+        assert_eq!(compact(&ctx, "claude-sonnet-5-5", 1_000_000).at, Some(300_000), "别的模型用共用的");
+        assert_eq!(compact(&ctx, "claude-sonnet-5-5", 200_000).at, Some(200_000), "按窗口封顶");
+        // 项目里的设置文件优先于用户的；"auto" = 交给 Claude Code
+        write(&proj.join(".claude/settings.local.json"), &json!({ "autoCompactWindow": "auto", "idleCompaction": false }));
+        let c = compact(&ctx, "claude-opus-5-5", 1_000_000);
+        assert_eq!((c.at, c.source.clone(), c.idle), (None, None, false));
+        std::fs::remove_file(proj.join(".claude/settings.local.json")).unwrap();
+        // 启动环境最优先，认 k/M，10 万以下按 10 万
+        ctx.env.insert("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), "250k".into());
+        let c = compact(&ctx, "claude-opus-5-5", 1_000_000);
+        assert_eq!((c.at, c.source.as_deref(), c.per_model), (Some(250_000), Some("env"), false));
+        ctx.env.insert("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), "50000".into());
+        assert_eq!(compact(&ctx, "claude-opus-5-5", 1_000_000).at, Some(100_000));
+        ctx.env.insert("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), "lots".into());
+        assert_eq!(compact(&ctx, "claude-opus-5-5", 1_000_000).at, Some(400_000), "看不懂的值不理");
+        ctx.env.insert("CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS".into(), "5000".into());
+        assert_eq!(compact(&ctx, "claude-opus-5-5", 1_000_000).idle_min, 100_000);
+        // 关掉自动压缩：闲时压缩一起关
+        ctx.env.insert("DISABLE_AUTO_COMPACT".into(), "1".into());
+        let c = compact(&ctx, "claude-opus-5-5", 1_000_000);
+        assert!(!c.enabled && !c.idle);
+        ctx.env.remove("DISABLE_AUTO_COMPACT");
+        write(&cfg.join("settings.json"), &json!({ "autoCompactEnabled": false }));
+        assert!(!compact(&ctx, "claude-opus-5-5", 1_000_000).enabled);
+        // 不再把压缩点当成窗口；关 1M 时最多 20 万
+        assert_eq!(context_window(&ctx, "claude-opus-5-5[1m]"), 1_000_000);
+        ctx.env.insert("CLAUDE_CODE_DISABLE_1M_CONTEXT".into(), "1".into());
+        assert_eq!(context_window(&ctx, "claude-opus-5-5[1m]"), 200_000);
     }
 
     #[test]

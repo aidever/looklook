@@ -805,7 +805,8 @@ function Shell() {
       </PublicLayout>
     );
   } else if (TERM.test(path)) {
-    body = <TerminalView id={path.match(TERM)[1]} />;
+    // 按会话 key：换会话时整页重来，不然标签、输入框里的字（草稿）会从上一个会话带过来
+    body = <TerminalView key={path.match(TERM)[1]} id={path.match(TERM)[1]} />;
   } else {
     // 换了登录（退出后重新登录）时重置终端页。远程打开时状态来自选中的那台电脑，选中的电脑一变 device_id 就变，
     // 不能拿它当 key：选中的电脑短暂离线时会自动换到默认电脑，终端页重新挂载，打开着的终端小窗就没了。

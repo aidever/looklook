@@ -1821,6 +1821,7 @@ async fn handle(app: &App, rpc: Rpc) -> Result<Value, LocalError> {
             let base = if me.following(&inst) { None } else { app.chat.snapshot(&inst).await?["total"].as_u64() };
             let since = crate::util::system_ms();
             let (text, images) = with_files(app, &inst, &msg, &files, text).await?;
+            app.instances.note_input(&inst);
             app.chat.input(&inst, &text, &images).await?;
             me.add_route(app, &msg, &inst);
             me.hold_typing(&inst, typing);
@@ -1970,6 +1971,7 @@ async fn start_session(app: &App, agent: String, dir: String, text: String, anch
             let r = async {
                 wait_ready(&app, &inst).await?;
                 let (text, images) = with_files(&app, &inst, src.as_deref().unwrap_or_default(), &files, text).await?;
+                app.instances.note_input(&inst);
                 app.chat.input(&inst, &text, &images).await
             }
             .await;

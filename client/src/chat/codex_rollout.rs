@@ -93,8 +93,18 @@ impl Rollout {
             "event_msg" => match p["type"].as_str().unwrap_or("") {
                 "item_completed" => self.item(line, &p["item"], p["turn_id"].as_str(), ts),
                 "task_complete" => {
+                    // 出错结束的一轮（比如接口 503）没有回复，只在这里带着原因：显示出来，不然只看到问题、没有下文
+                    let err = p["error"]["message"].as_str().or_else(|| p["error"].as_str()).map(str::trim).filter(|m| !m.is_empty());
+                    if let Some(m) = err {
+                        self.push(line, 0, ts.clone(), Body::Error { text: truncate(m, 2000).0 });
+                    }
                     if let Some(ms) = p["duration_ms"].as_u64() {
-                        self.push(line, 0, ts, Body::Turn { ms });
+                        self.push(line, usize::from(err.is_some()), ts, Body::Turn { ms });
+                    }
+                }
+                "error" => {
+                    if let Some(m) = p["message"].as_str().map(str::trim).filter(|m| !m.is_empty()) {
+                        self.push(line, 0, ts, Body::Error { text: truncate(m, 2000).0 });
                     }
                 }
                 "turn_aborted" => self.push(line, 0, ts, Body::Interrupt),
@@ -856,6 +866,25 @@ mod tests {
         let b = done(json!({ "type": "AgentMessage", "id": "m", "content": [{ "type": "Text", "text": "yo" }] }));
         assert!(matches!(r.feed(b.as_bytes()), Change::Upsert { start: 1, .. }));
         assert_eq!(r.len(), 2);
+    }
+
+    /// 出错结束的一轮（接口 503 等）：没有回复，要显示原因（以前对话页只有问题和用时，看着像空的）
+    #[test]
+    fn failed_turn_shows_error() {
+        let mut r = Rollout::new(PathBuf::from("x.jsonl"));
+        let text = [
+            done(json!({ "type": "UserMessage", "id": "u", "content": [{ "type": "text", "text": "hi" }] })),
+            line(json!({ "type": "event_msg", "payload": { "type": "task_complete", "duration_ms": 3000, "last_agent_message": null,
+                "error": { "message": "unexpected status 503 Service Unavailable" } } })),
+            line(json!({ "type": "event_msg", "payload": { "type": "error", "message": "stream disconnected" } })),
+        ]
+        .concat();
+        r.feed(text.as_bytes());
+        let bodies: Vec<Body> = r.items(0, r.len()).into_iter().map(|i| i.body).collect();
+        assert_eq!(bodies[1], Body::Error { text: "unexpected status 503 Service Unavailable".into() });
+        assert_eq!(bodies[2], Body::Turn { ms: 3000 }, "用时还在最后（对话页按它判断这一轮结束了）");
+        assert_eq!(bodies[3], Body::Error { text: "stream disconnected".into() });
+        assert_eq!(r.stats().unknown, 0);
     }
 
     /// 本机真实的 rollout（有就读）：不能有解析失败的行

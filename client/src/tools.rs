@@ -152,6 +152,17 @@ fn push_output(job: &Mutex<Job>, chunk: &str) {
 /// 开始安装（同一个工具已经在装时返回那个任务）。stdout、stderr 合在一起；`--loglevel=http` 让 npm 在没有终端时也逐个打印下载，看得到进度。
 pub fn start_install(shell: &str, tool: &str, mirror: &str) -> Option<Job> {
     let command = install_command(tool, mirror)?;
+    let mut line = format!("{command} --loglevel=http --no-fund --no-audit");
+    if let Some(next) = after_install(tool, mirror) {
+        line = format!("{line} && {next}");
+    }
+    Some(start_command(shell, tool, &command, &line))
+}
+
+/// 在后台跑一条命令（和安装共用同一个任务位置，同一个工具同时只跑一个；在跑时返回那个任务）。
+/// `command` 是界面上显示的，`line` 是真正交给 shell（Windows 上是 cmd）跑的。更新 AI 工具也走这里（agent_update.rs）。
+pub fn start_command(shell: &str, tool: &str, command: &str, line: &str) -> Job {
+    let command = command.to_string();
     let job = jobs(|m| {
         if let Some(j) = m.get(tool) {
             if j.lock().unwrap_or_else(|e| e.into_inner()).state == "running" {
@@ -171,17 +182,17 @@ pub fn start_install(shell: &str, tool: &str, mirror: &str) -> Option<Job> {
     });
     let job = match job {
         Ok(j) => j,
-        Err(running) => return Some(running.lock().unwrap_or_else(|e| e.into_inner()).clone()),
+        Err(running) => return running.lock().unwrap_or_else(|e| e.into_inner()).clone(),
     };
-    let mut line = format!("{command} --loglevel=http --no-fund --no-audit");
-    if let Some(next) = after_install(tool, mirror) {
-        line = format!("{line} && {next}");
-    }
     let mut cmd = if cfg!(windows) {
+        #[cfg_attr(not(windows), allow(unused_mut))]
         let mut c = Command::new("cmd.exe");
-        c.args(["/D", "/S", "/C", &format!("{line} 2>&1")]);
+        // 原样交给 cmd（`/S` 去掉最外层的引号）：命令里带引号的路径（`"C:\…\claude.exe" update`）按 Windows 的参数转义会被弄坏
         #[cfg(windows)]
-        c.creation_flags(0x0800_0000);
+        {
+            c.args(["/D", "/S", "/C"]).raw_arg(format!("\"{line} 2>&1\""));
+            c.creation_flags(0x0800_0000);
+        }
         c
     } else {
         let mut c = Command::new(shell);
@@ -240,8 +251,8 @@ pub fn start_install(shell: &str, tool: &str, mirror: &str) -> Option<Job> {
     job_view(&job)
 }
 
-fn job_view(job: &Mutex<Job>) -> Option<Job> {
-    Some(job.lock().unwrap_or_else(|e| e.into_inner()).clone())
+fn job_view(job: &Mutex<Job>) -> Job {
+    job.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 #[cfg(test)]

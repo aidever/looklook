@@ -23,6 +23,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod account;
+mod agent_update;
 mod agents;
 mod chat;
 mod checkpoint;
@@ -44,6 +45,7 @@ mod listen;
 mod metrics;
 mod model;
 mod model_presets;
+mod model_tuning;
 mod notify;
 mod feishu_agent;
 mod feishu_route;
@@ -66,9 +68,11 @@ mod push;
 mod relay;
 mod relay_watch;
 mod rtc;
+mod run_actions;
 mod settings;
 mod settings_sync;
 mod shells;
+mod skills;
 mod ssh;
 mod ssh_transfer;
 mod store;
@@ -709,6 +713,7 @@ async fn run(home: Option<PathBuf>, listen: Option<SocketAddr>, server: Option<S
         tokio::spawn(app.sync.clone().run(app.clone(), shutdown.clone())),
         tokio::spawn(chat.clone().background()),
         tokio::spawn(idle_stop::run(store.clone(), instances.clone(), chat.clone())),
+        tokio::spawn(agent_update::run(store.clone(), instances.clone(), chat.clone())),
         tokio::spawn(pricing::run(paths.home.clone())),
         tokio::spawn(rtc::net::resolve_loop()),
         tokio::spawn({

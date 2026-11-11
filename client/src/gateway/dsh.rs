@@ -327,6 +327,9 @@ pub(super) async fn foreign_holder(app: &App, id: &str, port: u16) -> Option<Str
     Some(h.who)
 }
 
+/// DSH 网页版里算用户输入的接口（dsh web 的 `POST /api/<命名空间>/<方法>`，见 chat/dsh_app.rs）
+const DSH_INPUT: &[&str] = &["api/session/prompt", "api/commands/execute", "api/$events/result", "api/session/cancel"];
+
 /// `/w/{id}/…`
 pub async fn web(State(app): State<App>, mut req: Request) -> Response {
     let access = req.extensions().get::<Access>().cloned().unwrap_or(Access::Local);
@@ -337,6 +340,10 @@ pub async fn web(State(app): State<App>, mut req: Request) -> Response {
     // 写请求、WebSocket 都会带 Origin：必须是管理台自己（DSH 那边只会看到改过的本机地址）
     if req.headers().contains_key(header::ORIGIN) && !origin_matches(req.headers(), &access) {
         return (StatusCode::FORBIDDEN, "origin").into_response();
+    }
+    // DSH 网页版里发消息、执行命令、回答确认、停下：记成用户输入（会话列表按它排，见 Instances::note_input）
+    if req.method() == axum::http::Method::POST && DSH_INPUT.iter().any(|p| sub.split('?').next() == Some(*p)) {
+        app.instances.note_input(&id);
     }
     let web_port = match app.instances.get(&id).await {
         Ok(v) => match v.web_port {
@@ -386,6 +393,7 @@ pub async fn web(State(app): State<App>, mut req: Request) -> Response {
         inject: index.then_some(proxy::WEB_TAGS),
         rewrite_location: Some((vec![format!("http://{local}"), format!("http://localhost:{port}")], base)),
         terminal: false,
+        on_input: None,
     };
     let mut r = proxy::forward(&app.http, req, port, opts).await;
     if r.status() == StatusCode::BAD_GATEWAY || r.status() == StatusCode::GATEWAY_TIMEOUT {

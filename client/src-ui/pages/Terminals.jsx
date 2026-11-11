@@ -18,6 +18,7 @@ import {
   Monitor,
   MonitorSmartphone,
   Pencil,
+  Play,
   QrCode as QrCodeIcon,
   RotateCcw,
   Square,
@@ -426,6 +427,8 @@ export function useInstanceActions(inst, { onChanged, onEdit, onLogs, onOpenHere
     !dsh && { icon: CopyPlus, label: t("instance.duplicate"), onClick: () => duplicate(false), disabled: busy || !allowed },
     !dsh && conv && { icon: GitFork, label: t("instance.duplicate_conv"), onClick: () => duplicate(true), disabled: busy || !allowed },
     inst.running && { icon: RotateCcw, label: t("instance.restart"), onClick: restart },
+    // 停了的会话：也能在这里启动（不用先点开）
+    !live && { icon: Play, label: t("instance.start"), onClick: () => act(() => api.post(`/instances/${inst.id}/start`), t("instance.started")), disabled: busy || !allowed },
     full && live && { icon: Square, label: t("instance.stop"), onClick: stop, disabled: busy },
     { icon: FileText, label: t("instance.logs"), onClick: () => onLogs(inst) },
     {

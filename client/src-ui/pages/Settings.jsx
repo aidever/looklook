@@ -22,7 +22,7 @@ import { setLocale } from '../shared/i18n.js';
 import { termTheme } from '../shared/termTheme.js';
 import { DiagCard } from '../shared/Report.jsx';
 import RelayPicker, { RELAYS_ANCHOR } from '../shared/RelayPicker.jsx';
-import { useRouter } from '../shared/router.jsx';
+import { Link, useRouter } from '../shared/router.jsx';
 import { shouldRemind, UpdateCheck } from '../shared/Update.jsx';
 import { Button, Card, ErrorNote, Seg, useAction, useLoad, useToast } from '../shared/ui.jsx';
 import { useTips } from '../shared/tips.jsx';
@@ -289,6 +289,10 @@ export default function Settings() {
             }
           />
           <UpdateCheck />
+          {/* Claude Code、Codex、DSH 的版本和自动更新在 AI 助手页：在这里找更新的人点一下过去 */}
+          <Row label={t('aup.settings_link')} hint={t('aup.settings_link_hint')}>
+            <Link to="/ai#updates">{t('aup.settings_link_go')}</Link>
+          </Row>
           <TipsField />
           <More summary={t('settings.details')}>
             <dl className="kv">

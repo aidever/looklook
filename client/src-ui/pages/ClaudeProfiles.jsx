@@ -2,7 +2,7 @@
 // 新建的会话用默认的（开始页可以另选），之后切换默认不影响已经建好的会话。两个助手共用这里的组件，`agent` 区分。
 // 官方账号的登录由 Claude Code 自己完成（后台运行 `claude auth login`，界面显示授权页地址、收授权码），看看不经手令牌。
 // 第三方接口可以从“常见服务商”里选（model_presets.rs）：地址填好了，贴上 Key 就行，模型从 models.dev 的列表里选。
-import { Check, Cpu, ExternalLink, Gauge, KeyRound, LogIn, Plus, Server, UserRound } from 'lucide-react';
+import { Check, Cpu, ExternalLink, Gauge, KeyRound, LogIn, Plus, Server, SlidersHorizontal, UserRound } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -520,11 +520,280 @@ function ApiForm({ agent, initial, accepted, onClose, onSaved }) {
   );
 }
 
+// ---------------- 模型设置（src/model_tuning.rs） ----------------
+// 上下文窗口、自动压缩等常用项，按两个助手各自支持的开关来：Claude Code 是启动时的环境变量，Codex 是 config.toml 的键（-c / 会话的 config）。
+// 都不填就照它们自己的默认；新建、重新启动的会话生效。
+
+const CODEX_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+const CODEX_SUMMARIES = ['auto', 'concise', 'detailed', 'none'];
+const CODEX_VERBOSITY = ['low', 'medium', 'high'];
+
+/** “400k”“1m”“128000”→ token 数；空的是 null，看不懂的是 NaN */
+export function parseTokens(v) {
+  const s = String(v ?? '').trim().toLowerCase().replace(/[,_\s]/g, '');
+  if (!s) return null;
+  const m = /^(\d+(?:\.\d+)?)([km]?)$/.exec(s);
+  if (!m) return NaN;
+  return Math.round(Number(m[1]) * (m[2] === 'm' ? 1_000_000 : m[2] === 'k' ? 1_000 : 1));
+}
+
+/** 400000 → “400K”，1000000 → “1M” */
+export function tokensText(n) {
+  if (n == null) return '';
+  if (n >= 1_000_000 && n % 100_000 === 0) return `${n / 1_000_000}M`;
+  if (n >= 1_000 && n % 1_000 === 0) return `${n / 1_000}K`;
+  return String(n);
+}
+
+/** 列表里那一行底下的摘要：设了哪些 */
+function tuningSummary(t, agent, p) {
+  const x = p.tuning;
+  if (!x) return [];
+  const api = p.kind === 'api';
+  const out = [];
+  if (x.context_window && (api || agent === 'codex')) out.push(t('tune.sum_window', { n: tokensText(x.context_window) }));
+  if (x.no_1m) out.push(t('tune.sum_no_1m'));
+  if (x.no_auto_compact) out.push(t('tune.sum_no_compact'));
+  else if (x.compact_window || x.compact_limit) out.push(t('tune.sum_compact', { n: tokensText(x.compact_window ?? x.compact_limit) }));
+  if (x.max_output) out.push(t('tune.sum_output', { n: tokensText(x.max_output) }));
+  if (x.effort) out.push(t('tune.sum_effort', { v: x.effort }));
+  return out;
+}
+
+function TokenField({ label, hint, value, onChange, placeholder, min, max }) {
+  const { t } = useTranslation();
+  const n = parseTokens(value);
+  const bad = Number.isNaN(n) || (n != null && (n < min || n > max));
+  return (
+    <Field label={label} hint={n && !bad ? `= ${n.toLocaleString()} tokens${hint ? ` · ${hint}` : ''}` : hint} error={bad ? t('tune.range', { min: tokensText(min), max: tokensText(max) }) : null}>
+      <input className="mono" value={value} onChange={(e) => onChange(e.target.value)} inputMode="text" spellCheck={false} autoCapitalize="none" placeholder={placeholder ?? t('tune.default')} maxLength={12} />
+    </Field>
+  );
+}
+
+function CheckRow({ checked, onChange, label, hint, disabled }) {
+  return (
+    <label className="check-row">
+      <input type="checkbox" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
+      <span>
+        {label}
+        {hint && (
+          <span className="small muted" style={{ display: 'block' }}>
+            {hint}
+          </span>
+        )}
+      </span>
+    </label>
+  );
+}
+
+/** claude-opus-5-5 → Opus 5.5（只为显示） */
+function modelShort(id) {
+  const m = /^claude-([a-z]+)-(\d+)(?:-(\d+))?/.exec(String(id ?? ''));
+  return m ? `${m[1][0].toUpperCase()}${m[1].slice(1)} ${m[2]}${m[3] ? `.${m[3]}` : ''}` : String(id ?? '');
+}
+
+/** 用户自己的配置文件里（settings.json / config.toml）已经设了的：不填时照的就是这些，列出来别让人以为是空的 */
+function userTuningLines(t, agent, cur) {
+  if (!cur) return [];
+  const out = [];
+  if (agent === 'codex') {
+    if (cur.context_window) out.push(t('tune.cur_window', { n: tokensText(cur.context_window) }));
+    if (cur.compact_limit) out.push(t('tune.cur_compact', { n: tokensText(cur.compact_limit) }));
+    if (cur.effort) out.push(t('tune.sum_effort', { v: cur.effort }));
+    if (cur.summary) out.push(`model_reasoning_summary = ${cur.summary}`);
+    if (cur.verbosity) out.push(`model_verbosity = ${cur.verbosity}`);
+    return out;
+  }
+  const c = cur.compact ?? {};
+  if (c.enabled === false) out.push(t('tune.cur_compact_off'));
+  else {
+    for (const m of cur.compact_models ?? []) out.push(m.at ? t('tune.cur_compact_model', { model: modelShort(m.model), n: tokensText(m.at) }) : t('tune.cur_compact_model_auto', { model: modelShort(m.model) }));
+    if (c.at && c.source !== 'env') out.push(t('tune.cur_compact', { n: tokensText(c.at) }));
+  }
+  out.push(c.idle ? t('tune.cur_idle_on', { n: tokensText(c.idle_min) }) : t('tune.cur_idle_off'));
+  if (cur.no_1m) out.push(t('tune.sum_no_1m'));
+  if (cur.context_window) out.push(t('tune.cur_window', { n: tokensText(cur.context_window) }));
+  if (cur.max_output) out.push(t('tune.sum_output', { n: tokensText(cur.max_output) }));
+  return out;
+}
+
+function TuningModal({ agent, p, onClose, onSaved }) {
+  const { t } = useTranslation();
+  const cfg = AGENTS[agent];
+  // 第三方接口（不能叫 api：会盖住上面引入的 api，保存、读配置时报 api.put is not a function）
+  const isApi = p.kind === 'api';
+  const x = p.tuning ?? {};
+  const tok = (n) => (n ? tokensText(n) : '');
+  const [f, setF] = useState(() => ({
+    context_window: tok(x.context_window),
+    compact: tok(agent === 'codex' ? x.compact_limit : x.compact_window),
+    max_output: tok(x.max_output),
+    no_1m: Boolean(x.no_1m),
+    no_auto_compact: Boolean(x.no_auto_compact),
+    always_effort: Boolean(x.always_effort),
+    timeout: String((agent === 'codex' ? x.idle_timeout_secs : x.timeout_secs) ?? ''),
+    effort: x.effort ?? '',
+    summary: x.summary ?? '',
+    verbosity: x.verbosity ?? '',
+  }));
+  const set = (k) => (v) => setF((o) => ({ ...o, [k]: v }));
+  const { busy, error, run } = useAction();
+  // 用户自己的配置文件里设了什么（读不到就当没有）
+  const [cur] = useLoad(() => api.get(`${cfg.base}/${p.id}/tuning/current`).catch(() => null), [agent, p.id]);
+  const curLines = userTuningLines(t, agent, cur);
+  const curFile =
+    agent === 'codex'
+      ? cur?.source ?? '~/.codex/config.toml'
+      : (cur?.compact?.source !== 'env' && cur?.compact?.source) || cur?.compact_models?.[0]?.source || '~/.claude/settings.json';
+  // 不填时输入框里灰字写配置文件里的值
+  const fromFile = (n) => (n ? t('tune.from_file', { v: tokensText(n) }) : undefined);
+  const perModel = agent === 'claude' && (cur?.compact_models ?? []).some((m) => m.at);
+  const win = parseTokens(f.context_window);
+  const compact = parseTokens(f.compact);
+  const out = parseTokens(f.max_output);
+  const timeout = f.timeout.trim() ? Number(f.timeout) : null;
+  const inRange = (n, a, b) => n == null || (!Number.isNaN(n) && n >= a && n <= b);
+  const timeoutOk = timeout == null || (Number.isInteger(timeout) && timeout >= 10 && timeout <= 3600);
+  const codexOrder = agent !== 'codex' || win == null || compact == null || compact < win;
+  const ok =
+    inRange(win, 8_000, 10_000_000) &&
+    (agent === 'codex' ? inRange(compact, 1_000, 10_000_000) : inRange(compact, 100_000, 1_000_000)) &&
+    inRange(out, 1_000, 1_000_000) &&
+    timeoutOk &&
+    codexOrder;
+  const body = () =>
+    agent === 'codex'
+      ? {
+          context_window: win,
+          compact_limit: compact,
+          effort: f.effort || null,
+          summary: f.summary || null,
+          verbosity: f.verbosity || null,
+          idle_timeout_secs: isApi ? timeout : null,
+        }
+      : {
+          context_window: isApi ? win : null,
+          no_1m: f.no_1m,
+          no_auto_compact: f.no_auto_compact,
+          compact_window: compact,
+          max_output: out,
+          always_effort: isApi && f.always_effort,
+          timeout_secs: isApi ? timeout : null,
+        };
+  const save = (e) => {
+    e.preventDefault();
+    run(async () => onSaved(await api.put(`${cfg.base}/${p.id}/tuning`, body())));
+  };
+  const reset = () => run(async () => onSaved(await api.put(`${cfg.base}/${p.id}/tuning`, {})));
+  const choose = (k, list, prefix) => (
+    <Select value={f[k]} onChange={(e) => set(k)(e.target.value)}>
+      <option value="">{cur?.[k] ? t('tune.default_file', { v: t(`${prefix}.${cur[k]}`, { defaultValue: cur[k] }) }) : t('tune.default')}</option>
+      {list.map((v) => (
+        <option key={v} value={v}>
+          {t(`${prefix}.${v}`, { defaultValue: v })}
+        </option>
+      ))}
+    </Select>
+  );
+  return (
+    <Modal open onClose={onClose} title={t('tune.title', { name: profileName(t, p, agent) })} wide>
+      <form onSubmit={save}>
+        <p className="small muted" style={{ marginTop: 0 }}>
+          {t(`tune.intro_${agent}`)}
+        </p>
+        {curLines.length > 0 && (
+          <Note>
+            <b>{t('tune.cur_title', { file: curFile })}</b>
+            <ul className="tune-cur">
+              {curLines.map((l) => (
+                <li key={l}>{l}</li>
+              ))}
+            </ul>
+          </Note>
+        )}
+        <h3 className="tune-head">{t('tune.sec_context')}</h3>
+        <div className="cprof-models">
+          {(isApi || agent === 'codex') && (
+            <TokenField label={t('tune.context_window')} hint={t(`tune.context_window_hint_${agent}`)} value={f.context_window} onChange={set('context_window')} min={8_000} max={10_000_000} placeholder={fromFile(cur?.context_window)} />
+          )}
+          {agent === 'claude' ? (
+            <TokenField
+              label={t('tune.compact_window')}
+              hint={t('tune.compact_window_hint')}
+              value={f.no_auto_compact ? '' : f.compact}
+              onChange={set('compact')}
+              min={100_000}
+              max={1_000_000}
+              placeholder={f.no_auto_compact ? t('tune.compact_off') : perModel ? t('tune.from_file_models') : fromFile(cur?.compact?.source !== 'env' ? cur?.compact?.at : null)}
+            />
+          ) : (
+            <TokenField label={t('tune.compact_limit')} hint={t('tune.compact_limit_hint')} value={f.compact} onChange={set('compact')} min={1_000} max={10_000_000} placeholder={fromFile(cur?.compact_limit)} />
+          )}
+        </div>
+        {!codexOrder && <Note kind="warn">{t('tune.compact_over')}</Note>}
+        {perModel && compact != null && !Number.isNaN(compact) && !f.no_auto_compact && <Note kind="warn">{t('tune.compact_overrides_models')}</Note>}
+        {agent === 'claude' && (
+          <>
+            <CheckRow checked={f.no_auto_compact} onChange={set('no_auto_compact')} label={t('tune.no_auto_compact')} hint={t('tune.no_auto_compact_hint')} />
+            <CheckRow checked={f.no_1m} onChange={set('no_1m')} label={t('tune.no_1m')} hint={t('tune.no_1m_hint')} />
+          </>
+        )}
+        <h3 className="tune-head">{t('tune.sec_output')}</h3>
+        {agent === 'claude' ? (
+          <>
+            <div className="cprof-models">
+              <TokenField label={t('tune.max_output')} hint={t('tune.max_output_hint')} value={f.max_output} onChange={set('max_output')} min={1_000} max={1_000_000} />
+            </div>
+            {isApi && <CheckRow checked={f.always_effort} onChange={set('always_effort')} label={t('tune.always_effort')} hint={t('tune.always_effort_hint')} />}
+            {!isApi && <p className="small muted">{t('tune.effort_claude')}</p>}
+          </>
+        ) : (
+          <div className="cprof-models">
+            <Field label={t('tune.effort')} hint={t('tune.effort_hint')}>
+              {choose('effort', CODEX_EFFORTS, 'tune.effort_v')}
+            </Field>
+            <Field label={t('tune.summary')} hint={t('tune.summary_hint')}>
+              {choose('summary', CODEX_SUMMARIES, 'tune.summary_v')}
+            </Field>
+            <Field label={t('tune.verbosity')} hint={t('tune.verbosity_hint')}>
+              {choose('verbosity', CODEX_VERBOSITY, 'tune.verbosity_v')}
+            </Field>
+          </div>
+        )}
+        {isApi && (
+          <>
+            <h3 className="tune-head">{t('tune.sec_network')}</h3>
+            <div className="cprof-models">
+              <Field label={t(`tune.timeout_${agent}`)} hint={t(`tune.timeout_${agent}_hint`)} error={timeoutOk ? null : t('tune.timeout_range')}>
+                <input className="mono" value={f.timeout} onChange={(e) => set('timeout')(e.target.value.replace(/\D/g, ''))} inputMode="numeric" placeholder={t('tune.default')} maxLength={4} />
+              </Field>
+            </div>
+          </>
+        )}
+        <p className="small muted">{t('tune.applies')}</p>
+        <ErrorNote error={error} />
+        <div className="modal-actions">
+          <Button variant="ghost" onClick={reset} disabled={busy}>
+            {t('tune.reset')}
+          </Button>
+          <Button variant="ghost" onClick={onClose}>
+            {t('action.cancel')}
+          </Button>
+          <Button type="submit" busy={busy} disabled={!ok}>
+            {t('action.save')}
+          </Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
 /**
  * 一个配置。Claude Code 的官方账号：已登录时按钮是“查用量”（请 Claude Code 去取，顺便确认登录状态；登录失效就提示重新登录），
  * 没登录时是“登录”，“重新登录”在更多菜单里。Codex 的本机默认只是说明（Codex 自己的登录和配置）。
  */
-function ProfileRow({ agent, p, isDefault, busy, nonce, onDefault, onLogin, onEdit, onRemove, only }) {
+function ProfileRow({ agent, p, isDefault, busy, nonce, onDefault, onLogin, onEdit, onTune, onRemove, only }) {
   const { t } = useTranslation();
   const toast = useToast();
   const cfg = AGENTS[agent];
@@ -585,6 +854,7 @@ function ProfileRow({ agent, p, isDefault, busy, nonce, onDefault, onLogin, onEd
     };
   }, [autoQuery, p.id, agent]);
   const model = agent === 'codex' ? p.model : p.models?.main;
+  const tuned = tuningSummary(t, agent, p);
   return (
     <li className={isDefault ? 'cprof-default' : ''}>
       <button
@@ -621,6 +891,11 @@ function ProfileRow({ agent, p, isDefault, busy, nonce, onDefault, onLogin, onEd
             </>
           )}
         </span>
+        {tuned.length > 0 && (
+          <button type="button" className="small muted cprof-tuned" onClick={() => onTune(p)} title={t('tune.menu')}>
+            <SlidersHorizontal size={13} aria-hidden="true" /> {tuned.join(' · ')}
+          </button>
+        )}
         {(loggedIn || !official) && usage?.state === 'ok' && (
           <span className="small" style={{ display: 'block' }}>
             <UsageLine limits={usage.limits} />
@@ -644,18 +919,17 @@ function ProfileRow({ agent, p, isDefault, busy, nonce, onDefault, onLogin, onEd
             {t('cprof.usage')}
           </Button>
         )}
-        {/* Claude Code 的本机默认账号也能改名、从列表里去掉（只剩它一个时不能去掉）；Codex 的本机默认只是说明 */}
-        {(p.id !== 'official' || agent === 'claude') && (
-          <PopMenu
+        {/* Claude Code 的本机默认账号也能改名、从列表里去掉（只剩它一个时不能去掉）；Codex 的本机默认只能改模型设置 */}
+        <PopMenu
             label={t('action.more')}
             items={[
               claudeLogin && loggedIn && { icon: LogIn, label: t('cprof.relogin'), onClick: () => onLogin(p) },
               !isDefault && { icon: Check, label: t('cprof.make_default'), onClick: () => onDefault(p) },
-              { label: t(p.kind === 'api' ? 'cprof.edit' : 'cprof.rename'), onClick: () => onEdit(p) },
-              !(p.id === 'official' && only) && { label: t(p.id === 'official' ? 'cprof.hide_builtin' : 'action.delete'), danger: true, onClick: () => onRemove(p) },
+              { icon: SlidersHorizontal, label: t('tune.menu'), hint: t(`tune.menu_hint_${agent}`), onClick: () => onTune(p) },
+              (p.id !== 'official' || agent === 'claude') && { label: t(p.kind === 'api' ? 'cprof.edit' : 'cprof.rename'), onClick: () => onEdit(p) },
+              !(p.id === 'official' && (only || agent === 'codex')) && { label: t(p.id === 'official' ? 'cprof.hide_builtin' : 'action.delete'), danger: true, onClick: () => onRemove(p) },
             ]}
           />
-        )}
       </span>
     </li>
   );
@@ -762,6 +1036,7 @@ function ProfilesCard({ agent }) {
                 onDefault={setDefault}
                 onLogin={login}
                 onEdit={(x) => setForm({ kind: x.kind, initial: x })}
+                onTune={(x) => setForm({ kind: 'tune', initial: x })}
                 onRemove={remove}
                 only={data.profiles.length === 1}
               />
@@ -773,6 +1048,7 @@ function ProfilesCard({ agent }) {
         </p>
       </Card>
       {loggingIn && <LoginModal profile={loggingIn} onClose={loginClosed} />}
+      {form?.kind === 'tune' && <TuningModal agent={agent} p={form.initial} onClose={() => setForm(null)} onSaved={saved} />}
       {form?.kind === 'official' && <OfficialForm initial={form.initial} onClose={() => setForm(null)} onSaved={saved} />}
       {form?.kind === 'api' && data && <ApiForm agent={agent} initial={form.initial} accepted={Boolean(data.accepted_at)} onClose={() => setForm(null)} onSaved={saved} />}
     </div>

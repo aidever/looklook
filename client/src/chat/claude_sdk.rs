@@ -216,9 +216,20 @@ impl Proc {
     /// 同上；`ultrathink`：用户在输入框里手打了 ultrathink（`ultrathink_typed`，claude 这一轮按 xhigh 想，跟 TUI 里一样）。
     /// 只在最近一次 init 带了 `ultrathink_typed_raises: true` 时用。
     pub async fn send_user_typed(&self, content: Value, ultrathink: bool) -> Result<(), LocalError> {
+        self.send_user_with(content, ultrathink, false).await
+    }
+
+    /// `now`：TUI 的“立即发送”（`priority: "now"`）——这一步一结束就停下这一轮、先回答这条，没做完的事不再接着做。
+    /// 配合 `background_tasks`（先把前台命令、子代理转到后台）就跟终端里按立即发送一样：不用等命令跑完。
+    /// 带 uuid：claude 只在有 uuid 时能把它当成可以抢先的那条（turn_preempted 的 preempted_by_uuid）
+    pub async fn send_user_with(&self, content: Value, ultrathink: bool, now: bool) -> Result<(), LocalError> {
         let mut m = json!({ "type": "user", "message": { "role": "user", "content": content }, "parent_tool_use_id": null, "session_id": "" });
         if ultrathink {
             m["ultrathink_typed"] = json!(true);
+        }
+        if now {
+            m["priority"] = json!("now");
+            m["uuid"] = json!(uuid_v4());
         }
         self.write(&m).await
     }
@@ -363,4 +374,11 @@ mod tests {
         assert_eq!(find_transcript(&[dir.clone()], "../etc"), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// 随机 uuid（v4 格式），给 claude 认消息用
+fn uuid_v4() -> String {
+    let b: [u8; 16] = rand::random();
+    let h = |r: std::ops::Range<usize>| b[r].iter().map(|x| format!("{x:02x}")).collect::<String>();
+    format!("{}-{}-4{}-{:x}{}-{}", h(0..4), h(4..6), &h(6..8)[1..], 8 | (b[8] & 3), &h(8..10)[1..], h(10..16))
 }

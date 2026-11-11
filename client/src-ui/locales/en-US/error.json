@@ -314,5 +314,12 @@
   "ZIP_TOO_BIG": "Too large; at most 4 GB per zip",
   "CLIENT_TOO_OLD": "Looklook on that computer is too old for this. Update it first",
   "FILE_CHANGED": "The file changed after you opened it",
-  "FILE_TOO_BIG": "The file is too large to edit here (max 1 MB)"
+  "FILE_TOO_BIG": "The file is too large to edit here (max 1 MB)",
+  "AGENT_UPDATE_CHECK_FAILED": "Couldn't check for new versions: the npm registry is unreachable. Check your network and try again.",
+  "AGENT_UPDATE_RUNNING": "An update is already running. Wait for it to finish.",
+  "AGENT_NOT_INSTALLED": "This tool isn't installed on this computer.",
+  "AGENT_UP_TO_DATE": "Already up to date.",
+  "AGENT_UPDATE_DESKTOP": "This Claude Code comes with the Claude desktop app, which updates it.",
+  "AGENT_UPDATE_MANUAL": "Couldn't tell how it was installed. Update it the way you installed it.",
+  "SKILL_EXISTS": "A skill with the same name is already there; delete or rename it, then undo"
 }

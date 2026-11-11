@@ -984,6 +984,7 @@ impl Notifier {
         // 结束卡片上的回复：送进会话，卡片换成“已发给 AI”
         if act.a == "say" && sent.key.is_none() {
             let text = said.ok_or_else(|| LocalError::invalid("text", "required"))?;
+            app.instances.note_input(&act.inst);
             app.chat.input(&act.inst, &text, &[]).await?;
             tracing::info!(inst = %act.inst, "飞书：回复了一句话");
             return Ok((tr(en, "已发给 AI", "Sent to the AI"), Some(card::said(&info.info(), &text))));
@@ -996,6 +997,7 @@ impl Notifier {
         let option = |i: Option<usize>| -> Result<String, LocalError> {
             i.and_then(|i| a["options"][i].as_str()).map(String::from).ok_or_else(|| LocalError::invalid("i", "invalid"))
         };
+        app.instances.note_input(&act.inst);
         let result = match act.a.as_str() {
             "allow" | "deny" => {
                 let id = a["pending_id"].as_u64().ok_or_else(|| LocalError::new("CHAT_STALE"))?;

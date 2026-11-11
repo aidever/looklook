@@ -87,12 +87,12 @@ fn skills(dir: &Path, source: &'static str, out: &mut Vec<Command>) {
     }
 }
 
-fn valid_name(s: &str) -> bool {
+pub(crate) fn valid_name(s: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.'))
 }
 
 /// 只读开头一点（说明在 frontmatter 或第一行）
-fn read_head(p: &Path) -> String {
+pub(crate) fn read_head(p: &Path) -> String {
     use std::io::Read;
     let mut buf = vec![0u8; 8192];
     let n = std::fs::File::open(p).and_then(|mut f| f.read(&mut buf)).unwrap_or(0);
@@ -100,7 +100,7 @@ fn read_head(p: &Path) -> String {
 }
 
 /// `---` 包起来的简单 `key: value`（不处理多行值，引号去掉）
-fn frontmatter(text: &str) -> (std::collections::HashMap<String, String>, &str) {
+pub(crate) fn frontmatter(text: &str) -> (std::collections::HashMap<String, String>, &str) {
     let mut map = std::collections::HashMap::new();
     let Some(rest) = text.strip_prefix("---").map(|r| r.trim_start_matches(['\r', '\n'])) else { return (map, text) };
     let Some(end) = rest.find("\n---") else { return (map, text) };

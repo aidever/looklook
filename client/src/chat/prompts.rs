@@ -50,6 +50,62 @@ pub fn claude_prompts(dirs: &[PathBuf], project: &Path, limit: usize) -> Vec<Pro
     all
 }
 
+/// 看看自己记的输入历史（`<home>/inputs.jsonl`）：在看看里发出去的每一句，所有工具都记。
+/// Claude Code 的对话模式（`claude -p`）不写 history.jsonl，Codex、DSH 没有按项目的历史，只靠它。
+/// 每行 `{"text", "at", "workdir", "agent", "session"?}`。
+const OWN_FILE: &str = "inputs.jsonl";
+/// 超过这么大时只留后一半
+const OWN_MAX: u64 = 2 << 20;
+
+pub fn record(home: &Path, workdir: &str, agent: &str, session: Option<&str>, text: &str) {
+    let text = text.trim();
+    if text.is_empty() || text.len() > PASTE_MAX {
+        return;
+    }
+    let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+    let line = serde_json::json!({ "text": text, "at": at, "workdir": workdir, "agent": agent, "session": session }).to_string();
+    let path = home.join(OWN_FILE);
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > OWN_MAX) {
+        if let Some(keep) = read_tail(&path).map(|s| s[s.len() / 2..].split_once('\n').map(|(_, r)| r.to_string()).unwrap_or_default()) {
+            let tmp = path.with_extension("jsonl.tmp");
+            if std::fs::write(&tmp, keep.as_bytes()).is_ok() {
+                let _ = std::fs::rename(&tmp, &path);
+            }
+        }
+    }
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
+/// 自己记的：这个项目、这个工具的，最新的在前
+pub fn own_prompts(home: &Path, project: &Path, agent: &str, limit: usize) -> Vec<Prompt> {
+    let want = norm(&project.to_string_lossy());
+    let Some(text) = read_tail(&home.join(OWN_FILE)) else { return vec![] };
+    let mut all: Vec<Prompt> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|v| v["agent"].as_str() == Some(agent) && v["workdir"].as_str().map(norm).as_deref() == Some(want.as_str()))
+        .filter_map(|v| Some(Prompt { text: v["text"].as_str()?.to_string(), at: v["at"].as_i64().unwrap_or(0), session: v["session"].as_str().map(String::from) }))
+        .collect();
+    all.reverse();
+    let mut seen = std::collections::HashSet::new();
+    all.retain(|p| seen.insert(p.text.trim().to_string()));
+    all.truncate(limit);
+    all
+}
+
+/// 合起来：按时间，最新的在前，同样的话只留最新一条
+pub fn merge(mut a: Vec<Prompt>, b: Vec<Prompt>, limit: usize) -> Vec<Prompt> {
+    a.extend(b);
+    a.sort_by(|x, y| y.at.cmp(&x.at));
+    let mut seen = std::collections::HashSet::new();
+    a.retain(|p| seen.insert(p.text.trim().to_string()));
+    a.truncate(limit);
+    a
+}
+
 /// 比较项目路径：去掉末尾的斜杠；Windows 上不分大小写、两种斜杠一样
 fn norm(p: &str) -> String {
     let p = p.trim_end_matches(['/', '\\']);
@@ -101,6 +157,22 @@ fn expand(display: &str, pasted: &Value, dir: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn own_record_per_project_and_agent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let h = tmp.path();
+        record(h, "/w/a", "codex", None, "one");
+        record(h, "/w/a/", "codex", Some("s1"), "two");
+        record(h, "/w/a", "claude", None, "other agent");
+        record(h, "/w/b", "codex", None, "other project");
+        record(h, "/w/a", "codex", None, "one");
+        record(h, "/w/a", "codex", None, "   ");
+        let got: Vec<_> = own_prompts(h, Path::new("/w/a"), "codex", 10).into_iter().map(|p| p.text).collect();
+        assert_eq!(got, ["one", "two"]);
+        let m = merge(vec![Prompt { text: "old".into(), at: 1, session: None }, Prompt { text: "one".into(), at: 2, session: None }], own_prompts(h, Path::new("/w/a"), "codex", 10), 10);
+        assert_eq!(m.iter().map(|p| p.text.as_str()).collect::<Vec<_>>(), ["one", "two", "old"]);
+    }
 
     #[test]
     fn reads_project_newest_first_with_pastes() {

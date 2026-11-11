@@ -56,6 +56,10 @@ pub struct Hub {
 #[derive(Default)]
 pub struct SdkSt {
     pub(super) proc: Option<Arc<Proc>>,
+    /// 装了更新的 Claude Code（这个进程还是旧版本）：空闲时结束它，下次发消息时用新版本接着（[`Chat::sdk_upgrade`]）
+    pub(super) upgrade: Option<String>,
+    /// 已经为这个版本重起过（起来的还是旧版本时不再一遍遍重起）
+    upgraded: Option<String>,
     /// 新建时选的“接着以前的对话”：起进程时用一次（会话号、要不要复制一份）
     pub(super) resume: Option<(String, bool)>,
     /// 编辑重发：接着时只要到这条记录为止（`--resume-session-at`），起进程时用一次
@@ -101,6 +105,8 @@ pub struct SdkSt {
     pub(super) term: Option<i64>,
     /// 打开终端标签时这一轮还在跑：做完后再交给终端
     term_after: bool,
+    /// 对话页正在发的消息条数（起进程、送消息途中）：这时不交给终端，见 [`Chat::sdk_to_terminal`]
+    sending: u32,
     /// Stop hook 的 `session_crons` 不是空的：这段对话里有定时任务（/loop、CronCreate、ScheduleWakeup），
     /// 都在 claude 进程里，进程结束就没了，所以不能当空闲结束
     pub(super) crons: bool,
@@ -179,6 +185,9 @@ impl Chat {
                 Self::note_prompt(&mut st, prompt.as_deref().unwrap_or(""));
             }
         }
+        if let Some(p) = &prompt {
+            self.record_input(id, p);
+        }
         if prompt.is_some() {
             if let Err(e) = self.sdk_attach(id).await {
                 tracing::warn!(id, error = ?e, "对话模式的 Claude Code 没起来，第一句话没发出去");
@@ -204,9 +213,20 @@ impl Chat {
         if let Some(p) = lock(&inst.st).sdk.proc.clone().filter(|p| p.alive()) {
             return Ok(p);
         }
-        // 对话页要用了（发消息、换模型……）：先从终端收回来
-        self.sdk_take_back(&inst).await?;
-        let _g = self.sdk.start.lock().await;
+        // 对话页要用了（发消息、换模型……）：先从终端收回来。收回来和拿到锁之间可能又交给了终端
+        // （交给终端也拿这把锁）：拿到锁后再看一次，不然看看起的进程和终端里的 TUI 会同时写这段对话
+        let mut tries = 0;
+        let _g = loop {
+            self.sdk_take_back(&inst).await?;
+            let g = self.sdk.start.lock().await;
+            if lock(&inst.st).sdk.term.is_none() {
+                break g;
+            }
+            tries += 1;
+            if tries >= 3 {
+                return Err(LocalError::new("CHAT_TERMINAL_BUSY"));
+            }
+        };
         if let Some(p) = lock(&inst.st).sdk.proc.clone().filter(|p| p.alive()) {
             return Ok(p);
         }
@@ -459,6 +479,11 @@ impl Chat {
     }
 
     fn sdk_message(self: &Arc<Self>, inst: &Arc<Inst>, proc: &Arc<Proc>, v: Value) {
+        // 已经停掉的旧进程（/resume、/new、换账号、编辑重发时结束的）临走还会发 hook（SessionEnd、Stop……），
+        // 带着旧的会话号：再交给 hook 处理就把刚换过去的对话又绑回旧的那段（/resume 后界面停在旧对话、历史里“当前”标错）
+        if proc.killed() {
+            return;
+        }
         match v["type"].as_str().unwrap_or("") {
             "control_request" => self.sdk_control(inst, proc, v),
             "stream_event" => self.sdk_stream(inst, &v["event"], v["parent_tool_use_id"].is_null()),
@@ -683,6 +708,9 @@ impl Chat {
                             input["hook_event_name"] = json!(e);
                         }
                     }
+                    if proc.killed() {
+                        return;
+                    }
                     if let Some(c) = input["session_crons"].as_array() {
                         lock(&inst.st).sdk.crons = !c.is_empty();
                     }
@@ -746,6 +774,7 @@ impl Chat {
     /// 界面的回答 → `can_use_tool` 的答复（和 PermissionRequest hook 的 `decision` 同一种格式）
     pub(super) fn sdk_answer(&self, inst: &Inst, req: &PermissionAnswer) -> Result<(), LocalError> {
         let mut st = lock(&inst.st);
+        let term = st.sdk.term.is_some();
         let Some(p) = st.pending.as_mut().filter(|p| p.id == req.id) else { return Err(LocalError::new("CHAT_STALE")) };
         let out = if p.guard.is_some() {
             // 命令规则的确认：答复的是 PreToolUse hook
@@ -757,6 +786,15 @@ impl Chat {
                 }
                 _ => return Err(LocalError::invalid("decision", "invalid")),
             }
+        } else if term {
+            // 交给终端了：挂着的是终端里 TUI 的 PermissionRequest hook（见 Chat::hook），答复照 hook 的格式
+            if req.decision == "terminal" {
+                p.resolve(String::new());
+                Self::settle(inst, &mut st, Phase::Tui);
+                return Ok(());
+            }
+            let decision = inst.agent.decision(&super::PendingView { tool: &p.tool, input: &p.input, suggestions: &p.suggestions }, p.kind, req)?;
+            json!({ "hookSpecificOutput": { "hookEventName": "PermissionRequest", "decision": decision } }).to_string()
         } else {
             if req.decision == "terminal" {
                 return Err(LocalError::invalid("decision", "invalid"));
@@ -793,10 +831,20 @@ impl Chat {
     /// 发消息。`/new` 是 `/clear` 的别名；会话记的账号不是现在的默认时，`/new`、`/clear` 换成默认账号重新开一段
     pub(super) async fn sdk_input(self: &Arc<Self>, id: &str, text: &str, images: &[String]) -> Result<Value, LocalError> {
         let inst = self.inst(id);
+        lock(&inst.st).sdk.sending += 1;
+        let r = self.sdk_input_inner(&inst, id, text, images).await;
+        lock(&inst.st).sdk.sending -= 1;
+        r
+    }
+
+    async fn sdk_input_inner(self: &Arc<Self>, inst: &Arc<Inst>, id: &str, text: &str, images: &[String]) -> Result<Value, LocalError> {
+        let inst = inst.clone();
         if matches!(lock(&inst.st).phase, Phase::Approval) && !text.starts_with('/') {
             // 审批挂着时发的消息 claude 要等审批答完才处理：先提示用户回答
             return Err(LocalError::new("CHAT_BUSY"));
         }
+        // 在对话页发了消息：打开终端标签时说好的“这一轮做完交给终端”不算了
+        lock(&inst.st).sdk.term_after = false;
         let text = if text == "/new" { "/clear" } else { text };
         // 换到以前的一段对话：`/resume` 只有交互界面有，这里是重起进程 `--resume`
         if let Some(sid) = text.strip_prefix("/resume ").map(str::trim).filter(|s| crate::history::valid_id(s)) {
@@ -827,25 +875,56 @@ impl Chat {
         proc.send_user_typed(content, ultrathink).await?;
         // 手打的 `/model sonnet`、`/effort high`：claude 只在这个进程里生效，跟界面上选的一样记下来，进程重起时带上
         // （不然空闲结束、换账号、重启客户端后就回去了）
+        // 也算“上次选的”，下次新建对话时当默认（model_memory.rs）
         if let Some((cmd, v)) = text.split_once(' ').map(|(c, v)| (c, v.trim())).filter(|(_, v)| !v.is_empty() && !v.contains(char::is_whitespace)) {
             let ok_model = v.len() <= 64 && v.chars().all(|c| c.is_ascii_alphanumeric() || "._-[]".contains(c));
-            let mut st = lock(&inst.st);
-            match cmd {
-                "/model" if ok_model => {
-                    st.model = Some(v.to_string());
-                    st.model_set_at = Some(st.model_msg.clone());
-                    st.sdk.model = Some(v.to_string());
+            let kind = {
+                let mut st = lock(&inst.st);
+                match cmd {
+                    "/model" if ok_model => {
+                        st.model = Some(v.to_string());
+                        st.model_set_at = Some(st.model_msg.clone());
+                        st.sdk.model = Some(v.to_string());
+                        Some("model")
+                    }
+                    "/effort" if super::screen::EFFORTS.contains(&v) => {
+                        st.effort = Some(v.to_string());
+                        st.sdk.effort = Some(v.to_string());
+                        Some("effort")
+                    }
+                    _ => None,
                 }
-                "/effort" if super::screen::EFFORTS.contains(&v) => {
-                    st.effort = Some(v.to_string());
-                    st.sdk.effort = Some(v.to_string());
-                }
-                _ => {}
+            };
+            if let Some(kind) = kind {
+                self.remember_model(id, kind, v);
             }
         }
         if !text.starts_with('/') {
             self.sdk_running(&inst);
         }
+        Ok(json!({ "delivered": true }))
+    }
+
+    /// 立即发送（运行中）：跟终端里一样——先把前台在跑的命令、子代理转到后台（`background_tasks`，Ctrl+B），
+    /// 再发 `priority: "now"` 的一条：claude 停下这一轮先回答它，转到后台的命令跑完后它会再读结果。
+    /// `text` 为空：只把命令转到后台，这一轮马上接着走，排着的那些也就马上并进来。
+    pub(super) async fn sdk_send_now(self: &Arc<Self>, id: &str, text: &str, images: &[String]) -> Result<Value, LocalError> {
+        let inst = self.inst(id);
+        if !matches!(lock(&inst.st).phase, Phase::Running) || text.starts_with('/') {
+            return self.sdk_input(id, text, images).await;
+        }
+        let proc = self.sdk_attach(id).await?;
+        // 老版本不认这个请求时照样发（只是要等命令跑完）
+        if let Err(e) = proc.request("background_tasks", json!({})).await {
+            tracing::debug!(id, error = ?e, "立即发送：background_tasks 不可用");
+        }
+        if text.is_empty() && images.is_empty() {
+            return Ok(json!({ "delivered": true }));
+        }
+        lock(&inst.st).sdk.term_after = false;
+        let content = claude_sdk::user_content(text, images)?;
+        let ultrathink = lock(&inst.st).sdk.ultrathink && text.to_lowercase().contains("ultrathink");
+        proc.send_user_with(content, ultrathink, true).await?;
         Ok(json!({ "delivered": true }))
     }
 
@@ -1200,11 +1279,17 @@ impl Chat {
             return Ok(json!({ "state": "busy" }));
         }
         let line = self.instances.claude_tui_resume_line(id, &b.session_id)?;
+        // 和起进程（sdk_attach）错开：正在起的进程还没记进 st.sdk.proc，这时结束不掉它，
+        // 结果两个 Claude Code 同时写这段对话、“在终端里继续”一直挂着
+        let _g = self.sdk.start.lock().await;
         let now = crate::util::system_ms();
         {
             let mut st = lock(&inst.st);
-            // 等着的时候有人发了消息
-            if matches!(st.phase, Phase::Running | Phase::Approval) {
+            if st.sdk.term.is_some() {
+                return Ok(json!({ "state": "terminal" }));
+            }
+            // 等着的时候有人发了消息；或者对话页正在发（起进程、送消息，还没进“在干活”）
+            if matches!(st.phase, Phase::Running | Phase::Approval) || st.sdk.sending > 0 {
                 st.sdk.term_after = true;
                 return Ok(json!({ "state": "after_turn" }));
             }
@@ -1220,6 +1305,7 @@ impl Chat {
             Self::emit_status(&inst, &st);
         }
         let _ = self.store.set(&term_key(id), &now);
+        drop(_g);
         // 进程刚结束，等它放开记录文件；接着的是对话页显示的那一支（编辑重发分出来的，见 pin_leaf）
         tokio::time::sleep(Duration::from_millis(300)).await;
         if let Err(e) = pin_leaf(&b.transcript_path, &b.session_id) {
@@ -1259,6 +1345,8 @@ impl Chat {
     fn sdk_term_clear(&self, inst: &Inst) {
         let mut st = lock(&inst.st);
         st.sdk.term = None;
+        // 终端里的 TUI 退出了：它挂在对话页的确认框、提问没人能答了
+        Self::drop_pending(&mut st);
         let _ = self.store.remove(&term_key(&inst.id));
         // 终端里退出时可能停在“在干活”（中断的那一轮没有 Stop）
         if matches!(st.phase, Phase::Running | Phase::Approval) {
@@ -1295,7 +1383,18 @@ impl Chat {
         if lock(&inst.st).sdk.term.is_none() {
             return;
         }
-        let Some(pane) = self.instances.pane(&inst.id).await else { return };
+        // 看看起的进程还在：对话页在用（交接撞上了起进程），不算在终端里，也不能跟着终端换对话（/new 会被换回去）
+        if lock(&inst.st).sdk.proc.as_ref().is_some_and(|p| p.alive()) {
+            tracing::warn!(id = %inst.id, "交给终端了但对话模式的进程还在，按对话页在用算");
+            self.sdk_term_clear(inst);
+            return;
+        }
+        // 终端的 tmux 会话没了（tmux 服务重启、会话被关）：终端里的 Claude 也没了
+        let Some(pane) = self.instances.pane(&inst.id).await else {
+            tracing::info!(id = %inst.id, "交给终端了但终端会话不在了，对话回到对话界面");
+            self.sdk_term_clear(inst);
+            return;
+        };
         self.sdk_term_follow(inst).await;
         // 刚交过去时 shell 还没起 claude：给 15 秒
         let since = lock(&inst.st).sdk.term.unwrap_or(0);
@@ -1323,6 +1422,40 @@ impl Chat {
     }
 
     /// 后台：结束空闲很久、没人看、没有后台任务、没有定时任务、不在等额度重置的进程
+    /// Claude Code 装了新版本（看看自动更新的、用户自己更新的、Claude Code 自己后台更新的）：对话模式的进程还是旧版本。
+    /// 标上，空闲时结束（[`Chat::sdk_upgrade`]），下次发消息 `--resume` 用新版本接着，对话不断。终端里的 TUI 换不了，界面上提示重开
+    pub fn claude_installed(&self, version: &str) {
+        for inst in lock(&self.insts).values() {
+            if !inst.sdk.load(std::sync::atomic::Ordering::Relaxed) {
+                continue;
+            }
+            let mut st = lock(&inst.st);
+            if st.sdk.proc.is_some() && st.version.as_deref().is_some_and(|v| crate::agent_update::newer(version, v)) && st.sdk.upgrade.as_deref() != Some(version) && st.sdk.upgraded.as_deref() != Some(version) {
+                tracing::info!(id = %inst.id, from = ?st.version, to = version, "Claude Code 有新版本了，这个对话空闲时换上");
+                st.sdk.upgrade = Some(version.to_string());
+            }
+        }
+    }
+
+    /// 标了要换新版本、现在空闲（不在跑、后台没有命令和子代理、没有定时任务、没在等额度）：结束旧进程。
+    /// 跟空闲回收一样，下次发消息时接着这段对话起新的
+    pub(super) fn sdk_upgrade(&self, inst: &Inst) {
+        let mut st = lock(&inst.st);
+        if st.sdk.upgrade.is_none() || st.sdk.term.is_some() {
+            return;
+        }
+        let idle = st.phase == Phase::Idle && st.background.is_empty() && st.agents.is_empty() && !st.sdk.crons && st.sdk.limit_resume.is_none() && st.sdk.sending == 0 && st.pending.is_none();
+        if !idle {
+            return;
+        }
+        let to = st.sdk.upgrade.take();
+        st.sdk.upgraded = to.clone();
+        if let Some(p) = st.sdk.proc.take() {
+            tracing::info!(id = %inst.id, from = ?st.version, to = ?to, "对话空闲，结束旧版本的 Claude Code，下次发消息时用新版本接着");
+            p.kill();
+        }
+    }
+
     pub(super) fn sdk_reap(&self, inst: &Inst) {
         let mut st = lock(&inst.st);
         let idle = st.phase == Phase::Idle && st.background.is_empty() && st.agents.is_empty() && !st.sdk.crons && st.sdk.limit_resume.is_none() && st.sdk.idle_since.is_some_and(|t| t.elapsed() >= IDLE_REAP);

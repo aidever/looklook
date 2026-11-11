@@ -2,7 +2,8 @@
 // 项目 = 某台电脑上的一个文件夹（或某个 Docker 容器里的目录）：那台电脑上记着的（GET/PUT /api/projects，上次用的类型和“高级”选项）
 // 加上从会话的文件夹推出来的。离线的电脑拿不到列表，用上一次看到的（记在浏览器里）灰着显示。
 // 每个项目还带着这个文件夹里以前的对话（GET /history/folders：各工具多少个、最近 5 个），侧栏里和会话合在一起列。
-// 顺序：有会话在运行的在前，再按启动时间从新到旧——不按最后输出的时间，否则 agent 一输出列表就跳。
+// 顺序：按你最近一次在会话里输入（发消息、在终端里打字）的时间——不按 AI 输出的时间，否则它在后台一输出列表就跳。
+// 在运行、等你处理靠状态点和“等你处理”分区显出来，不抢位置。
 // 打开的会话在顶部排成标签（tabs，按打开的先后，可以拖动），最近看过的几个在后台保持连接（recent）。
 import { createContext, useContext, useEffect, useRef, useState } from 'react';
 
@@ -78,16 +79,18 @@ export const startedAt = (i) => ts(i.started_at) || ts(i.created_at);
 /** 会话在运行（终端或后台任务还在）。 */
 export const isActive = (i) => Boolean(i.running || i.task_alive);
 /**
- * 会话最近更新的时间（毫秒），列表排序用（和 Codex、Claude 桌面版一样按“最近更新”）：
- * 对话界面的会话按这段对话最近一轮的开始 / 结束（发消息、做完时往上挪，干活中途不跳）；
- * 终端按终端最后有输出的时间。
+ * 你最近一次在这个会话里输入的时间（毫秒），列表排序、行上的时间都用它：发消息、编辑重发、回答确认、停下，
+ * 终端里打字、粘贴（电脑端记的 `input_at`，见 instances.rs 的 note_input）。AI 在后台输出、做完一轮都不算，
+ * 列表不会因为它跳。没记过时（旧版客户端、升级前的会话）：对话界面用最近一轮开始的时间（那是你发消息的时候），
+ * 终端用 tmux 记的最近操作（按键、点进去），都不早于启动时间。
  */
-export const updatedAt = (i) => {
-  const t = i.chat?.turn;
-  return i.chat ? Math.max(t?.started_at ?? 0, t?.ended_at ?? 0, startedAt(i)) : lastUsed(i);
+export const inputAt = (i) => {
+  const own = ts(i.input_at);
+  const old = i.chat ? i.chat.turn?.started_at ?? 0 : ts(i.last_activity_at);
+  return Math.max(own || old, startedAt(i));
 };
-/** 会话列表的顺序：最近更新的在前（不再把运行中的单独提到前面）。 */
-export const bySessionOrder = (a, b) => updatedAt(b) - updatedAt(a);
+/** 会话列表的顺序：你最近用过的在前（不按在不在运行、不按 AI 最近输出）。 */
+export const bySessionOrder = (a, b) => inputAt(b) - inputAt(a);
 /** 会话显示的名字：agent 自己的会话名为主，没有时用会话名。 */
 export const sessionTitle = (i) => i?.agent_title || i?.name || '';
 /** 图标用的类型：现在在跑的 AI 工具（普通终端里手动起的 claude、codex 也算，电脑端 session_probe.rs 认的），否则会话的类型 */
@@ -106,8 +109,23 @@ export function sessionMode(i) {
 export const customName = (i) => (i?.agent_title && i.name_custom && i.name !== i.agent_title ? i.name : null);
 /** 会话的目录：容器里的会话是容器里的目录。 */
 export const sessionDir = (i) => i?.container?.dir ?? i?.workdir ?? '';
-/** 项目用的“文件夹”键：容器里的目录带上容器名，和电脑上同名的文件夹分开。 */
-const instDir = (i) => (i.container ? `docker://${i.container.name}${i.container.dir}` : i.workdir);
+/**
+ * 连 SSH 主机的会话（SSH 主机页“连接”开的，终端里跑 `looklook ssh <主机>`）：{ id, name }；别的是 null。
+ * 跟客户端 gateway/api.rs 的 ssh_host_of 一样认法。
+ */
+export function sshHostOf(i) {
+  if (i?.launch !== 'custom') return null;
+  const m = /\sssh\s+([A-Za-z0-9_-]{1,128})\s*$/.exec(String(i.command ?? ''));
+  if (!m) return null;
+  const name = String(i.name ?? '').replace(/^SSH\s*·\s*/, '') || m[1];
+  return { id: m[1], name };
+}
+/** 项目用的“文件夹”键：容器里的目录带上容器名，和电脑上同名的文件夹分开；SSH 会话按连的主机分（不算在本机的主目录里） */
+const instDir = (i) => {
+  const h = sshHostOf(i);
+  if (h) return `ssh://${h.id}`;
+  return i.container ? `docker://${i.container.name}${i.container.dir}` : i.workdir;
+};
 
 /** 能接着以前的对话的工具（客户端 history.rs 的 AGENTS）。 */
 export const AGENTS = ['claude', 'codex', 'opencode'];
@@ -126,7 +144,7 @@ export function projectEntries(p, convs = p.convs) {
   const stopped = p.persistent === true ? p.items.filter((i) => !isActive(i) && AGENTS.includes(i.launch)) : [];
   const terms = p.items.filter((i) => !isActive(i) && !stopped.includes(i));
   const open = convs.filter((c) => !(c.instance_id && liveIds.has(c.instance_id)));
-  const inst = (i) => ({ kind: 'inst', key: i.id, inst: i, at: updatedAt(i) });
+  const inst = (i) => ({ kind: 'inst', key: i.id, inst: i, at: inputAt(i) });
   const rest = [...terms.map(inst), ...open.map((c) => ({ kind: 'conv', key: `${c.agent}:${c.id}`, conv: c, at: ts(c.updated_at) }))].sort((a, b) => b.at - a.at);
   return { live: live.map(inst), rest, stopped, count: live.length + terms.length + Math.max(p.total, convs.length) - (convs.length - open.length) };
 }
@@ -378,7 +396,7 @@ export function groupProjects(projects, multi) {
  * `full_access` 是在这个项目里新建时选过的，没选过为 null（见 Sessions.jsx 的 fullAccessFor）。
  * `convs` 是这个文件夹里最近的几个以前的对话，`total` / `counts` 是一共多少个（各工具多少个），`convAt` 是最近一个的时间；
  * `persistent` 为 false 时那台电脑不能接着以前的对话（没有会话保持），null 是不知道（旧版客户端）。
- * 置顶的在前，再按最近更新排；项目里的会话按最近更新（updatedAt）。
+ * 置顶的在前，再按最近用过排；项目里的会话按你最近一次输入（inputAt）。
  */
 function mergeProjects({ devIds, store, items, multi, cache, onlineIds, folders, remotes }) {
   const map = new Map();
@@ -398,15 +416,16 @@ function mergeProjects({ devIds, store, items, multi, cache, onlineIds, folders,
   }
   for (const i of items) {
     const dev = multi ? terminalDevice(i.id) : null;
-    const p = add(dev, instDir(i), i.container ? { launch: i.launch, container: i.container, name: baseName(i.container.dir) || i.container.dir } : { launch: i.launch });
+    const h = sshHostOf(i);
+    const p = add(dev, instDir(i), h ? { launch: i.launch, ssh: h, name: h.name } : i.container ? { launch: i.launch, container: i.container, name: baseName(i.container.dir) || i.container.dir } : { launch: i.launch });
     p.items.push(i);
   }
   const list = [...map.values()];
   for (const p of list) {
     p.items.sort(bySessionOrder);
     p.active = p.items.some(isActive);
-    p.used = Math.max(p.used, ...p.items.map(updatedAt), 0);
-    const fs = !p.offline && !p.container ? folders[p.device ?? ''] : null;
+    p.used = Math.max(p.used, ...p.items.map(inputAt), 0);
+    const fs = !p.offline && !p.container && !p.ssh ? folders[p.device ?? ''] : null;
     const f = fs?.items.find((x) => dirKey(x.workdir) === dirKey(p.workdir));
     if (fs) p.persistent = fs.persistent;
     // 没有会话保持的电脑接不了以前的对话，就不列
@@ -414,10 +433,12 @@ function mergeProjects({ devIds, store, items, multi, cache, onlineIds, folders,
       p.convs = f.items;
       p.total = f.total;
       p.counts = f.counts ?? {};
-      p.convAt = ts(f.updated_at);
+      // 正开在会话里的对话不算（它的记录文件跟着 AI 输出变，算进来项目就跟着跳）；那个会话按你的输入算在 used 里
+      const liveIds = new Set(p.items.filter(isActive).map((i) => i.id));
+      p.convAt = Math.max(0, ...f.items.filter((c) => !(c.instance_id && liveIds.has(c.instance_id))).map((c) => ts(c.updated_at)));
     }
     if (!p.launch) p.launch = p.items[0]?.launch ?? f?.items[0]?.agent ?? 'claude';
-    if (!p.offline && !p.container) p.remote = remotes[p.device ?? '']?.[p.workdir] ?? null;
+    if (!p.offline && !p.container && !p.ssh) p.remote = remotes[p.device ?? '']?.[p.workdir] ?? null;
   }
   // 和主流 agent 客户端一样：置顶的在前，其余按最近更新（会话或以前的对话里最新的那个），不按在不在运行
   return list.sort((a, b) => b.pinned - a.pinned || Math.max(b.used, b.convAt) - Math.max(a.used, a.convAt) || a.name.localeCompare(b.name));
@@ -470,7 +491,7 @@ export function SessionsProvider({ enabled, children }) {
       dirsByDev[dev].push(dir);
     };
     for (const dev of onlineDevIds) for (const p of store[dev] ?? []) want(dev, p.workdir);
-    for (const i of items) if (!i.container) want(terminalDevice(i.id), i.workdir);
+    for (const i of items) if (!i.container && !sshHostOf(i)) want(terminalDevice(i.id), i.workdir);
   }
   const remotes = useRemotes(dirsByDev, multi && enabled);
   const projects = mergeProjects({ devIds, store, items, multi, cache, onlineIds: new Set(onlineDevIds), folders, remotes });

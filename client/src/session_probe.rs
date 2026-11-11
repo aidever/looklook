@@ -170,6 +170,18 @@ pub fn detectors() -> Vec<Box<dyn Detector>> {
     vec![Box::new(Claude), Box::new(Codex), Box::new(Dsh), Box::new(OpenCode)]
 }
 
+/// 整台电脑上在跑的这个工具的进程数（不管是不是看看开的；Claude 桌面版自己的进程不算）。
+/// 更新 AI 工具前用（agent_update.rs）：Windows 上程序在运行时文件被占用，换不掉
+pub fn running_count(snap: &Snapshot, tool: &str) -> usize {
+    let Some(d) = detectors().into_iter().find(|d| d.tool() == tool) else { return 0 };
+    let desktop = |p: &ProcInfo| p.names.iter().any(|n| n.contains("claude.app/contents/macos/") || n.contains("/anthropicclaude/"));
+    let all: Vec<&ProcInfo> = snap.procs.values().filter(|p| !desktop(p)).collect();
+    let hits = d.find(&all);
+    // 包装脚本和它起的真正程序算一个：父进程也是它的不再数
+    let pids: std::collections::HashSet<u32> = hits.iter().map(|p| p.pid).collect();
+    hits.iter().filter(|p| p.ppid.is_none_or(|pp| !pids.contains(&pp))).count()
+}
+
 /// 看一个会话：树里第一个（离面板最近的）认得出的工具
 pub fn probe(dets: &[Box<dyn Detector>], ctx: &Ctx) -> Option<Found> {
     let mut best: Option<(usize, &Box<dyn Detector>, Vec<&ProcInfo>)> = None;

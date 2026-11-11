@@ -27,7 +27,7 @@ export const GROUPS = [
     [IS_MAC ? 'mod+[ / mod+]' : 'alt+← / alt+→', 'back_forward', { app: true }],
     ['mod+R', 'refresh', { app: true }],
   ]],
-  ['chat', [['Enter', 'send'], ['shift+Enter', 'newline'], ['mod+F', 'find'], ['alt+↑ / alt+↓', 'jump'], ['↑ / ↓', 'history'], ['Ctrl+R', 'history_search'], ['Tab', 'suggest'], ['shift+Tab', 'mode'], ['Esc', 'stop']]],
+  ['chat', [['Enter', 'send'], ['shift+Enter', 'newline'], ['mod+Enter', 'send_now'], ['mod+F', 'find'], ['alt+↑ / alt+↓', 'jump'], ['↑ / ↓', 'history'], ['Ctrl+R', 'history_search'], ['Tab', 'suggest'], ['shift+Tab', 'mode'], ['Esc', 'stop']]],
   ['files', [
     ['↑ / ↓', 'fb_move'],
     ['Enter', 'fb_open'],

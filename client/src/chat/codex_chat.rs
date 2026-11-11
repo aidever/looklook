@@ -1371,10 +1371,18 @@ impl Chat {
     }
 
     pub(super) async fn codex_models(&self, id: &str) -> Result<Value, LocalError> {
+        let profile = crate::codex_profiles::for_instance(&self.store, id);
+        let (options, provider) = self.codex_profile_models(&profile).await?;
+        let inst = self.inst(id);
+        let st = lock(&inst.st);
+        Ok(json!({ "options": options, "provider": provider, "model": st.model, "actual_model": st.actual_model, "effort": st.effort }))
+    }
+
+    /// 这个配置能选的模型和界面显示的服务商（本机默认时 null）
+    pub(super) async fn codex_profile_models(&self, profile: &crate::codex_profiles::Profile) -> Result<(Value, Value), LocalError> {
         use crate::codex_profiles as xp;
         // 第三方接口：列服务商自己的模型（`model/list` 是 OpenAI 的目录，第三方一般不认这些名字）。
         // 服务商列不出来时只列指定的模型；都没有时照常用目录（由接口自己对应 OpenAI 的模型名）
-        let profile = xp::for_instance(&self.store, id);
         let third = profile.base_url.clone().filter(|_| xp::key_set(&self.paths.home, &profile.id));
         let mut ours = vec![];
         if let Some(base) = &third {
@@ -1382,22 +1390,9 @@ impl Chat {
             let ids = super::models::provider_models(&format!("{}/models", base.trim_end_matches('/')), key.trim()).await;
             ours = provider_model_options(profile.model.as_deref(), &ids);
         }
-        let cached = lock(&self.codex.models).as_ref().filter(|(t, _)| t.elapsed() < MODELS_TTL).map(|(_, v)| v.clone());
-        let options = match cached {
-            _ if !ours.is_empty() => json!(ours),
-            Some(v) => v,
-            None => {
-                let server = self.codex_server().await?;
-                let r = server.call("model/list", json!({})).await?;
-                let v = json!(model_options(&r));
-                *lock(&self.codex.models) = Some((Instant::now(), v.clone()));
-                v
-            }
-        };
-        let inst = self.inst(id);
-        let st = lock(&inst.st);
-        let provider = third.map(|_| json!({ "name": profile.name }));
-        Ok(json!({ "options": options, "provider": provider, "model": st.model, "actual_model": st.actual_model, "effort": st.effort }))
+        let options = if ours.is_empty() { self.codex_catalog().await? } else { json!(ours) };
+        let provider = third.map(|_| json!({ "name": profile.name })).unwrap_or(Value::Null);
+        Ok((options, provider))
     }
 
     /// 不属于哪个会话的 Codex 模型目录（宠物生成台词选模型用）：共用的 app-server 的 `model/list`
@@ -1441,7 +1436,7 @@ impl Chat {
             "cache_read": t["cachedInputTokens"].as_u64().unwrap_or(0),
             "output": t["outputTokens"].as_u64().unwrap_or(0),
         });
-        Ok(json!({ "model": st.actual_model.clone().or(st.model.clone()), "context": st.context, "window": st.codex.window, "totals": totals, "limits": limits, "version": st.version }))
+        Ok(json!({ "model": st.actual_model.clone().or(st.model.clone()), "context": st.context, "window": st.codex.window, "totals": totals, "limits": limits, "version": st.version, "installed": crate::agent_update::installed_version("codex") }))
     }
 
     /// 这段对话里 Codex 生成的图片（`$CODEX_HOME/generated_images/<会话>/`），最新的在前。
@@ -1553,6 +1548,7 @@ impl Chat {
                 }
             }
             if let Some(p) = prompt {
+                self.record_input(id, &p);
                 self.codex_input(id, &p, &[]).await?;
             }
             Ok(())
@@ -2000,18 +1996,21 @@ impl Chat {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 match crate::tools::job("codex").map(|j| j.state) {
                     Some("running") => continue,
-                    Some("ok") => {
-                        tracing::info!("Codex 更新好了，app-server 空闲时换成新版本");
-                        me.codex.stale.store(true, Ordering::SeqCst);
-                        *lock(&me.codex.update) = None;
-                        *lock(&me.codex.models) = None;
-                    }
+                    Some("ok") => me.codex_installed(),
                     _ => {}
                 }
                 break;
             }
         });
         Ok(json!(job))
+    }
+
+    /// 装了新的 Codex（对话页的“更新”、AI 工具更新 agent_update.rs）：app-server 空闲时换成新版本，版本提示和模型列表重新取
+    pub fn codex_installed(&self) {
+        tracing::info!("Codex 更新好了，app-server 空闲时换成新版本");
+        self.codex.stale.store(true, Ordering::SeqCst);
+        *lock(&self.codex.update) = None;
+        *lock(&self.codex.models) = None;
     }
 
     // ---------------- 待确认的 hook ----------------

@@ -28,6 +28,7 @@ pub mod dsh_chat;
 pub mod dsh_log;
 pub mod hooks;
 pub mod mentions;
+pub mod model_memory;
 pub mod models;
 pub mod prompts;
 pub mod risk;
@@ -645,8 +646,10 @@ impl Chat {
             // 交给终端了（stream-json 的 Claude Code，见 claude_chat 的 sdk_to_terminal）：这些事件来自终端里的 TUI，
             // 对话页照着显示在干活 / 空闲。结束会话的（看看起的进程被结束、TUI 退出）不算：TUI 退出由后台看终端发现
             let term = st.sdk.term.is_some();
+            // stream-json 的会话只有交给终端时才有 hook；收回时 TUI 退出带来的 SessionEnd 可能晚到，不能把对话页弄成断开
+            let sdk = inst.sdk.load(Ordering::Relaxed);
             match name.as_str() {
-                "SessionEnd" if term => {}
+                "SessionEnd" if term || sdk => {}
                 "SessionStart" => {
                     // 自动压缩发生在一轮当中，不能改成空闲
                     if ev["source"] != "compact" {
@@ -716,7 +719,8 @@ impl Chat {
                 }
                 "Notification" => match ev["notification_type"].as_str() {
                     // 确认框出来了但不是我们挂起的审批（例如审批已经超时）：要到终端里回答
-                    Some("permission_prompt" | "elicitation_dialog") if st.pending.is_none() => Self::set_phase(&inst, &mut st, Phase::Tui, None),
+                    // （交给终端的 stream-json 会话不抓屏，显示不了终端里的选择框：不改，界面上写着在终端里继续）
+                    Some("permission_prompt" | "elicitation_dialog") if st.pending.is_none() && !term => Self::set_phase(&inst, &mut st, Phase::Tui, None),
                     Some("idle_prompt") if st.pending.is_none() && st.phase == Phase::Running => Self::set_phase(&inst, &mut st, Phase::Idle, None),
                     _ => {}
                 },
@@ -766,8 +770,9 @@ impl Chat {
             let _ = inst.tx.send(Event::Reset);
         }
         if name == "PermissionRequest" {
-            // 交给终端了：终端里的人自己在 TUI 里答
-            if lock(&inst.st).sdk.term.is_some() {
+            // 交给终端了：确认框、提问照样挂到对话页（和 TUI 模式一样两边都能答，答复走 hook，见 claude_chat 的 sdk_answer）。
+            // 计划确认 hook 批不了，只能在终端里按键：不挂
+            if lock(&inst.st).sdk.term.is_some() && tool.as_deref() == Some("ExitPlanMode") {
                 return String::new();
             }
             return self.permission_request(&inst, tool.unwrap_or_default(), &ev).await;
@@ -838,9 +843,10 @@ impl Chat {
         let out = tokio::time::timeout(PERMISSION_WAIT, rx).await.ok().and_then(|r| r.ok()).unwrap_or_default();
         let mut st = lock(&inst.st);
         if st.pending.as_ref().is_some_and(|p| p.id == id) {
-            // 超时：TUI 的确认框还在等，要到终端里回答
+            // 超时：TUI 的确认框还在等，要到终端里回答（交给终端的 stream-json 会话不抓屏，界面上已经写着在终端里继续）
             st.pending = None;
-            Self::set_phase(inst, &mut st, Phase::Tui, None);
+            let phase = if st.sdk.term.is_some() { Phase::Running } else { Phase::Tui };
+            Self::set_phase(inst, &mut st, phase, None);
         }
         out
     }
@@ -1361,6 +1367,13 @@ impl Chat {
         Ok(())
     }
 
+    /// 发出去的话记进输入历史（上下键翻、历史里搜）
+    pub fn record_input(&self, id: &str, text: &str) {
+        let Ok(Some(row)) = self.store.instance(id) else { return };
+        let session = lock(&self.inst(id).st).binding.as_ref().map(|b| b.session_id.clone());
+        prompts::record(&self.paths.home, &row.workdir, self.inst(id).agent.launch(), session.as_deref(), text);
+    }
+
     /// 第一条用户消息：没有标题时看板上用它（斜杠命令不算）
     fn note_prompt(st: &mut State, text: &str) {
         let text = text.trim();
@@ -1386,6 +1399,7 @@ impl Chat {
                 // Codex、DSH 的状态来自它们的后台服务，不看屏幕
                 let sdk = inst.sdk.load(Ordering::Relaxed);
                 if sdk {
+                    self.sdk_upgrade(&inst);
                     self.sdk_reap(&inst);
                     self.sdk_limit_tick(&inst);
                     if tick.is_multiple_of(3) {
@@ -1507,14 +1521,16 @@ impl Chat {
         Ok(json!({ "items": items }))
     }
 
-    /// 输入历史（上下键、Ctrl+R）：Claude Code 自己的 `history.jsonl` 里这个项目的，各个账号的配置目录合起来。
-    /// 别的工具没有按项目的输入历史，返回空的，界面用本机存着的。
+    /// 输入历史（上下键、Ctrl+R）：看看自己记的（在看看里发过的，所有工具），Claude Code 再加上它自己的
+    /// `history.jsonl` 里这个项目的（终端里打的），各个账号的配置目录合起来。
     pub fn prompts(&self, id: &str) -> Result<Value, LocalError> {
         self.require(id)?;
-        if self.inst(id).agent.launch() != "claude" {
-            return Ok(json!({ "items": [] }));
-        }
+        let agent = self.inst(id).agent.launch();
         let row = self.store.instance(id)?.ok_or_else(LocalError::not_found)?;
+        let own = tokio::task::block_in_place(|| prompts::own_prompts(&self.paths.home, Path::new(&row.workdir), agent, 500));
+        if agent != "claude" {
+            return Ok(json!({ "items": own }));
+        }
         let mut dirs: Vec<PathBuf> = vec![];
         for p in crate::claude_profiles::list(&self.store) {
             let dir = crate::claude_profiles::config_paths(&self.paths.home, &p).0;
@@ -1523,7 +1539,7 @@ impl Chat {
             }
         }
         let items = tokio::task::block_in_place(|| prompts::claude_prompts(&dirs, Path::new(&row.workdir), 500));
-        Ok(json!({ "items": items }))
+        Ok(json!({ "items": prompts::merge(items, own, 500) }))
     }
 
     /// 子代理（Task / Agent 工具）自己的步骤。`agent`：工具结果里的 agentId；还没有结果时用 `tool`（工具调用 id）
@@ -1673,11 +1689,12 @@ impl Chat {
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
         let text = text.trim_end();
         Self::note_prompt(&mut lock(&inst.st), text);
+        self.record_input(id, text);
         let now = now && inst.agent.launch() == "claude" && lock(&inst.st).phase == Phase::Running;
         if text.is_empty() && images.is_empty() && !now {
             return Err(LocalError::invalid("text", "required"));
         }
-        if now && lock(&inst.st).version.as_deref().is_some_and(|v| !version_at_least(v, SEND_NOW_SINCE)) {
+        if now && !inst.sdk.load(Ordering::Relaxed) && lock(&inst.st).version.as_deref().is_some_and(|v| !version_at_least(v, SEND_NOW_SINCE)) {
             return Err(LocalError::new("CHAT_SEND_NOW_UNAVAILABLE"));
         }
         for p in images {
@@ -1695,9 +1712,8 @@ impl Chat {
             return self.dsh_input(id, text, images).await;
         }
         if inst.sdk.load(Ordering::Relaxed) {
-            // “立即发送”排着的消息：stream-json 里运行中发的本来就在这一步做完后并进这一轮，没有别的可发
-            if text.is_empty() && images.is_empty() {
-                return Ok(json!({ "delivered": true }));
+            if now {
+                return self.sdk_send_now(id, text, images).await;
             }
             return self.sdk_input(id, text, images).await;
         }
@@ -2186,6 +2202,37 @@ impl Chat {
     /// - `effort`：`/effort <级别>`；
     /// - `mode`：权限模式只能用 Shift+Tab 轮换，按到状态栏显示目标模式为止。
     pub async fn setting(&self, id: &str, kind: &str, value: &str) -> Result<(), LocalError> {
+        self.setting_now(id, kind, value).await?;
+        if kind == "model" || kind == "effort" {
+            self.remember_model(id, kind, value);
+        }
+        Ok(())
+    }
+
+    /// 用户在对话里选了模型 / 强度（菜单或手打的命令）：按工具 + 账号记下，下次新建对话时当默认（model_memory.rs）
+    pub(crate) fn remember_model(&self, id: &str, kind: &str, value: &str) {
+        let Some((agent, profile, base)) = self.memory_scope_of(id) else { return };
+        model_memory::record(&self.store, agent, &profile, kind, value, base);
+    }
+
+    /// 会话用的工具、账号 / 配置的 ID、配置里现在的默认值
+    fn memory_scope_of(&self, id: &str) -> Option<(&'static str, String, String)> {
+        match self.inst(id).agent.launch() {
+            "claude" => {
+                let p = crate::claude_profiles::for_instance(&self.store, id);
+                let base = model_memory::claude_base(&crate::claude_profiles::config_paths(&self.paths.home, &p).0);
+                Some(("claude", p.id, base))
+            }
+            "codex" => {
+                let p = crate::codex_profiles::for_instance(&self.store, id);
+                let base = model_memory::codex_base(&crate::agents::codex_home(), &p);
+                Some(("codex", p.id, base))
+            }
+            _ => None,
+        }
+    }
+
+    async fn setting_now(&self, id: &str, kind: &str, value: &str) -> Result<(), LocalError> {
         self.require(id)?;
         let inst = self.inst(id);
         if inst.agent.launch() == "codex" {
@@ -2289,12 +2336,17 @@ impl Chat {
         crate::claude_profiles::config_paths(&self.paths.home, &crate::claude_profiles::for_instance(&self.store, id))
     }
 
-    /// 读模型菜单要用的上下文：claude 进程的环境变量（读得到时）和 settings 里的 `env`
-    async fn model_ctx<'a>(&self, id: &str, workdir: &'a Path) -> models::Ctx<'a> {
-        let env = match self.instances.pane(id).await {
+    /// 终端里那个 claude 进程的环境变量（读得到时；对话模式、非 Linux 读不到）
+    async fn claude_env(&self, id: &str) -> HashMap<String, String> {
+        match self.instances.pane(id).await {
             Some(p) if !is_shell(&p.command) => tokio::task::block_in_place(|| models::claude_env(p.pid)),
             _ => HashMap::new(),
-        };
+        }
+    }
+
+    /// 读模型菜单要用的上下文：claude 进程的环境变量（读得到时）和 settings 里的 `env`
+    async fn model_ctx<'a>(&self, id: &str, workdir: &'a Path) -> models::Ctx<'a> {
+        let env = self.claude_env(id).await;
         let (config_dir, state_file) = self.claude_paths(id);
         let mut ctx = models::Ctx { config_dir, state_file, workdir, env };
         models::merge_settings_env(&mut ctx);
@@ -2329,6 +2381,78 @@ impl Chat {
         }
     }
 
+    /// 草稿页（新会话还没建）的模型菜单：`profile` 这个账号 / 配置（空 = 默认的那个）能用的模型，
+    /// 加上上次在看看里选的（`last`，这个账号现在用不了的不给，见 model_memory.rs）。
+    pub async fn draft_models(&self, agent: &str, profile: &str) -> Result<Value, LocalError> {
+        let found = crate::tools::detect(self.instances.shell()).await;
+        match agent {
+            "claude" => {
+                if found.claude.is_none() && crate::agents::claude_fallback().is_none() {
+                    return Ok(json!({ "installed": false, "options": [] }));
+                }
+                use crate::claude_profiles as cp;
+                let p = cp::get(&self.store, profile).unwrap_or_else(|| cp::for_instance(&self.store, ""));
+                let (config_dir, state_file) = cp::config_paths(&self.paths.home, &p);
+                let home = dirs::home_dir().unwrap_or_default();
+                let mut ctx = models::Ctx { config_dir: config_dir.clone(), state_file, workdir: &home, env: HashMap::new() };
+                models::merge_settings_env(&mut ctx);
+                let mut options = tokio::task::block_in_place(|| models::options(&ctx));
+                let provider = self.claude_provider_models(&ctx, &p, &mut options).await;
+                let opts: Vec<Value> = options.iter().map(|o| json!(o)).collect();
+                let last = model_memory::get(&self.store, "claude", &p.id, &model_memory::claude_base(&config_dir)).and_then(|l| model_memory::usable(&l, &opts, screen::EFFORTS));
+                Ok(json!({ "installed": true, "options": options, "provider": provider, "effort_setting": models::settings_effort(&ctx), "profile": p.id, "last": last }))
+            }
+            "codex" => {
+                if found.codex.is_none() {
+                    return Ok(json!({ "installed": false, "options": [] }));
+                }
+                use crate::codex_profiles as xp;
+                let p = xp::get(&self.store, profile).unwrap_or_else(|| xp::for_instance(&self.store, ""));
+                let (options, provider) = match self.codex_profile_models(&p).await {
+                    Ok(v) => v,
+                    Err(e) => return Ok(json!({ "installed": true, "options": [], "profile": p.id, "error": { "code": e.code, "params": e.params } })),
+                };
+                let opts = options.as_array().cloned().unwrap_or_default();
+                let last = model_memory::get(&self.store, "codex", &p.id, &model_memory::codex_base(&crate::agents::codex_home(), &p))
+                    .and_then(|l| model_memory::usable(&l, &opts, &codex_chat::EFFORTS));
+                Ok(json!({ "installed": true, "options": options, "provider": provider, "profile": p.id, "last": last }))
+            }
+            _ => Err(LocalError::invalid("agent", "one_of")),
+        }
+    }
+
+    /// 草稿页点过模型菜单：这次的选择记下来（None = 选的默认，忘掉记住的）。会话起来后设模型时还会再记一次（setting）
+    pub fn draft_remember(&self, agent: &str, profile: &str, model: Option<&str>, effort: Option<&str>) -> Result<(), LocalError> {
+        let model = model.filter(|m| !m.is_empty() && *m != "default");
+        if model.is_some_and(|m| m.len() > 64 || !m.chars().all(|c| c.is_ascii_alphanumeric() || "._-[]:/".contains(c))) {
+            return Err(LocalError::invalid("model", "invalid"));
+        }
+        let effort = effort.filter(|e| !e.is_empty());
+        let (profile, base) = match agent {
+            "claude" => {
+                use crate::claude_profiles as cp;
+                if effort.is_some_and(|e| !screen::EFFORTS.contains(&e)) {
+                    return Err(LocalError::invalid("effort", "invalid"));
+                }
+                let p = cp::get(&self.store, profile).unwrap_or_else(|| cp::for_instance(&self.store, ""));
+                let base = model_memory::claude_base(&cp::config_paths(&self.paths.home, &p).0);
+                (p.id, base)
+            }
+            "codex" => {
+                use crate::codex_profiles as xp;
+                if effort.is_some_and(|e| !codex_chat::EFFORTS.contains(&e)) {
+                    return Err(LocalError::invalid("effort", "invalid"));
+                }
+                let p = xp::get(&self.store, profile).unwrap_or_else(|| xp::for_instance(&self.store, ""));
+                let base = model_memory::codex_base(&crate::agents::codex_home(), &p);
+                (p.id, base)
+            }
+            _ => return Err(LocalError::invalid("agent", "one_of")),
+        };
+        model_memory::set(&self.store, agent, &profile, model, effort, base);
+        Ok(())
+    }
+
     /// 模型菜单：Claude Code 的选项（`/model` 里的那些），加上第三方接口自己列出的模型。
     pub async fn models(&self, id: &str) -> Result<Value, LocalError> {
         self.require(id)?;
@@ -2342,13 +2466,22 @@ impl Chat {
         let workdir = PathBuf::from(&row.workdir);
         let ctx = self.model_ctx(id, &workdir).await;
         let mut options = tokio::task::block_in_place(|| models::options(&ctx));
-        // 第三方接口：claude 进程环境里的地址（看看配置的接口也是这样传进去的）；读不到进程环境时用这个会话的配置
         let profile = crate::claude_profiles::for_instance(&self.store, id);
-        let ours = profile.base_url.as_ref().filter(|_| crate::claude_profiles::launch_env(&self.paths.home, &profile).is_some());
+        let provider = self.claude_provider_models(&ctx, &profile, &mut options).await;
+        let effort_setting = models::settings_effort(&ctx);
+        let inst = self.inst(id);
+        let st = lock(&inst.st);
+        Ok(json!({ "options": options, "provider": provider, "model": st.model, "actual_model": st.actual_model, "effort": st.effort, "effort_setting": effort_setting }))
+    }
+
+    /// 第三方接口自己列出的模型加进 `options`（列在“服务商的其他模型”），返回界面显示的服务商（官方接口时 null）
+    async fn claude_provider_models(&self, ctx: &models::Ctx<'_>, profile: &crate::claude_profiles::Profile, options: &mut Vec<models::Opt>) -> Value {
+        // 第三方接口：claude 进程环境里的地址（看看配置的接口也是这样传进去的）；读不到进程环境时用这个会话的配置
+        let ours = profile.base_url.as_ref().filter(|_| crate::claude_profiles::launch_env(&self.paths.home, profile).is_some());
         let base = ctx.env.get("ANTHROPIC_BASE_URL").cloned().or_else(|| ours.cloned());
         let mut provider = Value::Null;
         if let Some(base) = base.filter(|b| !b.contains("api.anthropic.com")) {
-            let ours = ours.filter(|u| u.trim_end_matches('/') == base.trim_end_matches('/')).map(|_| &profile);
+            let ours = ours.filter(|u| u.trim_end_matches('/') == base.trim_end_matches('/')).map(|_| profile);
             // 没用到的那个变量启动时设成了空的（model.rs 的 claude_api_env / claude_api_key_env）
             let var = |k: &str| ctx.env.get(k).filter(|v| !v.is_empty()).cloned();
             let token = var("ANTHROPIC_AUTH_TOKEN").or_else(|| var("ANTHROPIC_API_KEY")).or_else(|| {
@@ -2356,14 +2489,12 @@ impl Chat {
             });
             if let Some(token) = token.filter(|t| !t.is_empty()) {
                 let ids = models::provider_models(&format!("{}/v1/models?limit=1000", base.trim_end_matches('/')), &token).await;
-                options.extend(models::provider_options(&options, &ids));
+                let extra = models::provider_options(options, &ids);
+                options.extend(extra);
             }
             provider = json!({ "name": ours.map(|p| p.name.clone()) });
         }
-        let effort_setting = models::settings_effort(&ctx);
-        let inst = self.inst(id);
-        let st = lock(&inst.st);
-        Ok(json!({ "options": options, "provider": provider, "model": st.model, "actual_model": st.actual_model, "effort": st.effort, "effort_setting": effort_setting }))
+        provider
     }
 
     /// 用量：上下文、这个会话累计的 token、订阅的 5 小时 / 7 天用量
@@ -2404,9 +2535,17 @@ impl Chat {
             (st.actual_model.clone(), st.context, st.version.clone(), reported)
         };
         let profile = crate::claude_profiles::for_instance(&self.store, id);
+        // 实际的启动环境（读得到 claude 进程时）> 看看按“模型设置”给它加的 > settings 里的 env：
+        // 自动压缩点、关 1M、第三方的窗口都可能在这几处设，空着读会照默认算错
+        let mut env = self.claude_env(id).await;
+        for (k, v) in profile.tuning.vars(profile.kind == crate::claude_profiles::Kind::Api) {
+            env.entry(k.to_string()).or_insert(v);
+        }
         let (config_dir, state_file) = crate::claude_profiles::config_paths(&self.paths.home, &profile);
-        let ctx = models::Ctx { config_dir, state_file, workdir: &workdir, env: HashMap::new() };
+        let mut ctx = models::Ctx { config_dir, state_file, workdir: &workdir, env };
+        models::merge_settings_env(&mut ctx);
         let (window, mut limits) = tokio::task::block_in_place(|| (reported.or_else(|| model.as_deref().map(|m| models::context_window(&ctx, m))), models::limits(&ctx)));
+        let compact = model.as_deref().zip(window).map(|(m, w)| tokio::task::block_in_place(|| models::compact(&ctx, m, w)));
         // 订阅用量只读 Claude Code 自己的缓存；缓存没有或旧了，请它自己去取（第三方接口没有订阅用量）。
         // 一点都没有时等它取完再读，否则在后台取，下次来取就是新的
         // 第三方接口：服务商的套餐用量（认得的几家，见 provider_quota.rs），带着服务商的名字
@@ -2432,7 +2571,7 @@ impl Chat {
         }
         // 订阅账号的邮箱（界面默认打码显示）；第三方接口没有
         let account = if profile.kind == crate::claude_profiles::Kind::Official { tokio::task::block_in_place(|| models::account(&ctx)) } else { Value::Null };
-        Ok(json!({ "model": model, "context": context, "window": window, "totals": totals, "limits": limits, "version": version, "account": account }))
+        Ok(json!({ "model": model, "context": context, "window": window, "compact": compact, "totals": totals, "limits": limits, "version": version, "installed": crate::agent_update::installed_version("claude"), "account": account }))
     }
 
     /// 对话生成的文件（目前只有 Codex 生成的图片）

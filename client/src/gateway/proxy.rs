@@ -47,6 +47,8 @@ pub struct Opts {
     pub rewrite_location: Option<(Vec<String>, String)>,
     /// 这是终端连接：连着的时候不自动更新（见 updater::TerminalGuard）
     pub terminal: bool,
+    /// WebSocket：浏览器发来用户输入时调用（终端，见 input_tap.rs）
+    pub on_input: Option<super::input_tap::OnInput>,
 }
 
 pub fn is_websocket(h: &HeaderMap) -> bool {
@@ -113,15 +115,24 @@ pub async fn forward(client: &HttpClient, mut req: Request, port: u16, opts: Opt
     };
 
     if ws && resp.status() == StatusCode::SWITCHING_PROTOCOLS {
+        // 谈好了 permessage-deflate：浏览器发来的消息是压缩的，看输入要先解压（见 input_tap.rs）
+        let ext = resp.headers().get(header::SEC_WEBSOCKET_EXTENSIONS).and_then(|v| v.to_str().ok()).unwrap_or("").to_ascii_lowercase();
+        let deflate = ext.contains("permessage-deflate").then(|| ext.contains("client_no_context_takeover"));
         let server_upgrade = hyper::upgrade::on(&mut resp);
         let client_upgrade = client_upgrade.expect("websocket");
         let guard = opts.terminal.then(crate::updater::TerminalGuard::new);
+        let on_input = opts.on_input.clone();
         tokio::spawn(async move {
             let _guard = guard;
             match tokio::try_join!(client_upgrade, server_upgrade) {
-                Ok((c, s)) => {
-                    let _ = tokio::io::copy_bidirectional(&mut TokioIo::new(c), &mut TokioIo::new(s)).await;
-                }
+                Ok((c, s)) => match on_input {
+                    Some(on) => {
+                        let _ = tokio::io::copy_bidirectional(&mut super::input_tap::Tap::new(TokioIo::new(c), on, deflate), &mut TokioIo::new(s)).await;
+                    }
+                    None => {
+                        let _ = tokio::io::copy_bidirectional(&mut TokioIo::new(c), &mut TokioIo::new(s)).await;
+                    }
+                },
                 Err(e) => tracing::debug!(error = %e, "WebSocket 升级失败"),
             }
         });
@@ -232,6 +243,7 @@ pub async fn tunnel(app: &App, mut req: Request, p: &Remote, proto: &str) -> Res
         inject: None,
         rewrite_location: Some((vec![format!("http://{local}"), format!("http://127.0.0.1:{port}")], public)),
         terminal: false,
+        on_input: None,
     };
     let r = forward(&app.http, req, port, opts).await;
     if r.status() == StatusCode::BAD_GATEWAY || r.status() == StatusCode::GATEWAY_TIMEOUT {

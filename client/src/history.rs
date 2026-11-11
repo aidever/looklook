@@ -4,7 +4,11 @@
 //! - **Claude Code**：`<配置目录>/projects/<文件夹>/<会话号>.jsonl`。文件夹名是工作目录把非字母数字换成 `-`，
 //!   会丢信息，工作目录以记录里的 `cwd` 为准。标题取 `custom-title`（/rename）> `ai-title` > `summary` > 第一句话。
 //! - **Codex**：`$CODEX_HOME/sessions/年/月/日/rollout-*.jsonl`，第一行 `session_meta` 里有会话号和 `cwd`；
-//!   标题在 `session_index.jsonl`（`thread_name`，同一个会话号以最后一行为准）。子代理、`codex exec` 的会话不列。
+//!   标题在 `session_index.jsonl`（`thread_name`，同一个会话号以最后一行为准）。子代理、起名用的内部会话不列。
+//!
+//! **别处的程序起的对话**（[`Conv::origin`]）：`codex exec` / Codex SDK、Codex MCP、Claude Code 的 Codex 插件、
+//! 别的程序直接连 app-server 开的（`originator` 不是 Codex 自己的客户端，也不是看看），以及 `claude -p` / Agent SDK
+//! （看看对话模式自己起的除外）。这些不是你在聊的，默认不列；`others=true` 时也列出来并标上来源（以前的对话页折叠在最后）。
 //! - **OpenCode**：数据目录（`$XDG_DATA_HOME/opencode`，默认 `~/.local/share/opencode`）里的 `opencode.db`
 //!   （新版）或 `storage/session/*/*.json`（旧版），只取标题、目录、时间。
 //!
@@ -58,6 +62,10 @@ pub struct Conv {
     /// Claude Code 的程序调用（`claude -p`、SDK）记下的：只列看看对话模式自己起的（见 [`mark_own`]）
     #[serde(skip)]
     pub sdk: bool,
+    /// 别处的程序起的（见模块说明）：`codex_exec`、`codex_sdk`、`codex_mcp`、`claude_code`（Claude Code 的 Codex 插件）、
+    /// `app:<程序名>`（别的程序连 app-server 开的）、`claude_p`（`claude -p`）、`claude_sdk`（Agent SDK）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -76,6 +84,8 @@ pub struct Query {
     pub deep: Option<bool>,
     /// 只要这个时间（毫秒）之前有消息的：往后翻页
     pub before: Option<i64>,
+    /// 也列别处的程序起的对话（[`Conv::origin`]），默认不列
+    pub others: Option<bool>,
 }
 
 /// 能接着的工具
@@ -238,7 +248,11 @@ fn list_blocking(q: &Query) -> Vec<Conv> {
                 }
             };
             if let Some(c) = conv.as_mut() {
-                if c.sdk && !is_own(&c.id) {
+                // 程序调用的 Claude Code（`claude -p`、SDK）：看看对话模式自己起的照常列
+                if c.sdk && is_own(&c.id) {
+                    c.origin = None;
+                }
+                if c.origin.is_some() && q.others != Some(true) {
                     continue;
                 }
                 c.live = now.duration_since(mtime).map_or(true, |d| d < Duration::from_secs(LIVE_SECS));
@@ -545,7 +559,9 @@ fn parse_claude(path: &Path) -> Option<Conv> {
     let head = head_lines(path, HEAD_BYTES, CLAUDE_LIST);
     let tail = tail_lines(path, TAIL_BYTES, CLAUDE_LIST);
     // 程序调用（`claude -p`、SDK）的对话不是你聊的，不列（看看对话模式自己起的除外，列表时再看，见 mark_own）
-    let sdk = head.iter().chain(tail.iter()).find_map(|v| v["entrypoint"].as_str()).is_some_and(|e| e.starts_with("sdk"));
+    let entry = head.iter().chain(tail.iter()).find_map(|v| v["entrypoint"].as_str());
+    let sdk = entry.is_some_and(|e| e.starts_with("sdk"));
+    let origin = sdk.then(|| if entry == Some("sdk-cli") { "claude_p" } else { "claude_sdk" }.to_string());
     let all = || head.iter().chain(tail.iter());
     let workdir = all().find_map(|v| v["cwd"].as_str())?.to_string();
     let first = head.iter().filter_map(claude_msg).find(|(r, _)| *r == "user").map(|(_, t)| t);
@@ -569,6 +585,7 @@ fn parse_claude(path: &Path) -> Option<Conv> {
         started_at: head.iter().find_map(|v| v["timestamp"].as_str()).map(String::from),
         snippet: None,
         sdk,
+        origin,
     })
 }
 
@@ -598,11 +615,12 @@ fn parse_codex(path: &Path) -> Option<Conv> {
     }
     let meta = head.first().filter(|v| v["type"] == "session_meta")?;
     let p = &meta["payload"];
-    // 子代理（source 是对象）、`codex exec`、SDK 调用的会话不列
+    // 子代理（source 是对象）、Codex 自己内部用的（`thread_source` 不是 user）不列：子代理在主对话里看
     let source = p["source"].as_str()?;
-    if source == "exec" || p["thread_source"].as_str().is_some_and(|s| s != "user") {
+    if p["thread_source"].as_str().is_some_and(|s| s != "user") {
         return None;
     }
+    let origin = codex_origin(source, p["originator"].as_str());
     let id = p["id"].as_str().or_else(|| p["session_id"].as_str())?.to_string();
     if !valid_id(&id) {
         return None;
@@ -628,7 +646,23 @@ fn parse_codex(path: &Path) -> Option<Conv> {
         started_at: p["timestamp"].as_str().or_else(|| meta["timestamp"].as_str()).map(String::from),
         snippet: None,
         sdk: false,
+        origin,
     })
+}
+
+/// Codex 会话是哪里起的（[`Conv::origin`]）：你自己用的客户端（TUI、VS Code 插件、Codex 桌面版，`originator` 都以 codex 开头）
+/// 和看看返回 None。`source` 是 `exec`（`codex exec`、Codex SDK）、`mcp`（`codex mcp-server`），或者别的程序连 app-server 开的。
+fn codex_origin(source: &str, originator: Option<&str>) -> Option<String> {
+    let o = originator.map(str::trim).unwrap_or("");
+    let lower = o.to_lowercase();
+    match source {
+        "exec" if lower.starts_with("codex_sdk") => Some("codex_sdk".into()),
+        "exec" => Some("codex_exec".into()),
+        "mcp" => Some("codex_mcp".into()),
+        _ if o.is_empty() || lower.starts_with("codex") || o == "looklook" => None,
+        _ if lower == "claude code" || lower.starts_with("claude_code") || lower.starts_with("claude-code") => Some("claude_code".into()),
+        _ => Some(format!("app:{}", clip(o, 40))),
+    }
 }
 
 fn mtime_ms(path: &Path) -> Option<i64> {
@@ -657,6 +691,7 @@ fn opencode_conv(id: &str, title: &str, dir: &str, updated_ms: i64) -> Option<Co
         started_at: None,
         snippet: None,
         sdk: false,
+        origin: None,
     })
 }
 
@@ -773,6 +808,7 @@ mod tests {
             started_at: None,
             snippet: None,
             sdk: false,
+            origin: None,
         };
         let all = vec![conv("claude", "a", "/w/app", 5), conv("codex", "b", "/w/lib/", 4), conv("codex", "c", "/w/app/", 3), conv("claude", "d", "/w/app", 2), conv("claude", "e", "", 1)];
         let f = group_folders(all.into_iter(), 2);
@@ -813,7 +849,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sdk = write(dir.path(), "a.jsonl", &[serde_json::json!({"type":"user","cwd":"/w","entrypoint":"sdk-cli","message":{"content":"hi"}})]);
         // 程序调用的记下来是 sdk，列表时只留看看对话模式自己起的
-        assert!(parse_claude(&sdk).is_some_and(|c| c.sdk));
+        assert!(parse_claude(&sdk).is_some_and(|c| c.sdk && c.origin.as_deref() == Some("claude_p")));
         assert!(!is_own("a"));
         let empty = write(dir.path(), "b.jsonl", &[serde_json::json!({"type":"mode","mode":"normal"})]);
         assert!(parse_claude(&empty).is_none());
@@ -841,8 +877,10 @@ mod tests {
         assert_eq!(c.branch.as_deref(), Some("master"));
         let sub = write(dir.path(), "rollout-sub.jsonl", &[meta(serde_json::json!({"subagent":{}}), "subagent"), msg("user", "input_text", "hi", "2026-10-08T03:21:04Z")]);
         assert!(parse_codex(&sub).is_none());
+        // `codex exec` 的会话也解析出来，标上来源（列表默认不列，见 list_blocking）
         let exec = write(dir.path(), "rollout-exec.jsonl", &[meta(Value::from("exec"), "user"), msg("user", "input_text", "hi", "2026-10-08T03:21:04Z")]);
-        assert!(parse_codex(&exec).is_none());
+        assert_eq!(parse_codex(&exec).and_then(|c| c.origin).as_deref(), Some("codex_exec"));
+        assert_eq!(c.origin, None, "TUI 起的是你自己的对话");
 
         // Codex 压缩过的旧记录：一样认得，读出来的一样
         let zst = p.with_file_name(format!("{}.zst", plain_name(&p)));
@@ -852,6 +890,22 @@ mod tests {
         assert_eq!(tail_lines(&zst, 200, CODEX_MSGS), tail_lines(&p, 200, CODEX_MSGS));
         assert!(find_in_file(&zst, "afs-analyzer").is_some());
         assert!(is_rollout(&zst) && is_zst(&zst) && plain_name(&zst).ends_with("-01a11987-078c-7c91-9ef9-c10914660ea2.jsonl"));
+    }
+
+    #[test]
+    fn codex_origins() {
+        // 本机真实数据里见过的 source / originator
+        assert_eq!(codex_origin("cli", Some("codex-tui")), None);
+        assert_eq!(codex_origin("vscode", Some("codex-tui")), None);
+        assert_eq!(codex_origin("vscode", Some("codex_vscode")), None);
+        assert_eq!(codex_origin("vscode", Some("Codex Desktop")), None);
+        assert_eq!(codex_origin("vscode", Some("looklook")), None);
+        assert_eq!(codex_origin("cli", None), None);
+        assert_eq!(codex_origin("exec", Some("codex_exec")).as_deref(), Some("codex_exec"));
+        assert_eq!(codex_origin("exec", Some("codex_sdk_ts")).as_deref(), Some("codex_sdk"));
+        assert_eq!(codex_origin("mcp", Some("codex_mcp")).as_deref(), Some("codex_mcp"));
+        assert_eq!(codex_origin("vscode", Some("Claude Code")).as_deref(), Some("claude_code"), "Claude Code 的 Codex 插件");
+        assert_eq!(codex_origin("vscode", Some("t")).as_deref(), Some("app:t"), "别的程序直接连 app-server");
     }
 
     #[test]

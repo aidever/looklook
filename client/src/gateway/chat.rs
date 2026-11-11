@@ -164,6 +164,7 @@ pub struct InputReq {
 }
 
 pub async fn input(State(app): State<App>, Path(id): Path<String>, Json(req): Json<InputReq>) -> R<Json<Value>> {
+    app.instances.note_input(&id);
     if req.text.len() > 200_000 || req.images.len() > 10 {
         return Err(LocalError::invalid("text", "too_long"));
     }
@@ -193,6 +194,7 @@ pub struct EditReq {
 
 /// 编辑重发：丢掉这条和之后的对话，发出改过的（见 `Chat::edit`）
 pub async fn edit(State(app): State<App>, Path(id): Path<String>, Json(req): Json<EditReq>) -> R<Json<Value>> {
+    app.instances.note_input(&id);
     if req.text.len() > 200_000 || req.key.len() > 200 {
         return Err(LocalError::invalid("text", "too_long"));
     }
@@ -227,11 +229,13 @@ pub async fn codex_terminal(State(app): State<App>, Path(id): Path<String>) -> R
 }
 
 pub async fn interrupt(State(app): State<App>, Path(id): Path<String>) -> R<StatusCode> {
+    app.instances.note_input(&id);
     app.chat.interrupt(&id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn permission(State(app): State<App>, Path(id): Path<String>, Json(req): Json<PermissionAnswer>) -> R<StatusCode> {
+    app.instances.note_input(&id);
     app.chat.answer(&id, &req)?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -244,6 +248,7 @@ pub struct PlanReq {
 }
 
 pub async fn plan(State(app): State<App>, Path(id): Path<String>, Json(req): Json<PlanReq>) -> R<StatusCode> {
+    app.instances.note_input(&id);
     app.chat.plan(&id, req.choice, req.feedback.as_deref()).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -377,6 +382,7 @@ pub async fn codex_update(State(app): State<App>, Path(id): Path<String>, Json(r
 
 /// `POST /api/instances/{id}/chat/hooks`：信任（`trust: true`）或跳过这几条
 pub async fn hooks_answer(State(app): State<App>, Path(id): Path<String>, Json(req): Json<HooksReq>) -> R<StatusCode> {
+    app.instances.note_input(&id);
     let picked: Vec<(String, String)> = req.hooks.into_iter().map(|h| (h.key, h.hash)).collect();
     app.chat.hooks_answer(&id, req.trust, &picked).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -457,6 +463,7 @@ pub async fn seen(State(app): State<App>, Path(id): Path<String>, Json(req): Jso
 
 /// TUI 上的选择框：选一项或取消
 pub async fn dialog(State(app): State<App>, Path(id): Path<String>, Json(req): Json<DialogReq>) -> R<StatusCode> {
+    app.instances.note_input(&id);
     match req.index {
         Some(i) => app.chat.dialog_choose(&id, &req.title, &req.label, i, req.text.as_deref()).await?,
         None => app.chat.dialog_cancel(&id).await?,

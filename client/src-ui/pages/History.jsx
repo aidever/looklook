@@ -2,7 +2,7 @@
 // “所有以前的对话”页面（/history）；侧栏、项目页、草稿页里的也从这里接着聊。
 // 点一行先展开看最后几句，再点“继续”；正开在看看会话里的直接打开那个会话；
 // 可能正开在别处（文件两分钟内还在变）的默认“复制一份继续”，原来那份不动。
-import { AlertCircle, ChevronDown, Copy, ExternalLink, Eye, EyeOff, Folder, GitBranch, Play, Search, SlidersHorizontal, Star, X } from 'lucide-react';
+import { AlertCircle, Bot, ChevronDown, ChevronRight, Copy, ExternalLink, Eye, EyeOff, Folder, GitBranch, Play, Search, SlidersHorizontal, Star, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -17,6 +17,24 @@ import { ErrorNote, Spinner, useToast } from '../shared/ui.jsx';
 import { PageHead } from '../shared/page.jsx';
 import { isTouch } from '../shared/KeyBar.jsx';
 import { useSessionUi } from './Sessions.jsx';
+
+/** 别处的程序起的对话（`conv.origin`，见客户端 history.rs）：来源说明，比如“由 Claude Code 调用”“codex exec” */
+export function originText(t, origin) {
+  if (!origin) return '';
+  if (origin.startsWith('app:')) return t('hist.origin.app', { name: origin.slice(4) });
+  return t(`hist.origin.${origin}`, { defaultValue: origin });
+}
+
+function OriginBadge({ origin }) {
+  const { t } = useTranslation();
+  if (!origin) return null;
+  return (
+    <span className="badge hist-origin" title={t('hist.others_hint')}>
+      <Bot size={11} aria-hidden="true" />
+      {originText(t, origin)}
+    </span>
+  );
+}
 
 // 能“复制一份继续”的（OpenCode 没有这个功能）
 export const CAN_FORK = ['claude', 'codex'];
@@ -86,6 +104,7 @@ function ConvPeekActions({ device, conv, onHide, hidden }) {
   const fork = conv.live && CAN_FORK.includes(conv.agent);
   return (
     <>
+      {conv.origin && <p className="conv-note">{t('hist.others_continue', { from: originText(t, conv.origin) })}</p>}
       {conv.live && !conv.instance_id && (
         <p className="conv-warn">
           <AlertCircle size={14} aria-hidden="true" />
@@ -304,6 +323,7 @@ function HistRow({ conv, selected, mark, onSelect, onOpen, onMark, showDevice, s
             </span>
           )}
           {dev && <DeviceTag device={dev} />}
+          <OriginBadge origin={conv.origin} />
           <span className="hrow-when">{relativeTime(t, conv.updated_at)}</span>
         </span>
         {(conv.snippet || conv.last) && <span className="ellipsis hrow-last">{conv.snippet ?? conv.last}</span>}
@@ -362,6 +382,7 @@ function HistDetail({ conv, onClose }) {
               </span>
             )}
             {dev && <DeviceTag device={dev} />}
+            <OriginBadge origin={conv.origin} />
             {conv.started_at && <span>{t('hist.started', { when: relativeTime(t, conv.started_at) })}</span>}
           </span>
         </span>
@@ -448,6 +469,7 @@ export function HistoryPage() {
   const [sel, setSel] = useState(null);
   const [showFilters, setShowFilters] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [othersOpen, setOthersOpen] = useState(false);
   const ui = useSessionUi();
   // 先看当前这台电脑的（记住选择）；“全部电脑”时这台排在最前、先显示，别的电脑的到了再补上
   const [scope, setScope] = useState(readScope);
@@ -468,7 +490,7 @@ export function HistoryPage() {
   const toggle = (field, key) => update({ [field]: f[field].includes(key) ? f[field].filter((x) => x !== key) : [...f[field], key] });
   const load = (dev, extra = '') =>
     deviceApi(dev)
-      .get(`/history?limit=${PAGE}${extra}`)
+      .get(`/history?limit=${PAGE}&others=true${extra}`)
       .then(
         (r) => ({ dev, items: Array.isArray(r?.items) ? r.items : [], marks: r?.marks ?? {}, persistent: Boolean(r?.persistent) }),
         (e) => ({ dev, items: [], marks: {}, error: e }),
@@ -525,7 +547,10 @@ export function HistoryPage() {
   };
 
   const now = Date.now();
-  const all = (groups ?? []).filter((g) => g.persistent).flatMap((g) => g.items.map((c) => ({ ...c, dev: g.dev })));
+  const every = (groups ?? []).filter((g) => g.persistent).flatMap((g) => g.items.map((c) => ({ ...c, dev: g.dev })));
+  // 别处的程序起的（codex exec、Claude Code 的 Codex 插件、claude -p……）不混在你的对话里：单独折叠在最后
+  const all = every.filter((c) => !c.origin);
+  const otherConvs = every.filter((c) => c.origin);
   const loading = !groups || groups.some((g) => g.loading);
   const firstLoad = !groups || groups.every((g) => g.loading && g.items.length === 0);
   const open = (c) => {
@@ -596,7 +621,8 @@ export function HistoryPage() {
     const [, workdir] = key.split('\n');
     return baseName(workdir) || workdir;
   };
-  const selected = sel ? list.find((c) => convKey(c) === sel) ?? all.find((c) => convKey(c) === sel) : null;
+  const others = otherConvs.filter((c) => textOk(c) && pass.agents(c) && pass.devs(c) && pass.projs(c) && pass.time(c) && pass.mark(c)).sort((a, b) => updatedMs(b) - updatedMs(a));
+  const selected = sel ? list.find((c) => convKey(c) === sel) ?? every.find((c) => convKey(c) === sel) : null;
   // ↑↓ 切换上一条、下一条（焦点不在输入框里时）
   useEffect(() => {
     const on = (e) => {
@@ -791,6 +817,32 @@ export function HistoryPage() {
               </div>
             </section>
           ))
+        )}
+        {!firstLoad && !noPersist && others.length > 0 && (
+          <section className="hist-group hist-others" aria-label={t('hist.others')}>
+            <button type="button" className="hist-group-head hist-others-head" onClick={() => setOthersOpen(!othersOpen)} aria-expanded={othersOpen}>
+              {othersOpen ? <ChevronDown size={15} aria-hidden="true" /> : <ChevronRight size={15} aria-hidden="true" />}
+              <span>{t('hist.others')}</span>
+              <span className="hfacet-n">{others.length}</span>
+            </button>
+            {othersOpen && (
+              <>
+                <p className="small muted hist-others-hint">{t('hist.others_hint')}</p>
+                <div className="conv-list">
+                  {others.map((c) => {
+                    const k = convKey(c);
+                    const on = sel === k;
+                    return (
+                      <div key={k} data-conv={k}>
+                        <HistRow conv={c} selected={on} mark={markOf(c)} onSelect={() => setSel(on ? null : k)} onOpen={() => open(c)} onMark={(patch) => setMark(c, patch)} showDevice showProject />
+                        {on && narrow && <ConvPeek device={c.dev} conv={c} />}
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+          </section>
         )}
         {groups && anyMore && (
           <AutoMore onMore={loadMore} busy={loadingMore}>

@@ -14,11 +14,12 @@ import { deviceName, useDevices } from '../shared/devices.jsx';
 import { errorText } from '../shared/i18n.js';
 import PopMenu from '../shared/PopMenu.jsx';
 import { Link, query, useRouter } from '../shared/router.jsx';
-import { AGENTS, projectEntries, projectPath, sessionState, sessionTitle, useSessions } from '../shared/sessions.jsx';
+import { AGENTS, inputAt, projectEntries, projectPath, sessionState, sessionTitle, useSessions } from '../shared/sessions.jsx';
 import { Spinner, useConfirm, useToast } from '../shared/ui.jsx';
 import { ConvRow, timeBucket } from './History.jsx';
 import { quickLaunchItems, shortAgo, useActions, useSessionUi } from './Sessions.jsx';
 import { imeComposing } from '../shared/ime.js';
+import { RunButton } from '../shared/RunActions.jsx';
 
 const PAGE = 50;
 const enc = encodeURIComponent;
@@ -247,6 +248,7 @@ function ProjectView({ p, group, focus }) {
             </button>
             <PopMenu items={newMenu} className="btn btn-primary split-more" icon={ChevronDown} label={t('proj.new_other')} disabled={!allowed} />
           </span>
+          {allowed && !p.container && <RunButton device={p.device} workdir={p.workdir} text />}
           <button type="button" className="btn btn-ghost" onClick={() => ui.quickCreate(p, 'shell')} disabled={!allowed}>
             <SquareTerminal size={16} aria-hidden="true" />
             {t('proj.terminal')}
@@ -347,7 +349,8 @@ function InstRow({ inst }) {
   const { t } = useTranslation();
   const a = useActions(inst);
   const state = inst.error && !inst.running ? 'error' : sessionState(inst);
-  const when = Math.max(ts(inst.last_activity_at), ts(inst.started_at), ts(inst.created_at));
+  // 你上次在这里输入的时间（AI 的输出不算），和侧栏一致
+  const when = inputAt(inst);
   const badge = { attn: 'badge-warn', working: 'badge-brand', background: 'badge-brand', idle: 'badge-ok', error: 'badge-danger' }[state];
   return (
     <div className="conv proj-inst">

@@ -70,6 +70,8 @@ pub enum Body {
     Info { text: String },
     /// 这一轮用了多久
     Turn { ms: u64 },
+    /// 这一轮出错结束了（接口报错等），没有回复：显示原因，不让对话看起来是空的
+    Error { text: String },
     /// 后台任务（后台命令、后台子代理）结束的通知（`<task-notification>`）
     Task { tool_use_id: String, status: String, summary: String },
 }

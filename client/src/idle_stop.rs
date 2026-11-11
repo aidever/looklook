@@ -39,7 +39,7 @@ pub struct Idle {
 
 /// 在忙：对话界面在跑、等你确认、后台还有任务、有定时任务（/loop）、在等额度重置后自动继续；
 /// 看进程认出来在忙（AI 在回复、普通终端有命令在跑）
-fn busy(chat: &Chat, v: &View) -> bool {
+pub(crate) fn busy(chat: &Chat, v: &View) -> bool {
     let brief = chat.brief(&v.row.id);
     let phase = brief.as_ref().and_then(|b| b["phase"].as_str());
     let background = brief.as_ref().and_then(|b| b["background"].as_array()).is_some_and(|a| !a.is_empty());

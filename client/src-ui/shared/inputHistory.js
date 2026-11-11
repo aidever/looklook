@@ -1,6 +1,6 @@
 // 对话输入框的输入历史：上下键翻、历史按钮里搜（像命令行的 Ctrl+R）。
-// Claude Code 用它自己的 history.jsonl（GET chat/prompts，和终端里按上键翻的是同一份）；
-// 别的工具用本机浏览器里存着的发过的话（所有会话共用）。都再加上当前对话里你说过的话。
+// 当前对话里说过的在前；然后是客户端记的这个项目里发过的（GET chat/prompts，Claude Code 再加上它自己的
+// history.jsonl，和终端里按上键翻的是同一份）；最后是这个浏览器里存着的（所有会话共用，接口取不到时也有）。
 
 const KEY = 'll-chat-inputs';
 const MAX = 300;
@@ -43,7 +43,7 @@ export function inputHistory(items, saved = readInputs(), session = null) {
   };
   const mine = (items ?? []).filter((x) => x?.k === 'user');
   for (let i = mine.length - 1; i >= 0; i--) add(mine[i].text, null, true);
-  for (const x of saved) add(x.text, x.at, Boolean(session && x.session === session));
+  for (const x of saved) if (x && typeof x.text === 'string') add(x.text, x.at, Boolean(session && x.session === session));
   return out;
 }
 

@@ -151,6 +151,21 @@ fn stat_fields(s: &str) -> Option<(char, u32)> {
     Some((state, ppid))
 }
 
+/// 这几个进程下面还有没有别的程序在跑（运行按钮看命令跑完没有：面板里是 `命令; exec shell`，跑完只剩 shell）。
+/// shell 自己常驻的帮手（powerlevel10k 的 gitstatusd）不算。拿不到进程表（Windows）时 None。
+pub fn has_children(roots: &[u32]) -> Option<bool> {
+    let procs = table_with_args();
+    if procs.is_empty() || roots.is_empty() {
+        return None;
+    }
+    let helper = |args: &str| {
+        let prog = args.split_whitespace().next().unwrap_or("");
+        let base = prog.rsplit(['/', '\\']).next().unwrap_or(prog);
+        base.starts_with("gitstatusd")
+    };
+    Some(procs.iter().any(|p| roots.contains(&p.1) && !helper(&p.2)))
+}
+
 /// 进程表：(进程号, 父进程号)。
 fn table() -> Vec<(u32, u32)> {
     if cfg!(target_os = "linux") {

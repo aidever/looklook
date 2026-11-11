@@ -4,7 +4,8 @@ import { useTranslation } from 'react-i18next';
 
 import { isMod, keyLabel } from './hotkeys.js';
 import { visibleGroups } from './shortcuts.js';
-import { Modal } from './ui.jsx';
+import { keyHintsOff, setKeyHintsOff } from './KeyHint.jsx';
+import { Modal, Switch } from './ui.jsx';
 
 
 const label = (combo) => combo.split(' / ').map((c) => keyLabel(c)).join(' / ');
@@ -12,6 +13,7 @@ const label = (combo) => combo.split(' / ').map((c) => keyLabel(c)).join(' / ');
 export default function ShortcutsHelp() {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
+  const [hintsOff, setHintsOff] = useState(keyHintsOff);
   useEffect(() => {
     const show = () => setOpen(true);
     const key = (e) => {
@@ -46,6 +48,16 @@ export default function ShortcutsHelp() {
           </section>
         ))}
       </div>
+      <label className="keys-hints-toggle">
+        <Switch checked={!hintsOff} onChange={(on) => {
+          setKeyHintsOff(!on);
+          setHintsOff(!on);
+        }} />
+        <span>
+          <b>{t('keys.hints_toggle')}</b>
+          <span className="small muted">{t('keys.hints_toggle_sub')}</span>
+        </span>
+      </label>
       <div className="modal-actions">
         <button type="button" className="btn" onClick={() => setOpen(false)}>
           {t('action.close')}

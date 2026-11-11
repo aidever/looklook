@@ -43,6 +43,10 @@ pub fn routes(app: App) -> Router<App> {
         .route("/platform/{*rest}", get(platform_web).post(platform_web).put(platform_web).patch(platform_web).delete(platform_web))
         .route("/instances", get(list_instances).post(create_instance))
         .route("/instances/idle", get(list_idle).post(stop_idle))
+        // 项目的运行按钮（▶，run_actions.rs）
+        .route("/run-actions", get(run_actions_list).put(run_actions_save))
+        .route("/run-actions/run", post(run_action_run))
+        .route("/run-actions/stop", post(run_action_stop))
         .route("/instances/{id}/opened", post(instance_opened))
         .route("/instances/{id}", get(get_instance).patch(update_instance).delete(delete_instance))
         .route("/instances/{id}/start", post(start_instance))
@@ -169,6 +173,7 @@ pub fn routes(app: App) -> Router<App> {
         .route("/pets/version", get(pets_version))
         .route("/pets/gen-models", get(pets_gen_models))
         .route("/draft/models", get(draft_models))
+        .route("/draft/model_memory", post(draft_model_memory))
         .route("/draft/commands", get(draft_commands))
         .route("/draft/mentions", get(draft_mentions))
         .route("/pets/devices", get(pets_devices))
@@ -221,10 +226,17 @@ pub fn routes(app: App) -> Router<App> {
         .route("/mcp", get(get_mcp).put(put_mcp))
         .route("/mcp/install", post(mcp_install))
         .route("/mcp/uninstall", post(mcp_uninstall))
+        .route("/skills", get(skills_list))
+        .route("/skills/restore", post(skills_restore))
+        .route("/skills/{root}/{name}", get(skills_detail).delete(skills_delete))
         .route("/shells", get(get_shells))
         .route("/tools", get(get_tools))
         .route("/tools/install", post(install_tool))
         .route("/tools/install/{tool}", get(install_job))
+        .route("/agent-updates", get(agent_updates))
+        .route("/agent-updates/check", post(agent_updates_check))
+        .route("/agent-updates/{tool}", put(agent_update_set))
+        .route("/agent-updates/{tool}/update", post(agent_update_start))
         .route("/diag", get(diag_list))
         .route("/diag/clear", post(diag_clear))
         .route("/diag/ui-error", post(diag_ui_error))
@@ -238,6 +250,8 @@ pub fn routes(app: App) -> Router<App> {
         .route("/codex-profiles/default", put(set_default_codex_profile))
         .route("/codex-profiles/{id}", put(update_codex_profile).delete(delete_codex_profile))
         .route("/codex-profiles/{id}/usage", post(codex_profile_usage))
+        .route("/codex-profiles/{id}/tuning", put(set_codex_tuning))
+        .route("/codex-profiles/{id}/tuning/current", get(codex_tuning_current))
         .route("/usage-stats", get(usage_stats))
         .route("/usage-stats/scan", post(usage_stats_scan))
         .route("/usage-stats/pricing", post(usage_stats_pricing))
@@ -246,6 +260,8 @@ pub fn routes(app: App) -> Router<App> {
         .route("/claude-profiles/{id}", put(update_claude_profile).delete(delete_claude_profile))
         .route("/claude-profiles/{id}/status", get(claude_profile_status))
         .route("/claude-profiles/{id}/usage", post(claude_profile_usage))
+        .route("/claude-profiles/{id}/tuning", put(set_claude_tuning))
+        .route("/claude-profiles/{id}/tuning/current", get(claude_tuning_current))
         .route("/ollama", get(ollama))
         .route("/claude-profiles/{id}/login", get(claude_login_state).post(login_claude_profile).delete(cancel_claude_login))
         .route("/claude-profiles/{id}/login/code", post(claude_login_code))
@@ -1013,6 +1029,133 @@ async fn instance_text(State(app): State<App>, Path(id): Path<String>) -> R<Json
     Ok(Json(json!({ "text": app.instances.text(&id).await })))
 }
 
+// ---------------- 项目的运行按钮（▶，run_actions.rs） ----------------
+
+#[derive(Deserialize)]
+struct RunQ {
+    workdir: String,
+}
+
+/// 运行命令对应的会话（还在的）；会话被删了就忘掉
+async fn run_bound(app: &App, workdir: &str, key: &str) -> Option<crate::instances::View> {
+    let bkey = crate::run_actions::binding_key(workdir, key);
+    let id: String = app.store.get(&bkey).ok().flatten()?;
+    match app.instances.get(&id).await {
+        Ok(v) => Some(v),
+        Err(_) => {
+            let _ = app.store.remove(&bkey);
+            None
+        }
+    }
+}
+
+/// 界面上要的运行状态：`jobs` 为命令还在跑（面板的 shell 下面还有程序）；拿不到时 null，界面看 `busy`
+async fn run_state(app: &App, v: &crate::instances::View) -> Value {
+    let jobs = if v.task_alive == Some(true) { crate::proctree::has_children(&app.instances.pane_pids(&v.row.id).await) } else { Some(false) };
+    json!({
+        "id": v.row.id,
+        "running": v.running,
+        "task_alive": v.task_alive,
+        "busy": v.busy,
+        "jobs": jobs,
+        "started_at": v.started_at,
+    })
+}
+
+/// `GET /api/run-actions?workdir=`：这个项目的运行命令（看看记的 + Codex 的）、各自的会话状态、按项目文件猜的建议
+async fn run_actions_list(State(app): State<App>, Query(q): Query<RunQ>) -> R<Json<Value>> {
+    crate::run_actions::check_workdir(&q.workdir)?;
+    let (actions, codex_files) = crate::run_actions::actions(&app.store, &q.workdir);
+    let mut items = Vec::with_capacity(actions.len());
+    for a in actions {
+        let inst = match run_bound(&app, &q.workdir, &a.key).await {
+            Some(v) => run_state(&app, &v).await,
+            None => Value::Null,
+        };
+        let mut item = serde_json::to_value(&a).unwrap_or(Value::Null);
+        item["inst"] = inst;
+        items.push(item);
+    }
+    let dir = q.workdir.clone();
+    let suggestions = blocking(move || Ok(crate::run_actions::suggest(std::path::Path::new(&dir)))).await?;
+    Ok(Json(json!({ "actions": items, "codex_files": codex_files, "suggestions": suggestions })))
+}
+
+#[derive(Deserialize)]
+struct RunSaveReq {
+    workdir: String,
+    actions: Vec<crate::run_actions::Saved>,
+}
+
+/// `PUT /api/run-actions`：保存看看自己的运行命令（整个列表）。Codex 的在它自己的文件里改
+async fn run_actions_save(State(app): State<App>, Json(req): Json<RunSaveReq>) -> R<Json<Value>> {
+    crate::run_actions::check_workdir(&req.workdir)?;
+    let saved = crate::run_actions::save(&app.store, &req.workdir, req.actions)?;
+    Ok(Json(json!({ "actions": saved })))
+}
+
+#[derive(Deserialize)]
+struct RunReq {
+    workdir: String,
+    key: String,
+}
+
+/// `POST /api/run-actions/run`：跑这条命令。有会话就重启它（停掉上次的，重新跑），没有就在项目里新建一个。
+/// 只在用户点了 ▶ 时调用；猜出来的建议不会走到这里
+async fn run_action_run(State(app): State<App>, Json(req): Json<RunReq>) -> R<Json<Value>> {
+    crate::run_actions::check_workdir(&req.workdir)?;
+    let a = crate::run_actions::find(&app.store, &req.workdir, &req.key).ok_or_else(LocalError::not_found)?;
+    let line = crate::run_actions::command_line(&app.paths.home, &req.workdir, &a)?;
+    let name = crate::run_actions::session_name(&a);
+    let v = match run_bound(&app, &req.workdir, &a.key).await {
+        Some(v) => {
+            let id = v.row.id.clone();
+            if v.row.command != line || v.row.workdir != a.cwd || v.row.name != name || v.row.launch != "custom" {
+                let input = Input { name: Some(name), workdir: Some(a.cwd.clone()), launch: Some("custom".into()), command: Some(line), ..Default::default() };
+                app.instances.update(&id, input).await?;
+            }
+            app.instances.restart(&id).await?
+        }
+        None => {
+            let input = Input {
+                name: Some(name),
+                workdir: Some(a.cwd.clone()),
+                launch: Some("custom".into()),
+                command: Some(line),
+                name_custom: Some(true),
+                auto_start: Some(false),
+                ..Default::default()
+            };
+            let v = app.instances.create(input).await?;
+            let id = v.row.id.clone();
+            app.store.set(&crate::run_actions::binding_key(&req.workdir, &a.key), &id)?;
+            app.store.set(&crate::run_actions::mark_key(&id), &crate::run_actions::Mark { workdir: req.workdir.clone(), key: a.key.clone() })?;
+            app.instances.start(&id).await?
+        }
+    };
+    Ok(Json(run_state(&app, &v).await))
+}
+
+/// `POST /api/run-actions/stop`：停下这条命令。先像在终端里按 Ctrl+C（输出留着，能看到停在哪）；
+/// 3 秒还没停（或者看不出停没停）就把会话整个停掉
+async fn run_action_stop(State(app): State<App>, Json(req): Json<RunReq>) -> R<Json<Value>> {
+    let Some(v) = run_bound(&app, &req.workdir, &req.key).await else { return Ok(Json(Value::Null)) };
+    let id = v.row.id.clone();
+    if v.task_alive == Some(true) && app.instances.send_keys(&id, &["C-c"]).await.is_ok() {
+        for _ in 0..12 {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            let pids = app.instances.pane_pids(&id).await;
+            if pids.is_empty() || crate::proctree::has_children(&pids) == Some(false) {
+                let v = app.instances.get(&id).await?;
+                return Ok(Json(run_state(&app, &v).await));
+            }
+        }
+    }
+    app.instances.stop(&id).await?;
+    let v = app.instances.get(&id).await?;
+    Ok(Json(run_state(&app, &v).await))
+}
+
 // ---------------- 终端文件传输（docs/FILE_TRANSFER.md §4） ----------------
 
 /// 终端当前目录、附件目录，以及面板里有没有本机的 rz / sz。
@@ -1551,9 +1694,32 @@ fn ssh_launch_line(exe: &str, id: &str, family: crate::shells::Family) -> String
     }
 }
 
-/// 新建一个 SSH 终端并启动：终端里的 shell 运行 `looklook ssh <id>`，ssh 退出后回到 shell（按 ↑ 回车即可重连）。
-async fn ssh_open(State(app): State<App>, Path(id): Path<String>) -> R<impl IntoResponse> {
+#[derive(Deserialize, Default)]
+struct SshOpenQuery {
+    /// 已经开着连这台的会话也再开一个新的
+    #[serde(default)]
+    new: bool,
+}
+
+/// 连这台主机的会话：`looklook ssh <id>` 那一行（[`ssh_launch_line`]）结尾是 ` ssh <id>`
+pub fn ssh_host_of(launch: &str, command: &str) -> Option<String> {
+    if launch != "custom" {
+        return None;
+    }
+    let (head, id) = command.trim().rsplit_once(char::is_whitespace)?;
+    (head.trim_end().ends_with(" ssh") && crate::history::valid_id(id)).then(|| id.to_string())
+}
+
+/// 打开 SSH 终端：这台主机已经有开着的会话就直接用它（不再每点一次开一个），`?new=true` 时再开一个。
+/// 新开的：终端里的 shell 运行 `looklook ssh <id>`，ssh 退出后回到 shell（按 ↑ 回车即可重连）。
+async fn ssh_open(State(app): State<App>, Path(id): Path<String>, Query(q): Query<SshOpenQuery>) -> R<impl IntoResponse> {
     let h = crate::ssh::list(&app.store).into_iter().find(|h| h.id == id).ok_or_else(LocalError::not_found)?;
+    if !q.new {
+        let open = app.instances.list().await?.into_iter().filter(|v| v.running && ssh_host_of(&v.row.launch, &v.row.command).as_deref() == Some(id.as_str())).max_by(|a, b| a.row.updated_at.cmp(&b.row.updated_at));
+        if let Some(v) = open {
+            return Ok((StatusCode::OK, Json(v)));
+        }
+    }
     // 稳定入口（Linux 的 bin/looklook）：命令留在终端里、shell 历史里，版本目录被清理后按 ↑ 回车也要能重连
     let exe = crate::versions::stable_exe(&app.paths.home).ok_or_else(|| LocalError::new("SSH_FAILED").with("detail", "exe"))?.display().to_string();
     let family = crate::shells::resolve("", &Settings::load(&app.store).default_shell)?.family;
@@ -2477,6 +2643,32 @@ async fn mcp_uninstall(State(app): State<App>, Extension(access): Extension<Acce
     Ok(Json(mcp_view(&app, &access).await))
 }
 
+// ---------------- 技能管理 ----------------
+
+async fn skills_list(State(app): State<App>) -> Json<Value> {
+    Json(json!({ "items": crate::skills::list(app.paths.home.clone()).await }))
+}
+
+async fn skills_detail(Path((root, name)): Path<(String, String)>) -> R<Json<crate::skills::Detail>> {
+    Ok(Json(crate::skills::detail(root, name).await?))
+}
+
+/// 返回回收站里的条目名（撤销时带回来）
+async fn skills_delete(State(app): State<App>, Path((root, name)): Path<(String, String)>) -> R<Json<Value>> {
+    let trash = crate::skills::delete(app.paths.home.clone(), root, name).await?;
+    Ok(Json(json!({ "trash": trash })))
+}
+
+#[derive(Deserialize)]
+struct SkillRestoreReq {
+    trash: String,
+}
+
+async fn skills_restore(State(app): State<App>, Json(req): Json<SkillRestoreReq>) -> R<Json<Value>> {
+    crate::skills::restore(app.paths.home.clone(), req.trash).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
 // ---------------- shell ----------------
 
 /// 本机可用的 shell 与“自动”会选中的那个（新建终端、设置里选 shell 用）。
@@ -2512,6 +2704,34 @@ async fn install_tool(State(app): State<App>, Json(req): Json<InstallReq>) -> R<
 
 async fn install_job(Path(tool): Path<String>) -> R<Json<tools::Job>> {
     tools::job(&tool).map(Json).ok_or_else(LocalError::not_found)
+}
+
+// ---------------- AI 工具更新（agent_update.rs） ----------------
+
+async fn agent_updates(State(app): State<App>) -> Json<Value> {
+    Json(crate::agent_update::view(&app.store, &app.instances, &app.chat).await)
+}
+
+/// 立刻查一次新版本
+async fn agent_updates_check(State(app): State<App>) -> R<Json<Value>> {
+    crate::agent_update::check(&app.store).await?;
+    Ok(Json(crate::agent_update::view(&app.store, &app.instances, &app.chat).await))
+}
+
+#[derive(Deserialize)]
+struct AgentAutoReq {
+    auto: bool,
+}
+
+async fn agent_update_set(State(app): State<App>, Path(tool): Path<String>, Json(req): Json<AgentAutoReq>) -> R<Json<Value>> {
+    crate::agent_update::set_auto(&app.store, &tool, req.auto)?;
+    Ok(Json(crate::agent_update::view(&app.store, &app.instances, &app.chat).await))
+}
+
+/// 现在更新（进度看 `GET /tools/install/{tool}`）
+async fn agent_update_start(State(app): State<App>, Path(tool): Path<String>) -> R<impl IntoResponse> {
+    let job = crate::agent_update::start(app.store.clone(), app.instances.clone(), app.chat.clone(), &tool, false).await?;
+    Ok((StatusCode::ACCEPTED, Json(job)))
 }
 
 // ---------------- 错误记录与问题报告 ----------------
@@ -2808,6 +3028,34 @@ async fn set_default_codex_profile(State(app): State<App>, Json(req): Json<Defau
     Ok(Json(codex_profiles_view(&app)))
 }
 
+/// 模型设置（上下文窗口、自动压缩等，见 model_tuning.rs）；本机默认也能设
+async fn set_codex_tuning(State(app): State<App>, Path(id): Path<String>, Json(req): Json<crate::model_tuning::CodexTuning>) -> R<Json<Value>> {
+    crate::codex_profiles::set_tuning(&app.store, &id, req)?;
+    Ok(Json(codex_profiles_view(&app)))
+}
+
+/// 用户自己的 `config.toml` 里和上下文、压缩、强度有关的键（“模型设置”里不填时 Codex 照这些）
+async fn codex_tuning_current(State(app): State<App>, Path(id): Path<String>) -> R<Json<Value>> {
+    crate::codex_profiles::get(&app.store, &id).ok_or_else(LocalError::not_found)?;
+    let path = crate::agents::codex_home().join("config.toml");
+    let doc = std::fs::read_to_string(&path).ok().and_then(|t| t.parse::<toml_edit::DocumentMut>().ok());
+    let item = |k: &str| doc.as_ref().and_then(|d| d.get(k)).and_then(|i| i.as_value()).map(|v| match v {
+        toml_edit::Value::Integer(n) => json!(*n.value()),
+        toml_edit::Value::String(s) => json!(s.value()),
+        other => json!(other.to_string().trim()),
+    });
+    let shown = dirs::home_dir().and_then(|h| path.strip_prefix(h).ok().map(|r| format!("~/{}", r.display()))).unwrap_or_else(|| path.display().to_string());
+    Ok(Json(json!({
+        "source": shown,
+        "context_window": item("model_context_window"),
+        "compact_limit": item("model_auto_compact_token_limit"),
+        "effort": item("model_reasoning_effort"),
+        "summary": item("model_reasoning_summary"),
+        "verbosity": item("model_verbosity"),
+        "model": item("model"),
+    })))
+}
+
 /// 第三方接口的套餐用量（智谱、Kimi、MiniMax，见 provider_quota.rs）
 async fn codex_profile_usage(State(app): State<App>, Path(id): Path<String>) -> R<Json<Value>> {
     let p = crate::codex_profiles::get(&app.store, &id).ok_or_else(LocalError::not_found)?;
@@ -2890,6 +3138,23 @@ async fn update_claude_profile(State(app): State<App>, Path(id): Path<String>, J
     }
     crate::claude_profiles::update(&app.store, &app.paths.home, &id, req.input)?;
     Ok(Json(claude_profiles_view(&app)))
+}
+
+/// 模型设置（上下文窗口、自动压缩等，见 model_tuning.rs）；本机默认账号也能设
+async fn set_claude_tuning(State(app): State<App>, Path(id): Path<String>, Json(req): Json<crate::model_tuning::ClaudeTuning>) -> R<Json<Value>> {
+    crate::claude_profiles::set_tuning(&app.store, &id, req)?;
+    Ok(Json(claude_profiles_view(&app)))
+}
+
+/// 用户自己的 settings.json（这个账号的配置目录 + 用户家目录下不含项目的）里和上下文、压缩有关的设置
+async fn claude_tuning_current(State(app): State<App>, Path(id): Path<String>) -> R<Json<Value>> {
+    let p = crate::claude_profiles::get(&app.store, &id).ok_or_else(LocalError::not_found)?;
+    let (config_dir, state_file) = crate::claude_profiles::config_paths(&app.paths.home, &p);
+    // 不在哪个项目里：工作目录给一个没有 .claude 的地方（家目录的 ~/.claude 会被当成项目设置再读一遍）
+    let nowhere = app.paths.home.join("run").join("no-project");
+    let mut ctx = crate::chat::models::Ctx { config_dir, state_file, workdir: &nowhere, env: Default::default() };
+    crate::chat::models::merge_settings_env(&mut ctx);
+    Ok(Json(tokio::task::block_in_place(|| crate::chat::models::user_tuning(&ctx))))
 }
 
 /// 删掉。另外登录的官方账号先让 Claude Code 自己退出登录（吊销令牌、删 macOS 钥匙串条目），失败也接着删目录。
@@ -3005,6 +3270,11 @@ mod tests {
         assert_eq!(super::ssh_launch_line("/Users/o/My Apps/looklook", "ab12", Family::Posix), "'/Users/o/My Apps/looklook' ssh ab12");
         assert_eq!(super::ssh_launch_line("C:\\Program Files\\Looklook\\looklook.exe", "ab12", Family::Pwsh), "& 'C:\\Program Files\\Looklook\\looklook.exe' ssh ab12");
         assert_eq!(super::ssh_launch_line("C:\\Program Files\\Looklook\\looklook.exe", "ab12", Family::Cmd), "\"C:\\Program Files\\Looklook\\looklook.exe\" ssh ab12");
+        for fam in [Family::Posix, Family::Pwsh, Family::Cmd] {
+            assert_eq!(super::ssh_host_of("custom", &super::ssh_launch_line("C:\\Program Files\\Looklook\\looklook.exe", "ab12", fam)).as_deref(), Some("ab12"));
+        }
+        assert_eq!(super::ssh_host_of("shell", "/usr/bin/looklook ssh ab12"), None);
+        assert_eq!(super::ssh_host_of("custom", "npm run dev"), None);
     }
 
     use super::*;
@@ -3425,11 +3695,32 @@ struct DraftQ {
     workdir: String,
     #[serde(default)]
     q: String,
+    /// Claude Code 账号 / Codex 配置的 ID（空 = 默认的那个）
+    #[serde(default)]
+    profile: String,
 }
 
-/// 草稿页（新会话还没建）：选模型用的列表（那台电脑上的 Claude Code / Codex 自己的）
+/// 草稿页（新会话还没建）：选模型用的列表（那台电脑上的 Claude Code / Codex 自己的，按选的账号 / 配置），
+/// 加上上次在看看里选的（`last`）
 async fn draft_models(State(app): State<App>, Query(q): Query<DraftQ>) -> R<Json<Value>> {
-    Ok(Json(app.chat.tool_models(&q.agent).await?))
+    Ok(Json(app.chat.draft_models(&q.agent, &q.profile).await?))
+}
+
+#[derive(Deserialize)]
+struct ModelMemoryReq {
+    agent: String,
+    #[serde(default)]
+    profile: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
+}
+
+/// 草稿页点过模型菜单、开了会话：记下这次选的（空 = 默认），下次新建时预先选好
+async fn draft_model_memory(State(app): State<App>, Json(b): Json<ModelMemoryReq>) -> R<Json<Value>> {
+    app.chat.draft_remember(&b.agent, &b.profile, b.model.as_deref(), b.effort.as_deref())?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 /// 草稿页：`/`、`$` 提示的命令、技能

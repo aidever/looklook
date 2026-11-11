@@ -3,7 +3,7 @@
 // 终端 / 文件 / Git 的切换在手机和窄屏上放在底部（像 App 的底部标签栏），宽屏放在顶栏。
 // 顶栏、按键条、标签栏都跟着终端配色（设置 → 终端配色），不会出现终端是浅色、上下两头还是深色。
 // 会话页右边打开的每个会话是一个 TermPane（见 Sessions.jsx）。
-import { ArrowLeft, Expand, ExternalLink, Sun, SunDim, FolderOpen, GitBranch, Keyboard, Maximize2, MessagesSquare, Minimize2, Palette, Play, PlugZap, RefreshCw, Shrink, SquareTerminal, TextSelect as TextSelectIcon, WifiOff } from 'lucide-react';
+import { ArrowLeft, Expand, ExternalLink, Sun, SunDim, FolderOpen, GitBranch, Keyboard, Maximize2, MessagesSquare, Minimize2, Palette, Play, PlugZap, RefreshCw, Share2, Shrink, SquareTerminal, TextSelect as TextSelectIcon, WifiOff } from 'lucide-react';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -32,6 +32,7 @@ import { WebPage } from './WebPane.jsx';
 import { useTermFiles } from './TermFiles.jsx';
 import { APP_CHROME, termTheme, termVars } from '../shared/termTheme.js';
 import { useOpenedPing, useSeenPing } from '../shared/board.js';
+import { RunButton } from '../shared/RunActions.jsx';
 import { TipPop, useTip } from '../shared/tips.jsx';
 
 /** 终端页面加载期间的提示：跳动的小点 + 一句人话；等得久了给出刷新按钮。 */
@@ -215,9 +216,25 @@ function useSideTabs(id, tab, setTab, chat, frame, enabled = true) {
 function useClaudeHandoff(id, inst, tab) {
   const { t } = useTranslation();
   const toast = useToast();
-  const on = tab === 'term' && inst?.launch === 'claude' && hasChat(inst) && !inst?.container && inst?.running;
+  const eligible = inst?.launch === 'claude' && hasChat(inst) && !inst?.container && inst?.running;
+  // 只在“切到终端标签”时交：上次看到的标签不是终端。刚打开时标签先按默认的“终端”算、等认出带对话界面才换成“对话”，
+  // 不能把这一下当成切到终端（手机上一打开就把对话交给了终端，跟正在发的消息撞上，两个 Claude 写同一段对话）。
+  // 这个浏览器里记着这个会话上次停在终端标签的，打开就算切过来
+  const last = useRef(undefined);
+  if (last.current === undefined) {
+    let stored = null;
+    try {
+      stored = localStorage.getItem(`ll-tab:${id}`);
+    } catch {
+      /* 读不了就当没记 */
+    }
+    last.current = stored === 'term' ? null : tab;
+  }
   useEffect(() => {
-    if (!on) return;
+    if (!eligible) return;
+    const was = last.current;
+    last.current = tab;
+    if (tab !== 'term' || was === 'term') return;
     api.post(`/instances/${id}/chat/to-terminal`).then(
       (r) => {
         if (r?.state === 'after_turn') toast(t('term.handoff_after_turn'));
@@ -225,7 +242,7 @@ function useClaudeHandoff(id, inst, tab) {
       },
       () => {},
     );
-  }, [on, id]);
+  }, [eligible, tab, id]);
 }
 
 /** 带对话界面的 Claude Code 终端（docs/CLAUDE_UI.md） */
@@ -595,6 +612,14 @@ export function TermPane({ id, inst, active, missing, offline = false, onStart, 
         )}
         {tab !== 'chat' && files.button}
         {running && !inst?.container && <TermTabs tab={tab} onChange={setTab} chat={chat} tip={active} launch={inst?.launch} />}
+        {/* 项目的运行按钮（▶）：每个标签都有，放在标签右边 */}
+        {allowed && inst && !inst.container && <RunButton device={terminalDevice(id)} workdir={inst.workdir} active={active} />}
+        {/* 对话标签：分享这段对话（只读快照，整段或挑几条） */}
+        {tab === 'chat' && chat && (
+          <button type="button" className={iconBtn} onClick={() => window.dispatchEvent(new Event(`ll-chat-share:${id}`))} aria-label={t('share.menu')} title={t('share.menu')}>
+            <Share2 size={16} />
+          </button>
+        )}
         {running && (
           <button type="button" className={iconBtn} onClick={reload} aria-label={t('term.reload')} title={t('term.reload')}>
             <RefreshCw size={16} />
@@ -827,6 +852,7 @@ function TermPage({ id }) {
     tab === 'term' && live && { icon: RefreshCw, label: t('term.reload'), onClick: reloadTerm },
     tab === 'term' && live && { icon: Palette, label: t('term.theme'), onClick: () => setPicking(true) },
     tab === 'term' && live && reconnect.shown && { icon: PlugZap, label: t('term.codex_reconnect'), onClick: reconnect.run },
+    tab === 'chat' && chat && { icon: Share2, label: t('share.menu'), onClick: () => window.dispatchEvent(new Event(`ll-chat-share:${id}`)) },
     { icon: full ? Minimize2 : Maximize2, label: t(full ? 'term.exit_full' : 'term.full'), onClick: toggleFull },
     { icon: ExternalLink, label: t('instance.new_window'), onClick: newWindow },
     touch && wakeLockSupported && { icon: awake ? SunDim : Sun, label: t(awake ? 'term.wake_off' : 'term.wake_on'), onClick: () => setWakeLock(!awake) },
@@ -865,6 +891,7 @@ function TermPage({ id }) {
             <Palette size={18} />
           </button>
         )}
+        {allowed && inst && !inst.container && <RunButton device={terminalDevice(id)} workdir={inst.workdir} size={18} />}
         {tab !== 'chat' && files.button}
         {touch && tab === 'term' && live && (
           <button type="button" className="btn btn-plain btn-icon" onPointerDown={keepFocus} onClick={() => setKeys(!keys)} aria-pressed={keys} aria-label={t('term.keys')} title={t('term.keys')}>

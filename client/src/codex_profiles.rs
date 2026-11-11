@@ -19,6 +19,7 @@ use serde_json::{json, Value};
 
 use crate::error::LocalError;
 use crate::model::LaunchEnv;
+use crate::model_tuning::CodexTuning;
 use crate::store::Store;
 
 pub const OFFICIAL: &str = "official";
@@ -26,6 +27,8 @@ pub const OFFICIAL: &str = "official";
 pub const PROVIDER_PREFIX: &str = "looklook-";
 const LIST_KEY: &str = "codex_profiles";
 const DEFAULT_KEY: &str = "codex_profiles.default";
+/// 本机默认的模型设置（它不在列表里存着）
+const BUILTIN_TUNING_KEY: &str = "codex_profiles.builtin_tuning";
 const MAX_PROFILES: usize = 20;
 const NAME_MAX: usize = 40;
 /// 终端里直接起的 Codex 读 Key 的环境变量（只有一个配置）
@@ -47,6 +50,9 @@ pub struct Profile {
     pub base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// 模型设置：上下文窗口、自动压缩、推理强度等（model_tuning.rs）
+    #[serde(default, skip_serializing_if = "CodexTuning::is_empty")]
+    pub tuning: CodexTuning,
     #[serde(default)]
     pub created_at: String,
 }
@@ -69,24 +75,31 @@ impl Profile {
     fn define(&self, env: LaunchEnv, key_env: &str) -> LaunchEnv {
         let n = self.provider_name();
         let url = self.base_url.as_deref().unwrap_or_default();
-        env.config(format!("model_providers.{n}.name={n}"))
+        let env = env
+            .config(format!("model_providers.{n}.name={n}"))
             .config(format!("model_providers.{n}.base_url={url}"))
             .config(format!("model_providers.{n}.env_key={key_env}"))
-            .config(format!("model_providers.{n}.wire_api=responses"))
+            .config(format!("model_providers.{n}.wire_api=responses"));
+        self.tuning.provider_configs(env, &n)
     }
 
-    /// 选上这个服务商和模型的 `-c`
+    /// 选上这个服务商和模型的 `-c`，加上模型设置
     fn select(&self, env: LaunchEnv) -> LaunchEnv {
         let env = env.config(format!("model_provider={}", self.provider_name()));
-        match self.model.as_deref().filter(|m| crate::model::codex_model_ok(m)) {
+        let env = match self.model.as_deref().filter(|m| crate::model::codex_model_ok(m)) {
             Some(m) => env.config(format!("model={m}")),
             None => env,
-        }
+        };
+        self.tuning.configs(env)
     }
 }
 
 fn builtin() -> Profile {
-    Profile { id: OFFICIAL.into(), name: String::new(), preset: None, provider_id: None, base_url: None, model: None, created_at: String::new() }
+    Profile { id: OFFICIAL.into(), name: String::new(), preset: None, provider_id: None, base_url: None, model: None, tuning: CodexTuning::default(), created_at: String::new() }
+}
+
+fn builtin_of(store: &Store) -> Profile {
+    Profile { tuning: store.get::<CodexTuning>(BUILTIN_TUNING_KEY).ok().flatten().unwrap_or_default(), ..builtin() }
 }
 
 fn stored(store: &Store) -> Vec<Profile> {
@@ -95,7 +108,7 @@ fn stored(store: &Store) -> Vec<Profile> {
 
 /// 本机默认在最前面
 pub fn list(store: &Store) -> Vec<Profile> {
-    std::iter::once(builtin()).chain(stored(store)).collect()
+    std::iter::once(builtin_of(store)).chain(stored(store)).collect()
 }
 
 pub fn get(store: &Store, id: &str) -> Option<Profile> {
@@ -199,6 +212,7 @@ pub fn add(store: &Store, home: &Path, input: Input) -> Result<Profile, LocalErr
         provider_id: input.provider_id.filter(|s| !s.is_empty()),
         base_url: Some(clean_url(input.base_url.as_deref().unwrap_or(""))?),
         model: clean_model(input.model.as_deref())?,
+        tuning: CodexTuning::default(),
         created_at: crate::util::now_rfc3339(),
     };
     save_key(home, &p.id, input.api_key.as_deref())?;
@@ -223,6 +237,21 @@ pub fn update(store: &Store, home: &Path, id: &str, input: Input) -> Result<Prof
         p.model = clean_model(input.model.as_deref())?;
     }
     save_key(home, id, input.api_key.as_deref())?;
+    let out = p.clone();
+    store.set(LIST_KEY, &all)?;
+    Ok(out)
+}
+
+/// 改模型设置（本机默认也能设）。新建、重新启动的会话生效；对话模式下第三方接口的超时要等 app-server 重启
+pub fn set_tuning(store: &Store, id: &str, tuning: CodexTuning) -> Result<Profile, LocalError> {
+    let tuning = tuning.clean()?;
+    if id == OFFICIAL {
+        store.set(BUILTIN_TUNING_KEY, &tuning)?;
+        return Ok(builtin_of(store));
+    }
+    let mut all = stored(store);
+    let p = all.iter_mut().find(|p| p.id == id).ok_or_else(LocalError::not_found)?;
+    p.tuning = tuning;
     let out = p.clone();
     store.set(LIST_KEY, &all)?;
     Ok(out)
@@ -272,7 +301,7 @@ pub fn pinned(store: &Store, instance: &str) -> Option<String> {
 
 /// 这个会话用的配置：记下的（被删了就用默认），没记下的（容器里的、升级前的）用默认
 pub fn for_instance(store: &Store, instance: &str) -> Profile {
-    pinned(store, instance).and_then(|id| get(store, &id)).or_else(|| get(store, &default_id(store))).unwrap_or_else(builtin)
+    pinned(store, instance).and_then(|id| get(store, &id)).or_else(|| get(store, &default_id(store))).unwrap_or_else(|| builtin_of(store))
 }
 
 /// 第三方接口而且 Key 在：能用
@@ -280,8 +309,11 @@ fn usable(home: &Path, p: &Profile) -> bool {
     p.base_url.as_deref().is_some_and(|u| crate::model::check_base_url(u).is_ok()) && key_set(home, &p.id)
 }
 
-/// 终端里直接起的 Codex 用这个配置时的启动环境；本机默认、Key 不在时 None（按官方方式启动）
+/// 终端里直接起的 Codex 用这个配置时的启动环境。本机默认只加模型设置（没设时 None）；第三方接口 Key 不在时 None（按官方方式启动）
 pub fn launch_env(home: &Path, p: &Profile) -> Option<LaunchEnv> {
+    if !p.is_api() {
+        return (!p.tuning.is_empty()).then(|| p.tuning.configs(LaunchEnv::new()));
+    }
     if !usable(home, p) {
         return None;
     }
@@ -302,19 +334,31 @@ pub fn server_env(store: &Store, home: &Path) -> Option<LaunchEnv> {
     }))
 }
 
-/// 对话模式下终端里的 TUI（接到 app-server）：定义这个配置的服务商并选上。Key 不用给：请求由 app-server 发
+/// 对话模式下终端里的 TUI（接到 app-server）：定义这个配置的服务商并选上，加上模型设置（TUI 自己开新对话时用）。
+/// Key 不用给：请求由 app-server 发
 pub fn tui_env(home: &Path, p: &Profile) -> Option<LaunchEnv> {
+    if !p.is_api() {
+        return (!p.tuning.is_empty()).then(|| p.tuning.configs(LaunchEnv::new()));
+    }
     usable(home, p).then(|| p.select(p.define(LaunchEnv::new(), &p.key_env())))
 }
 
-/// `thread/start`、`thread/resume`、`thread/fork` 要加的参数；本机默认不加（用用户自己的配置）
+/// `thread/start`、`thread/resume`、`thread/fork` 要加的参数：第三方接口的服务商和模型，模型设置放在 `config` 里
+/// （本机默认只有模型设置，其余用用户自己的配置）
 pub fn thread_params(home: &Path, p: &Profile) -> Value {
-    if !usable(home, p) {
-        return json!({});
+    let mut v = json!({});
+    let ok = usable(home, p);
+    if ok {
+        v["modelProvider"] = json!(p.provider_name());
+        if let Some(m) = p.model.as_deref().filter(|m| crate::model::codex_model_ok(m)) {
+            v["model"] = json!(m);
+        }
     }
-    let mut v = json!({ "modelProvider": p.provider_name() });
-    if let Some(m) = p.model.as_deref().filter(|m| crate::model::codex_model_ok(m)) {
-        v["model"] = json!(m);
+    // Key 不在的第三方接口按官方方式起，它的设置也不加（模型可能对不上）
+    if ok || !p.is_api() {
+        if let Some(c) = p.tuning.thread_config() {
+            v["config"] = c;
+        }
     }
     v
 }
@@ -405,6 +449,26 @@ mod tests {
         std::fs::remove_file(key_path(&dir, &b.id)).unwrap();
         assert!(launch_env(&dir, &b).is_none(), "Key 不在时按官方方式启动");
         assert!(!server_env(&store, &dir).unwrap().wrap("x", Family::Posix).contains(&b.provider_name()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tuning() {
+        let (dir, store) = tmp_store("tune");
+        let t = CodexTuning { context_window: Some(400_000), effort: Some("high".into()), idle_timeout_secs: Some(600), ..Default::default() };
+        set_tuning(&store, OFFICIAL, t.clone()).unwrap();
+        let me = for_instance(&store, "x");
+        assert_eq!(me.tuning, t);
+        assert_eq!(launch_env(&dir, &me).unwrap().wrap("codex", Family::Posix), " codex -c model_context_window=400000 -c model_reasoning_effort=high");
+        assert_eq!(thread_params(&dir, &me), json!({ "config": { "model_context_window": 400000, "model_reasoning_effort": "high" } }));
+        let a = api(&store, &dir, "a", Some("glm-5.3"));
+        let a = set_tuning(&store, &a.id, t).unwrap();
+        let n = a.provider_name();
+        let cmd = launch_env(&dir, &a).unwrap().wrap("codex", Family::Posix);
+        assert!(cmd.ends_with(&format!("wire_api=responses -c model_providers.{n}.stream_idle_timeout_ms=600000 -c model_provider={n} -c model=glm-5.3 -c model_context_window=400000 -c model_reasoning_effort=high")), "{cmd}");
+        assert!(server_env(&store, &dir).unwrap().wrap("x", Family::Posix).contains("stream_idle_timeout_ms=600000"));
+        assert_eq!(thread_params(&dir, &a)["config"]["model_reasoning_effort"], "high");
+        assert!(set_tuning(&store, &a.id, CodexTuning { verbosity: Some("loud".into()), ..Default::default() }).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

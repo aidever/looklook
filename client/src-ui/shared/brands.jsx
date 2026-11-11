@@ -1,12 +1,12 @@
 // 品牌与系统图标：AI 工具用各自的官方图标（lobehub/icons，MIT），系统用 Apple / Linux / Windows 图标（simple-icons，CC0；
 // Windows 按官方四方格画）。都打包在客户端里，不从网上加载。
 // 电脑标识：每台电脑一种颜色（按电脑列表的顺序自动分配）+ 系统图标，会话页侧栏、会话顶栏、开始页、顶栏的电脑切换都用同一个。
-import { Command, SquareTerminal } from 'lucide-react';
+import { Command, Server, SquareTerminal } from 'lucide-react';
 import { useId } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { deviceName, osLabel, useDevices } from './devices.jsx';
-import { sessionLaunch, sessionMode } from './sessions.jsx';
+import { sessionLaunch, sessionMode, sshHostOf } from './sessions.jsx';
 
 const BRAND = {
   "claude": "<path clip-rule=\"evenodd\" d=\"M20.998 10.949H24v3.102h-3v3.028h-1.487V20H18v-2.921h-1.487V20H15v-2.921H9V20H7.488v-2.921H6V20H4.487v-2.921H3V14.05H0V10.95h3V5h17.998v5.949zM6 10.949h1.488V8.102H6v2.847zm10.51 0H18V8.102h-1.49v2.847z\" fill=\"#D97757\" fill-rule=\"evenodd\"></path>",
@@ -45,6 +45,15 @@ export function SessionIcon({ inst, size = 16, className = '' }) {
   const { t } = useTranslation();
   const launch = sessionLaunch(inst) ?? 'shell';
   const mode = sessionMode(inst);
+  // 连 SSH 主机的会话：服务器图标
+  const ssh = sshHostOf(inst);
+  if (ssh && !mode) {
+    return (
+      <span className={`sess-icon ${className}`} title={t('ssh.group', { name: ssh.name })}>
+        <Server size={size} />
+      </span>
+    );
+  }
   if (mode !== 'term') {
     return (
       <span className={`sess-icon ${className}`} title={mode ? t(`sess.mode.${mode}`) : undefined}>

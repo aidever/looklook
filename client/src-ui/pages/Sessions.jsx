@@ -4,7 +4,7 @@
 // 侧栏每个项目只列最近几个，其余在项目页（Project.jsx）。
 // 项目 = 某台电脑上的一个文件夹（见 shared/sessions.jsx）。电脑用颜色 + 系统图标区分（shared/brands.jsx）。
 // 电脑上会话在右边打开，最近打开的几个在后台保持连接；手机上整页打开 /t/{id}（有按键条）。
-import { AlertCircle, Check, ChevronDown, ChevronsDownUp, ChevronsUpDown, Container, Copy, Eraser, EyeOff, Folder, FolderPlus, History, Laptop, Lightbulb, ListTree, Moon, PanelLeftClose, Pin, PinOff, Play, Plus, Search, SlidersHorizontal, Trash2, X } from 'lucide-react';
+import { AlertCircle, Check, ChevronDown, ChevronsDownUp, ChevronsUpDown, Container, Copy, Eraser, EyeOff, Folder, FolderPlus, History, Laptop, Lightbulb, ListTree, Moon, PanelLeftClose, Pin, PinOff, Play, Plus, Search, Server, SlidersHorizontal, Trash2, X } from 'lucide-react';
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -19,8 +19,9 @@ import { isTouch } from '../shared/KeyBar.jsx';
 import PopMenu from '../shared/PopMenu.jsx';
 import { Link, useRouter } from '../shared/router.jsx';
 import { IdleCleanupDialog } from '../shared/IdleCleanup.jsx';
-import { baseName, customName, groupProjects, isActive as isLive, isDraftProject, lastUsed, projectEntries, projectPath, sessionDir, sessionState, sessionTitle, startedAt, useSessions } from '../shared/sessions.jsx';
+import { baseName, customName, groupProjects, inputAt, isActive as isLive, isDraftProject, projectEntries, projectPath, sessionDir, sessionState, sessionTitle, startedAt, useSessions } from '../shared/sessions.jsx';
 import { isMod, keyLabel } from '../shared/hotkeys.js';
+import KeyHint from '../shared/KeyHint.jsx';
 import { ErrorNote, Spinner, useToast } from '../shared/ui.jsx';
 import { AddProjectDialog } from './AddProject.jsx';
 import { HomeScreenTip, Onboarding } from './Onboarding.jsx';
@@ -280,7 +281,35 @@ function StateDot({ state, title }) {
   return <span className={`sdot sdot-${state}`} title={label} aria-label={label} role="img" />;
 }
 
-function SessionRow({ inst, current, attn, devTag = false }) {
+/** 项目的颜色（最近列表里区分项目用）：按项目键算一个色相，同一个项目每次一样 */
+function projectHue(key) {
+  // FNV-1a，再乘黄金分割取小数：名字只差一个字的项目颜色也拉得开
+  let h = 0x811c9dc5;
+  for (const c of key ?? '') h = Math.imul(h ^ c.charCodeAt(0), 0x01000193) >>> 0;
+  return Math.round(((h * 0.618033988749895) % 1) * 360);
+}
+
+/**
+ * 最近列表里一行下面的小字：项目（颜色点 + 名字）、哪台电脑、你上次输入是多久前。
+ * `x` 是 SessionList 里合成的项目（key、p.name）。
+ */
+function RecentSub({ x, device, when, live }) {
+  const { t } = useTranslation();
+  return (
+    <span className="srow-sub srow-proj">
+      <span className="proj-dot" style={{ '--ph': projectHue(x.key) }} aria-hidden="true" />
+      <span className="ellipsis">{x.p.name}</span>
+      {device && <DeviceTag device={device} />}
+      {when > 0 && <span className="srow-ago" title={live ? t('sess.input_at_tip') : undefined}>{shortAgo(t, when)}</span>}
+    </span>
+  );
+}
+
+/**
+ * 一个会话。`attn`：等你处理（下面小字是项目，右边是要你做什么）；`recent`：最近列表里的一行（下面小字是项目和时间）。
+ * 右边的时间是你上次在这里输入的时间（inputAt），不是 AI 最后输出的时间。
+ */
+function SessionRow({ inst, current, attn, devTag = false, recent = null }) {
   const { t } = useTranslation();
   const devices = useDevices();
   const s = useSessions();
@@ -289,15 +318,23 @@ function SessionRow({ inst, current, attn, devTag = false }) {
   const state = inst.error && !inst.running ? 'error' : sessionState(inst);
   const errorTitle = state === 'error' ? t(`instance.error.${inst.error}`, { defaultValue: t('instance.error.other') }) : undefined;
   const p = attn ? s.projectOf(inst) : null;
-  const dev = (attn || devTag) && devices.multi ? devices.byId(terminalDevice(inst.id)) : null;
-  const when = lastUsed(inst);
+  const dev = (attn || devTag || recent) && devices.multi ? devices.byId(terminalDevice(inst.id)) : null;
+  const when = inputAt(inst);
   const press = usePressActivate(a.primary, a.busy || !a.allowed);
   const title = sessionTitle(inst);
   const mine = customName(inst);
   const dir = sessionDir(inst);
-  const tip = [title, mine && t('sess.my_name', { name: mine }), inst.fg && t('sess.running_cmd', { cmd: inst.fg }), inst.container ? `${inst.container.name}:${dir}` : dir].filter(Boolean).join('\n');
+  const tip = [
+    title,
+    mine && t('sess.my_name', { name: mine }),
+    inst.fg && t('sess.running_cmd', { cmd: inst.fg }),
+    inst.container ? `${inst.container.name}:${dir}` : dir,
+    when > 0 && t('sess.last_input', { when: new Date(when).toLocaleString() }),
+  ]
+    .filter(Boolean)
+    .join('\n');
   return (
-    <div className={`srow ${attn ? 'srow-attn' : ''} ${current ? 'current' : ''}`}>
+    <div className={`srow ${attn ? 'srow-attn' : ''} ${recent ? 'srow-recent' : ''} ${current ? 'current' : ''}`}>
       <button type="button" className="srow-main" {...press} disabled={a.busy || !a.allowed} aria-current={current ? 'page' : undefined} title={tip}>
         <SessionIcon inst={inst} size={16} className="srow-icon" />
         <span className="srow-text">
@@ -308,8 +345,9 @@ function SessionRow({ inst, current, attn, devTag = false }) {
               {dev && <DeviceTag device={dev} />}
             </span>
           )}
+          {!attn && recent && <RecentSub x={recent} device={dev} when={when} live />}
         </span>
-        {devTag && dev && <RowDevice device={dev} />}
+        {devTag && !recent && dev && <RowDevice device={dev} />}
         {a.busy ? (
           <Spinner size={13} />
         ) : attn ? (
@@ -317,7 +355,7 @@ function SessionRow({ inst, current, attn, devTag = false }) {
         ) : (
           <>
             <StateDot state={state} title={errorTitle} />
-            {when > 0 && <span className="srow-when">{shortAgo(t, when)}</span>}
+            {when > 0 && !recent && <span className="srow-when">{shortAgo(t, when)}</span>}
           </>
         )}
       </button>
@@ -342,7 +380,7 @@ function RowDevice({ device }) {
  * 侧栏里的一个以前的对话：点一下接着聊（新建一个会话接着它）。两分钟内还在写的可能正开在别处，先去项目页看提示再选。
  * 离线电脑上的（上次看到的）只显示。
  */
-function ConvSideRow({ p, conv, devTag = false }) {
+function ConvSideRow({ p, conv, devTag = false, recent = null }) {
   const { t } = useTranslation();
   const { status } = useStatus();
   const { navigate } = useRouter();
@@ -385,16 +423,17 @@ function ConvSideRow({ p, conv, devTag = false }) {
     { icon: EyeOff, label: t('hist.hide'), onClick: hide },
   ];
   const devices = useDevices();
-  const dev = devTag ? devices.byId(p.device) : null;
+  const dev = devTag || (recent && devices.multi) ? devices.byId(p.device) : null;
   return (
-    <div className={`srow srow-conv ${off ? 'srow-off' : ''}`}>
+    <div className={`srow srow-conv ${recent ? 'srow-recent' : ''} ${off ? 'srow-off' : ''}`}>
       <button type="button" className="srow-main" {...press} disabled={disabled} title={[conv.title, conv.last].filter(Boolean).join('\n')}>
         <LaunchIcon launch={conv.agent} size={16} className="srow-icon" />
         <span className="srow-text">
           <span className="ellipsis">{conv.title}</span>
+          {recent && <RecentSub x={recent} device={dev} when={when} />}
         </span>
-        {dev && <RowDevice device={dev} />}
-        {busy ? <Spinner size={13} /> : when > 0 && <span className="srow-when">{shortAgo(t, when)}</span>}
+        {dev && !recent && <RowDevice device={dev} />}
+        {busy ? <Spinner size={13} /> : when > 0 && !recent && <span className="srow-when">{shortAgo(t, when)}</span>}
       </button>
       {!off && <PopMenu items={menu} className="btn btn-plain btn-icon srow-more" />}
     </div>
@@ -466,19 +505,35 @@ function ProjectRow({ p, x, open, onToggle, showDevice }) {
   const members = x?.members ?? [p];
   const pinned = members.some((m) => m.pinned);
   const allowed = status.account.allowed && !p.offline;
-  const menu = [
+  // 连 SSH 主机的会话按主机分组：+ 是再开一个连这台的窗口，菜单里去管理 SSH 主机
+  const { navigate } = useRouter();
+  const toast = useToast();
+  const sshNew = async () => {
+    try {
+      const v = await (p.device ? deviceApi(p.device) : deviceApi(null)).post(`/ssh/hosts/${p.ssh.id}/open?new=true`);
+      ui.openSession(v.row?.id ?? v.id);
+    } catch (e) {
+      toast(errorText(t, e), 'error');
+    }
+  };
+  const menu = p.ssh
+    ? [
+        { icon: Plus, label: t('ssh.new_window'), onClick: sshNew, disabled: !allowed },
+        { icon: Server, label: t('ssh.manage'), onClick: () => navigate('/ssh') },
+      ]
+    : [
     { head: t('sess.new') },
     ...quickLaunchItems(t, p, status, allowed, ui),
     'sep',
     !p.container && { icon: ListTree, label: t('sess.open_project'), onClick: () => ui.openProject(p) },
     !p.container && { icon: pinned ? PinOff : Pin, label: t(pinned ? 'sess.unpin' : 'sess.pin'), onClick: () => members.filter((m) => !m.offline).forEach((m) => s.pinProject(m.device, m.workdir, !pinned)) },
     !merged && p.items.length === 0 && { icon: Trash2, label: t('sess.remove_project'), onClick: () => s.removeProject(p.device, p.workdir), danger: true },
-  ];
+      ];
   return (
     <div className={`prow ${p.offline ? 'offline' : ''}`} style={dev ? { '--dc': deviceColor(devices, dev.id) } : undefined}>
-      <button type="button" className="prow-main" onClick={onToggle} aria-expanded={open} title={merged ? [x.members[0].remote, ...members.map((m) => `${deviceName(t, devices.byId(m.device))}: ${m.workdir}`)].join('\n') : `${p.container ? `${p.container.name}:${p.container.dir}` : p.workdir}${dev ? ` · ${deviceName(t, dev)}` : ''}`}>
+      <button type="button" className="prow-main" onClick={onToggle} aria-expanded={open} title={merged ? [x.members[0].remote, ...members.map((m) => `${deviceName(t, devices.byId(m.device))}: ${m.workdir}`)].join('\n') : `${p.ssh ? t('ssh.group', { name: p.ssh.name }) : p.container ? `${p.container.name}:${p.container.dir}` : p.workdir}${dev ? ` · ${deviceName(t, dev)}` : ''}`}>
         <ChevronDown size={14} className="prow-chev" aria-hidden="true" />
-        {p.container ? <Container size={15} className="prow-folder" aria-label={t('sess.in_container', { name: p.container.name })} /> : <Folder size={15} className="prow-folder" aria-hidden="true" />}
+        {p.ssh ? <Server size={15} className="prow-folder" aria-label={t('ssh.group', { name: p.ssh.name })} /> : p.container ? <Container size={15} className="prow-folder" aria-label={t('sess.in_container', { name: p.container.name })} /> : <Folder size={15} className="prow-folder" aria-hidden="true" />}
         <span className="ellipsis grow">{p.name}</span>
         {pinned && <Pin size={12} className="prow-pin" aria-label={t('sess.pinned')} />}
         {attn && <span className="sdot sdot-attn" aria-label={t('sess.state.attn')} role="img" />}
@@ -494,7 +549,7 @@ function ProjectRow({ p, x, open, onToggle, showDevice }) {
       </button>
       {!p.offline && (
         <span className="prow-acts">
-          <button type="button" className="btn btn-plain btn-icon" onClick={() => ui.draftIn(p)} disabled={!allowed} aria-label={t('draft.new_in', { name: p.name })} title={t('sess.new_plus')}>
+          <button type="button" className="btn btn-plain btn-icon" onClick={() => (p.ssh ? sshNew() : ui.draftIn(p))} disabled={!allowed} aria-label={p.ssh ? t('ssh.new_window') : t('draft.new_in', { name: p.name })} title={p.ssh ? t('ssh.new_window') : t('sess.new_plus')}>
             <Plus size={15} />
           </button>
           <PopMenu items={menu} hover className="btn btn-plain btn-icon" label={t('sess.project_menu')} />
@@ -574,7 +629,9 @@ function readDevFilter() {
   return typeof v === 'string' && v !== 'all' ? [v] : [];
 }
 const STATUS = ['all', 'attn', 'running', 'rest'];
-const GROUPS = ['project', 'device', 'recent'];
+const GROUPS = ['project', 'recent', 'device'];
+// “最近”里列多少个，再多的去“以前的对话”
+const RECENT_SHOW = 60;
 
 /** 点到外面、按 Esc 时关掉弹出的筛选。 */
 function usePopover() {
@@ -670,6 +727,22 @@ function DeviceFilter({ value, onChange, online, onOnline, counts }) {
           </label>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * 看法：项目（按项目分组）/ 最近（不分项目，按你最近用过排）/ 电脑（多台电脑时，按电脑分组）。记在浏览器里，下次还是这个。
+ */
+function ViewSwitch({ value, onChange, multi }) {
+  const { t } = useTranslation();
+  return (
+    <div className="seg seg-sm slist-views" role="group" aria-label={t('sess.group_label')}>
+      {GROUPS.filter((g) => g !== 'device' || multi).map((g) => (
+        <button key={g} type="button" aria-pressed={value === g} onClick={() => onChange(g)} title={t(`sess.view_tip.${g}`)}>
+          {t(`sess.view.${g}`)}
+        </button>
+      ))}
     </div>
   );
 }
@@ -850,14 +923,16 @@ export function SessionList({ currentId, onCollapse }) {
   if (s.loading) {
     body = <div className="slist-loading"><Spinner size={16} /></div>;
   } else if (groupBy === 'recent') {
-    // 按时间：不分项目，在运行的和停了的、以前的对话放在一起按最近用过排
+    // 最近：不分项目，在运行的、停了的终端和以前的对话放在一起，按你最近一次输入排（以前的对话按它最后写的时间）。
+    // 每行下面小字标出项目（颜色点 + 名字）；在运行、等你处理看右边的状态点，等你处理的另外在上面列出来
     const rows = projects.flatMap((x) => [...x.live, ...x.rest].map((r) => ({ ...r, x }))).filter((r) => !r.m.offline || r.kind === 'conv');
     rows.sort(byAt);
-    const max = filtering ? rows.length : 60;
+    const max = filtering ? rows.length : RECENT_SHOW;
     body = (
-      <section className="sproject srecent">
+      <section className="sproject srecent" aria-label={t('sess.view.recent')}>
+        {ui.draftAt && <DraftSideRow />}
         {rows.slice(0, max).map((r) =>
-          r.kind === 'inst' ? <SessionRow key={r.key} inst={r.inst} current={r.inst.id === currentId} attn devTag={multi} /> : <ConvSideRow key={r.key} p={r.m} conv={r.conv} devTag={multi} />,
+          r.kind === 'inst' ? <SessionRow key={r.key} inst={r.inst} current={r.inst.id === currentId} recent={r.x} /> : <ConvSideRow key={r.key} p={r.m} conv={r.conv} recent={r.x} />,
         )}
         {rows.length > max && (
           <button type="button" className="slist-more" onClick={() => navigate('/history')}>
@@ -905,9 +980,6 @@ export function SessionList({ currentId, onCollapse }) {
     );
   }
   const viewMenu = [
-    { head: t('sess.group_label') },
-    ...GROUPS.filter((g) => g !== 'device' || multi).map((g) => ({ label: t(`sess.group.${g}`), checked: groupBy === g, onClick: () => setGroupBy(g) })),
-    'sep',
     groupBy !== 'recent' && projects.length > 0 && { icon: allOpen ? ChevronsDownUp : ChevronsUpDown, label: t(allOpen ? 'sess.fold_all' : 'sess.unfold_all'), onClick: foldAll },
     { icon: FolderPlus, label: t('sess.add_project'), onClick: () => ui.addProject() },
     { icon: History, label: t('hist.title'), onClick: () => navigate('/history') },
@@ -939,17 +1011,18 @@ export function SessionList({ currentId, onCollapse }) {
             </button>
           </label>
         )}
-        {(multi || searchable) && (
+        {(multi || searchable || s.projects.length > 0) && (
           <div className="sfilters" role="group" aria-label={t('sess.filters')}>
+            {s.projects.length > 0 && <ViewSwitch value={groupBy === 'device' && !multi ? 'project' : groupBy} onChange={setGroupBy} multi={multi} />}
             {multi && <DeviceFilter value={picked} onChange={setDevFilter} online={onlineOnly} onOnline={setOnline} counts={counts} />}
-            <StatusFilter value={status} onChange={setStatus} />
+            {(multi || searchable) && <StatusFilter value={status} onChange={setStatus} />}
           </div>
         )}
       </div>
       <div className="slist-body">
         {s.error && <ErrorNote error={s.error} />}
         <SessionTips attn={attn.length > 0} />
-        {attn.length > 0 && groupBy !== 'recent' && (
+        {attn.length > 0 && (
           <section className="sattn" aria-label={t('sess.attention')}>
             <h3 className="slist-label slist-label-warn">
               <AlertCircle size={13} aria-hidden="true" />
@@ -958,7 +1031,10 @@ export function SessionList({ currentId, onCollapse }) {
             {attn.map((i) => <SessionRow key={i.id} inst={i} attn current={i.id === currentId} />)}
           </section>
         )}
-        {groupBy !== 'recent' && projects.length > 0 && <h3 className="slist-label slist-label-head">{t(groupBy === 'device' && multi ? 'sess.by_device' : 'sess.projects')}</h3>}
+        {/* 上面有“需要你处理”时才加小标题分开；平时上面的“项目 / 最近”已经说明了下面是什么 */}
+        {attn.length > 0 && projects.length > 0 && (
+          <h3 className="slist-label slist-label-head">{t(groupBy === 'recent' ? 'sess.recent_head' : groupBy === 'device' && multi ? 'sess.by_device' : 'sess.projects')}</h3>
+        )}
         {body}
         {!s.loading && filtering && projects.length === 0 && attn.length === 0 && <p className="slist-note">{t('sess.no_match')}</p>}
         {match && (
@@ -976,6 +1052,8 @@ export function SessionList({ currentId, onCollapse }) {
             </button>
           </div>
         )}
+        {/* 列表最后一行很淡的快捷键小提示（只在电脑上） */}
+        {!filtering && <KeyHint className="slist-keyhint" ids={['quick', 'new', 'pane', 'help', 'files_page', 'settings', 'side_tab']} />}
       </div>
     </div>
   );

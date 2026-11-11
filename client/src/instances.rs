@@ -31,6 +31,17 @@ pub const PORT_RANGE: (u16, u16) = (41000, 41999);
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const TMUX_SOCKET: &str = "looklook";
 const LAUNCHES: &[&str] = &["shell", "codex", "claude", "opencode", "dsh", "custom"];
+/// 设了 `TMUX_TMPDIR`、目录却不在了（测试的临时目录被删）：tmux 会退回 /tmp，连到这台机器上别的看看的服务。
+/// 先把目录建回来
+fn ensure_tmux_tmpdir() {
+    if let Some(d) = std::env::var_os("TMUX_TMPDIR").filter(|d| !d.is_empty()) {
+        let d = std::path::Path::new(&d);
+        if !d.is_dir() {
+            let _ = std::fs::create_dir_all(d);
+        }
+    }
+}
+
 /// 多久扫一次游离的 tmux 会话（[`Instances::sweep_orphans`]）
 const ORPHAN_SWEEP: Duration = Duration::from_secs(60);
 /// 有对话界面的启动类型（Claude Code：docs/CLAUDE_UI.md；Codex：docs/CODEX_UI.md）；
@@ -124,7 +135,18 @@ pub struct Instances {
     titles: Mutex<Probed>,
     /// 上次把“打开过”写进数据库的时间（[`Instances::mark_opened`] 一分钟最多写一次）
     opened: Mutex<HashMap<String, Instant>>,
+    /// 用户最近一次输入的时间（毫秒）和上次写进数据库的时间，见 [`Instances::note_input`]
+    inputs: Mutex<HashMap<String, (i64, i64)>>,
 }
+
+/// 用户最近一次在这个会话里输入的时间（毫秒）：终端里打字、粘贴，对话里发消息、回答确认、停下。
+/// 会话列表按它排（AI 在后台输出不算，列表不会跟着跳）
+fn input_key(id: &str) -> String {
+    format!("instance_input.{id}")
+}
+
+/// 输入时间多久最多写一次数据库（内存里每次都更新；客户端重启最多丢这么久）
+const INPUT_SAVE_MS: i64 = 15_000;
 
 /// 最近一次在界面上打开这个会话的时间（毫秒，界面开着它时每几分钟报一次）：自动停掉很久没打开的会话用（idle_stop.rs）
 fn opened_key(id: &str) -> String {
@@ -189,6 +211,8 @@ pub struct View {
     pub task_alive: Option<bool>,
     pub started_at: Option<String>,
     pub last_activity_at: Option<String>,
+    /// 用户最近一次在这里输入的时间（见 [`Instances::note_input`]）；没记过时 null
+    pub input_at: Option<String>,
     pub error: Option<String>,
     pub url: String,
     /// 以全部权限启动（仅 Codex / Claude Code / OpenCode）
@@ -341,6 +365,7 @@ impl Instances {
             first_resume: Mutex::new(HashMap::new()),
             titles: Mutex::new(Probed::default()),
             opened: Mutex::new(HashMap::new()),
+            inputs: Mutex::new(HashMap::new()),
         })
     }
 
@@ -408,6 +433,7 @@ impl Instances {
             task_alive: sessions.map(|_| sess.is_some()),
             started_at: sess.map(|(c, _)| ts(*c)),
             last_activity_at: sess.map(|(_, a)| ts(*a)),
+            input_at: self.input_at(&row.id).map(crate::util::fmt_ms),
             error: lock(&self.health).get(&row.id).and_then(|h| h.error.clone()),
             url: format!("/i/{}/", row.id),
             row,
@@ -884,6 +910,36 @@ impl Instances {
         let _ = self.store.set(&opened_key(id), &crate::util::system_ms());
     }
 
+    /// 用户在这个会话里输入了（终端里按键、粘贴，见 gateway/input_tap.rs；
+    /// 对话里发消息、编辑重发、回答确认和提问、停下；飞书里发来的；DSH 网页版里发消息）
+    pub fn note_input(&self, id: &str) {
+        let now = crate::util::system_ms();
+        let save = {
+            let mut m = lock(&self.inputs);
+            let e = m.entry(id.to_string()).or_insert((0, 0));
+            e.0 = now;
+            let due = now - e.1 >= INPUT_SAVE_MS;
+            if due {
+                e.1 = now;
+            }
+            due
+        };
+        // 只记还在的会话（不给乱写的 id 留下记录）
+        if save && self.store.instance(id).ok().flatten().is_some() {
+            let _ = self.store.set(&input_key(id), &now);
+        }
+    }
+
+    /// 用户最近一次输入的时间（毫秒）：内存里的，没有时读数据库
+    pub fn input_at(&self, id: &str) -> Option<i64> {
+        if let Some(&(at, _)) = lock(&self.inputs).get(id) {
+            return (at > 0).then_some(at);
+        }
+        let at = self.store.get::<i64>(&input_key(id)).ok().flatten().unwrap_or(0);
+        lock(&self.inputs).entry(id.to_string()).or_insert((at, at));
+        (at > 0).then_some(at)
+    }
+
     /// 最近一次打开的时间（毫秒）。没记过的（这个功能之前建的会话）从现在算起，免得一升级就被当成很久没打开
     pub fn opened_at(&self, id: &str) -> i64 {
         if let Ok(Some(at)) = self.store.get::<i64>(&opened_key(id)) {
@@ -922,6 +978,9 @@ impl Instances {
         let _ = self.store.remove(&resume_key(id));
         let _ = self.store.remove(&opened_key(id));
         let _ = self.store.remove(&idle_resume_key(id));
+        let _ = self.store.remove(&input_key(id));
+        lock(&self.inputs).remove(id);
+        let _ = self.store.remove(&crate::run_actions::mark_key(id));
         crate::claude_profiles::unpin(&self.store, id);
         crate::codex_profiles::unpin(&self.store, id);
         lock(&self.health).remove(id);
@@ -1017,6 +1076,16 @@ impl Instances {
                 }
                 d
             }
+        }
+    }
+
+    /// 会话里各面板的进程号（运行按钮看命令跑完没有）。不是 tmux、会话不在时为空
+    pub async fn pane_pids(&self, id: &str) -> Vec<u32> {
+        let Backend::Tmux(_) = self.backend else { return vec![] };
+        let target = format!("{}:", exact(&Self::session_name(id)));
+        match self.tmux(&["list-panes", "-s", "-t", &target, "-F", "#{pane_pid}"]).await {
+            Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.trim().parse().ok()).collect(),
+            _ => vec![],
         }
     }
 
@@ -1196,6 +1265,13 @@ impl Instances {
                 "claude" | "codex" => self.launch_command(row).map(|c| format!("{c} {}", crate::shells::quote_arg(p, shell.family))),
                 _ => self.launch_command(row),
             },
+        };
+        // 运行按钮开的会话（run_actions.rs）：Ctrl+C / “停止”打断命令后终端留着、输出还在
+        let launch = match launch {
+            Some(c) if row.launch == "custom" && self.store.get::<crate::run_actions::Mark>(&crate::run_actions::mark_key(&row.id)).ok().flatten().is_some() => {
+                Some(crate::run_actions::keep_on_interrupt(&c, Some(&shell)))
+            }
+            other => other,
         };
         Ok(match launch.filter(|c| !c.trim().is_empty()) {
             None => (shell.interactive(), None),
@@ -1379,14 +1455,21 @@ impl Instances {
     }
 
     /// 对话模式（stream-json）的 Claude Code 交给终端：在面板的 shell 里用同一个账号、同样的权限参数打开
-    /// `claude --resume <会话>` 的 TUI（不带对话界面的 hooks：这时对话页只看，见 `chat::claude_chat` 的“交给终端”）。
+    /// `claude --resume <会话>` 的 TUI，带着对话界面的 hooks：对话页跟着显示在干活 / 空闲，TUI 里的提问、确认也挂到对话页上，
+    /// 两边都能答（见 `chat::claude_chat` 的“交给终端”）。hooks 配置写不了时退回只带 Bypass 警告那份。
     pub fn claude_tui_resume_line(&self, id: &str, session: &str) -> Result<String, LocalError> {
         let row = self.store.instance(id)?.ok_or_else(LocalError::not_found)?;
         if !self.claude_sdk_mode(&row) || !crate::history::valid_id(session) {
             return Err(LocalError::new("CHAT_UNAVAILABLE"));
         }
         let cmd = launch_command_line(&row, self.opts(id), crate::platform::is_root()).ok_or_else(|| LocalError::new("CHAT_UNAVAILABLE"))?;
-        let cmd = format!("{} --resume {session}", self.with_terminal_settings(&row, cmd));
+        let cmd = match crate::chat::hooks::ensure_settings(&self.paths) {
+            Ok(settings) => with_chat(&row, &cmd, &settings, Some(session)),
+            Err(e) => {
+                tracing::warn!(error = %e, "无法写入对话界面的 hooks 配置，终端里的 Claude Code 不带 hooks");
+                format!("{} --resume {session}", self.with_terminal_settings(&row, cmd))
+            }
+        };
         let shell = crate::shells::resolve(&row.shell, &Settings::load(&self.store).default_shell)?;
         let cmd = with_launch_program(&row, &cmd, shell.family);
         Ok(self.model_wrap(&row, &crate::shells::adapt_for(&cmd, shell.family), shell.family))
@@ -1459,6 +1542,7 @@ impl Instances {
     async fn tmux(&self, args: &[&str]) -> Result<std::process::Output, LocalError> {
         let Backend::Tmux(tmux) = &self.backend else { return Err(LocalError::new("NO_TMUX")) };
         let _ = write_tmux_conf(&self.paths.tmux_conf());
+        ensure_tmux_tmpdir();
         let mut cmd = Command::new(tmux);
         // 超时就结束它：不然卡住的 tmux 客户端会一直留着
         cmd.args(self.tmux_base_args()).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
@@ -1749,18 +1833,21 @@ impl Instances {
     /// 结束游离的 tmux 会话：终端已经删了、或者已经停止了，会话却还在（停止时 kill-session 没成功、客户端在中途被结束）。
     /// 只看看看自己的 tmux 服务里 `ll_<终端 ID>` 这样的会话；连着两次（间隔 [`ORPHAN_SWEEP`]）都是游离的才结束，
     /// 避免和正在新建、启动的终端撞上。返回这一次看到的游离会话，下一次用。
+    ///
+    /// 只结束自己数据库里有、已经停止的终端的会话；数据库里没有的不动：同一个 tmux 服务可能还有别的看看在用
+    /// （2026-11-11：测试用的客户端 TMUX_TMPDIR 被删后 tmux 退回 /tmp，连上了用户的服务，把用户所有终端当游离的结束了）。
+    /// 删掉的终端在删除时已经结束了会话
     async fn sweep_orphans(&self, before: HashSet<String>) -> HashSet<String> {
         let _g = self.op.lock().await;
         let (Some(sessions), Ok(rows)) = (self.tmux_sessions().await, self.store.instances()) else { return before };
-        let live: HashSet<String> = rows.iter().filter(|r| r.want_running).map(|r| Self::session_name(&r.id)).collect();
-        let now: HashSet<String> = sessions.into_keys().filter(|n| n.starts_with("ll_") && !live.contains(n)).collect();
+        let stopped: HashSet<String> = rows.iter().filter(|r| !r.want_running).map(|r| Self::session_name(&r.id)).collect();
+        let now: HashSet<String> = sessions.into_keys().filter(|n| stopped.contains(n)).collect();
         for name in now.intersection(&before) {
             let id = &name["ll_".len()..];
             let doomed = self.task_processes(id).await;
             crate::proctree::signal(&doomed);
             let ok = self.tmux(&["kill-session", "-t", &exact(name)]).await.is_ok_and(|o| o.status.success());
-            let known = rows.iter().any(|r| r.id == id);
-            tracing::info!(session = %name, deleted = !known, ok, "结束游离的终端会话");
+            tracing::info!(session = %name, ok, "结束游离的终端会话");
             if !doomed.is_empty() {
                 crate::proctree::reap(doomed).await;
             }

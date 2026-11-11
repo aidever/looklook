@@ -23,6 +23,7 @@ use serde_json::{json, Value};
 
 use crate::error::LocalError;
 use crate::model::LaunchEnv;
+use crate::model_tuning::ClaudeTuning;
 use crate::store::Store;
 
 /// 本机默认账号（`~/.claude`）的 ID：一直在，不能删
@@ -98,12 +99,26 @@ pub struct Profile {
     pub models: Models,
     #[serde(default)]
     pub auth: Auth,
+    /// 模型设置：上下文窗口、自动压缩等（model_tuning.rs）
+    #[serde(default, skip_serializing_if = "ClaudeTuning::is_empty")]
+    pub tuning: ClaudeTuning,
     #[serde(default)]
     pub created_at: String,
 }
 
 fn builtin() -> Profile {
-    Profile { id: OFFICIAL.into(), kind: Kind::Official, name: String::new(), provider_id: None, preset: None, base_url: None, models: Models::default(), auth: Auth::Bearer, created_at: String::new() }
+    Profile {
+        id: OFFICIAL.into(),
+        kind: Kind::Official,
+        name: String::new(),
+        provider_id: None,
+        preset: None,
+        base_url: None,
+        models: Models::default(),
+        auth: Auth::Bearer,
+        tuning: ClaudeTuning::default(),
+        created_at: String::new(),
+    }
 }
 
 /// 本机默认账号的改名、从列表里去掉（kv `claude_profiles.builtin`）。去掉只是不显示、不能选：
@@ -116,6 +131,8 @@ struct BuiltinOpts {
     name: String,
     #[serde(default)]
     hidden: bool,
+    #[serde(default, skip_serializing_if = "ClaudeTuning::is_empty")]
+    tuning: ClaudeTuning,
 }
 
 fn builtin_opts(store: &Store) -> BuiltinOpts {
@@ -123,7 +140,8 @@ fn builtin_opts(store: &Store) -> BuiltinOpts {
 }
 
 fn builtin_of(store: &Store) -> Profile {
-    Profile { name: builtin_opts(store).name, ..builtin() }
+    let o = builtin_opts(store);
+    Profile { name: o.name, tuning: o.tuning, ..builtin() }
 }
 
 fn stored(store: &Store) -> Vec<Profile> {
@@ -244,7 +262,7 @@ pub fn add(store: &Store, home: &Path, input: Input) -> Result<Profile, LocalErr
         Kind::Api => clean_name(input.name.as_deref())?,
         Kind::Official => clean_name(input.name.as_deref()).unwrap_or_default(),
     };
-    let mut p = Profile { id, kind, name, provider_id: None, preset: None, base_url: None, models: Models::default(), auth: Auth::Bearer, created_at: crate::util::now_rfc3339() };
+    let mut p = Profile { id, kind, name, created_at: crate::util::now_rfc3339(), ..builtin() };
     if kind == Kind::Api {
         let url = input.base_url.as_deref().unwrap_or("").trim().trim_end_matches('/').to_string();
         crate::model::check_base_url(&url)?;
@@ -294,6 +312,21 @@ pub fn update(store: &Store, home: &Path, id: &str, input: Input) -> Result<Prof
         }
         save_key(home, id, input.api_key.as_deref())?;
     }
+    let out = p.clone();
+    store.set(LIST_KEY, &all)?;
+    Ok(out)
+}
+
+/// 改模型设置（哪个配置都行，本机默认账号的记在 BUILTIN_KEY 里）。新建、重新启动的会话生效
+pub fn set_tuning(store: &Store, id: &str, tuning: ClaudeTuning) -> Result<Profile, LocalError> {
+    let tuning = tuning.clean()?;
+    if id == OFFICIAL {
+        store.set(BUILTIN_KEY, &BuiltinOpts { tuning, ..builtin_opts(store) })?;
+        return Ok(builtin_of(store));
+    }
+    let mut all = stored(store);
+    let p = all.iter_mut().find(|p| p.id == id).ok_or_else(LocalError::not_found)?;
+    p.tuning = tuning;
     let out = p.clone();
     store.set(LIST_KEY, &all)?;
     Ok(out)
@@ -372,15 +405,15 @@ pub fn pinned(store: &Store, instance: &str) -> Option<String> {
     store.get::<String>(&pin_key(instance)).ok().flatten()
 }
 
-/// 用这个配置启动 Claude Code 时要加的环境变量；本机默认账号、或第三方接口的 Key 不在时为 None（按官方方式启动）。
+/// 用这个配置启动 Claude Code 时要加的环境变量（含模型设置）；本机默认账号没设模型设置、或第三方接口的 Key 不在时为 None（按官方方式启动）。
 pub fn launch_env(home: &Path, p: &Profile) -> Option<LaunchEnv> {
-    match p.kind {
-        Kind::Official if p.id == OFFICIAL => None,
+    let env = match p.kind {
+        Kind::Official if p.id == OFFICIAL => (!p.tuning.is_empty()).then(LaunchEnv::new)?,
         Kind::Official => {
             if let Err(e) = prepare_dir(home, &p.id) {
                 tracing::warn!(error = %e, profile = %p.id, "准备 Claude Code 账号目录失败");
             }
-            Some(LaunchEnv::new().lit("CLAUDE_CONFIG_DIR", account_dir(home, &p.id).display().to_string()))
+            LaunchEnv::new().lit("CLAUDE_CONFIG_DIR", account_dir(home, &p.id).display().to_string())
         }
         Kind::Api => {
             let url = p.base_url.as_deref().filter(|u| crate::model::check_base_url(u).is_ok())?;
@@ -397,9 +430,10 @@ pub fn launch_env(home: &Path, p: &Profile) -> Option<LaunchEnv> {
                     env = env.lit(k, v.clone());
                 }
             }
-            Some(env)
+            env
         }
-    }
+    };
+    Some(p.tuning.env(env, p.kind == Kind::Api))
 }
 
 /// Claude Code 启动时的几个确认用户不用管（小白看不懂，只会多一道坎），启动前在 `.claude.json` 里写成确认过了，
@@ -1071,6 +1105,17 @@ mod tests {
         assert_eq!(list(&store)[0].name, "我的");
         update(&store, &dir, OFFICIAL, Input { name: Some("".into()), ..Default::default() }).unwrap();
         assert_eq!(get(&store, OFFICIAL).unwrap().name, "");
+        // 模型设置：本机默认账号也能设，设了才带环境变量；改名不丢
+        assert!(launch_env(&dir, &get(&store, OFFICIAL).unwrap()).is_none());
+        set_tuning(&store, OFFICIAL, ClaudeTuning { no_auto_compact: true, context_window: Some(300_000), ..Default::default() }).unwrap();
+        update(&store, &dir, OFFICIAL, Input { name: Some("x".into()), ..Default::default() }).unwrap();
+        let cmd = launch_env(&dir, &get(&store, OFFICIAL).unwrap()).unwrap().wrap("claude", crate::shells::Family::Posix);
+        assert_eq!(cmd, "DISABLE_AUTO_COMPACT='1' claude", "上下文窗口只给第三方接口");
+        assert!(set_tuning(&store, OFFICIAL, ClaudeTuning { max_output: Some(1), ..Default::default() }).is_err());
+        let api = add(&store, &dir, Input { kind: Some(Kind::Api), name: Some("R".into()), base_url: Some("https://r.example.com".into()), api_key: Some("sk-1".into()), ..Default::default() }).unwrap();
+        set_tuning(&store, &api.id, ClaudeTuning { context_window: Some(300_000), ..Default::default() }).unwrap();
+        let cmd = launch_env(&dir, &get(&store, &api.id).unwrap()).unwrap().wrap("claude", crate::shells::Family::Posix);
+        assert!(cmd.ends_with(" CLAUDE_CODE_MAX_CONTEXT_TOKENS='300000' claude"), "{cmd}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1232,7 +1277,7 @@ mod tests {
     fn first_run_skipped_once() {
         let (dir, _store) = tmp_store("firstrun");
         let read = |f: &Path| -> Value { serde_json::from_slice(&std::fs::read(f).unwrap()).unwrap() };
-        let p = Profile { id: "acct1".into(), kind: Kind::Official, name: "a".into(), provider_id: None, preset: None, base_url: None, models: Models::default(), auth: Auth::Bearer, created_at: String::new() };
+        let p = Profile { id: "acct1".into(), kind: Kind::Official, name: "a".into(), provider_id: None, preset: None, base_url: None, models: Models::default(), auth: Auth::Bearer, tuning: ClaudeTuning::default(), created_at: String::new() };
         let (cfg, state) = config_paths(&dir, &p);
         // 信任记在工作目录本身；没有文件时建一个，用户设置不碰
         let wd = dir.join("repo/src/a");
@@ -1270,7 +1315,7 @@ mod tests {
     #[test]
     fn first_run_when_state_is_a_directory() {
         let (dir, _store) = tmp_store("firstdir");
-        let p = Profile { id: "acct3".into(), kind: Kind::Official, name: "a".into(), provider_id: None, preset: None, base_url: None, models: Models::default(), auth: Auth::Bearer, created_at: String::new() };
+        let p = Profile { id: "acct3".into(), kind: Kind::Official, name: "a".into(), provider_id: None, preset: None, base_url: None, models: Models::default(), auth: Auth::Bearer, tuning: ClaudeTuning::default(), created_at: String::new() };
         let cfg = account_dir(&dir, &p.id);
         // Docker 把不存在的 .claude.json 映射成了目录：写到 .config.json，Claude Code 下次启动用它
         std::fs::create_dir_all(cfg.join(".claude.json")).unwrap();
@@ -1285,7 +1330,7 @@ mod tests {
     #[test]
     fn first_run_respects_claude_lock() {
         let (dir, _store) = tmp_store("firstlock");
-        let p = Profile { id: "acct2".into(), kind: Kind::Official, name: "a".into(), provider_id: None, preset: None, base_url: None, models: Models::default(), auth: Auth::Bearer, created_at: String::new() };
+        let p = Profile { id: "acct2".into(), kind: Kind::Official, name: "a".into(), provider_id: None, preset: None, base_url: None, models: Models::default(), auth: Auth::Bearer, tuning: ClaudeTuning::default(), created_at: String::new() };
         let (cfg, state) = config_paths(&dir, &p);
         std::fs::create_dir_all(&cfg).unwrap();
         let lock = cfg.join(".claude.json.lock");
@@ -1318,7 +1363,7 @@ mod tests {
     #[ignore]
     fn first_run_with_running_claude() {
         let (dir, _store) = tmp_store("firstlive");
-        let p = Profile { id: "live".into(), kind: Kind::Official, name: "a".into(), provider_id: None, preset: None, base_url: None, models: Models::default(), auth: Auth::Bearer, created_at: String::new() };
+        let p = Profile { id: "live".into(), kind: Kind::Official, name: "a".into(), provider_id: None, preset: None, base_url: None, models: Models::default(), auth: Auth::Bearer, tuning: ClaudeTuning::default(), created_at: String::new() };
         let (cfg, state) = config_paths(&dir, &p);
         let (x, y) = (dir.join("x"), dir.join("y"));
         std::fs::create_dir_all(&x).unwrap();

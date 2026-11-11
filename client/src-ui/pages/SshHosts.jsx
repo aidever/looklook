@@ -3,7 +3,7 @@
 // 选好后显示脱敏的概况（算法、指纹、首尾几个字符），“系统密钥”也列出 ssh 会试的钥匙。可以经跳板机（另一台保存的主机）连接，
 // 添加主机时也能顺手新建跳板机；目标机的密钥配在跳板机上的，登录方式选“跳板机代登”，这台不用填任何密码 / 私钥。标了“允许 AI 使用”的主机，AI 助手可以经 MCP（“AI 助手”页）运行命令，同样拿不到密码。
 // 测试连接用 `ssh -v`：添加 / 修改时保存前就能测（新主机保存后也自动测一次），失败时说清卡在哪一步、为什么、怎么办，附完整日志。
-import { ArrowDownToLine, Bot, CheckCircle2, FolderOpen, KeyRound, LockKeyhole, Pencil, Play, Plus, PlugZap, Server, Trash2, Upload, Waypoints } from 'lucide-react';
+import { AppWindow, ArrowDownToLine, Bot, CheckCircle2, FolderOpen, KeyRound, LockKeyhole, Pencil, Play, Plus, PlugZap, Server, Trash2, Upload, Waypoints } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -13,6 +13,8 @@ import { errorText } from '../shared/i18n.js';
 import { Link, useRouter } from '../shared/router.jsx';
 import { Button, Card, CopyButton, Empty, ErrorNote, Field, Modal, Note, PasswordInput, Skeleton, Switch, useConfirm, useLoad, useToast } from '../shared/ui.jsx';
 import { useDevices } from '../shared/devices.jsx';
+import { sshHostOf, useSessions } from '../shared/sessions.jsx';
+import { opensInPage } from './Sessions.jsx';
 import { More, PageHead } from '../shared/page.jsx';
 import PopMenu from '../shared/PopMenu.jsx';
 import { Seg } from './Settings.jsx';
@@ -577,11 +579,23 @@ function HostRow({ h, hosts, ai, autoTest, onEdit, onChanged }) {
   const confirm = useConfirm();
   const [busy, setBusy] = useState(null);
   const [test, setTest] = useState(null);
-  const open = async () => {
+  const sessions = useSessions();
+  // 已经开着、连这台的会话：“连接”直接回到它（不再每点一次开一个新的），菜单里能再开一个
+  const live = (sessions?.items ?? []).filter((i) => i.running && sshHostOf(i)?.id === h.id);
+  // 跟会话列表里点一下一样：电脑上在会话页的标签里打开，手机上整页打开
+  const go = (id) => {
+    if (opensInPage()) {
+      sessions?.openTab(id);
+      sessions?.openRecent(id);
+      navigate(`/s/${id}`);
+    } else navigate(`/t/${id}`);
+  };
+  const open = async (fresh = false) => {
     setBusy('open');
     try {
-      const inst = await api.post(`/ssh/hosts/${h.id}/open`);
-      navigate(`/t/${inst.row?.id ?? inst.id}`);
+      const inst = await api.post(`/ssh/hosts/${h.id}/open${fresh ? '?new=true' : ''}`);
+      sessions?.reload?.();
+      go(inst.row?.id ?? inst.id);
     } catch (e) {
       toast(errorText(t, e), 'error');
     } finally {
@@ -632,6 +646,7 @@ function HostRow({ h, hosts, ai, autoTest, onEdit, onChanged }) {
   const AuthIcon = h.auth === 'password' ? LockKeyhole : h.auth === 'jump' ? Waypoints : KeyRound;
   // 一行一台：名字和地址，右边只有“连接”这一个按钮；测试、AI 权限、编辑、删除都在“⋯”里
   const menu = [
+    live.length > 0 && { icon: AppWindow, label: t('ssh.new_window'), onClick: () => open(true), disabled: Boolean(busy) || !status.account.allowed },
     { icon: PlugZap, label: t('ssh.test'), onClick: doTest, disabled: Boolean(busy) },
     { icon: Bot, label: t('ssh.allow_ai'), checked: h.allow_ai, disabled: aiBusy, onClick: () => toggleAi(!h.allow_ai) },
     'sep',
@@ -671,8 +686,8 @@ function HostRow({ h, hosts, ai, autoTest, onEdit, onChanged }) {
             )}
           </span>
         </div>
-        <Button icon={Play} busy={busy === 'open'} disabled={!status.account.allowed || Boolean(busy)} onClick={open}>
-          {t('ssh.connect')}
+        <Button icon={live.length ? AppWindow : Play} variant={live.length ? 'ghost' : undefined} busy={busy === 'open'} disabled={!status.account.allowed || Boolean(busy)} onClick={() => open(false)} title={live.length ? t('ssh.open_live_hint', { count: live.length }) : undefined}>
+          {t(live.length ? 'ssh.open_live' : 'ssh.connect')}
         </Button>
         <PopMenu items={menu} label={`${t('action.more')} · ${h.name}`} />
       </div>

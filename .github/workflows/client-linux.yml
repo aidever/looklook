@@ -72,8 +72,8 @@ jobs:
       - name: 构建工具
         run: |
           set -euo pipefail
-          sudo apt-get update -q
-          sudo apt-get install -y -q python3-fonttools python3-brotli
+          # 字体子集工具从 PyPI 装，不走 apt
+          python3 -m pip install -q --break-system-packages --retries 5 fonttools brotli
           curl -fsSL --retry 3 -o /tmp/zig.tar.xz "https://ziglang.org/download/$ZIG_VERSION/zig-x86_64-linux-$ZIG_VERSION.tar.xz"
           echo "$ZIG_SHA256  /tmp/zig.tar.xz" | sha256sum -c -
           sudo mkdir -p /opt/zig && sudo tar -C /opt/zig -xJf /tmp/zig.tar.xz

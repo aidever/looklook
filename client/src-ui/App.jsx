@@ -53,6 +53,7 @@ import { TransferBanner } from './pages/SshTransfer.jsx';
 import { remoteAllowed, renewSoon } from './shared/Remote.jsx';
 import { splitTitle } from './shared/title.js';
 import { InAppAlerts, useForegroundPing } from './shared/inapp.jsx';
+import { noteVersion } from './shared/stale.js';
 
 const StatusCtx = createContext({ status: null, reload: () => {} });
 
@@ -736,6 +737,7 @@ function Shell() {
         setStatusDevice(device);
         setDown(false);
         rememberStatus(s);
+        noteVersion(device, s?.version);
       })
       .catch(() => {
         if (n !== reqSeq.current) return;

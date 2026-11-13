@@ -288,6 +288,8 @@ pub struct Inst {
     limit_guard: AtomicBool,
     /// Claude Code 走 stream-json（不抓屏、不打字，见 claude_chat.rs）
     sdk: AtomicBool,
+    /// 助理的大脑（assistant.rs）：对话里不给换权限模式
+    brain: AtomicBool,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -307,6 +309,8 @@ pub struct Chat {
     dsh: dsh_chat::Hub,
     /// stream-json 的 Claude Code
     sdk: claude_chat::Hub,
+    /// 管理台的本机地址（[`Self::publish`] 记下；Codex 大脑的助理工具地址用它）
+    addr: Mutex<Option<std::net::SocketAddr>>,
     me: Weak<Chat>,
 }
 
@@ -343,12 +347,14 @@ impl Chat {
             codex: Default::default(),
             dsh: Default::default(),
             sdk: Default::default(),
+            addr: Mutex::new(None),
             me: me.clone(),
         })
     }
 
     /// 写 `run/hook.json`（本机地址与令牌）和 hooks 配置文件。
     pub fn publish(&self, addr: std::net::SocketAddr) -> std::io::Result<()> {
+        *lock(&self.addr) = Some(addr);
         hooks::write_endpoint(&self.paths, addr, &self.token)?;
         hooks::ensure_settings(&self.paths).map(|_| ())
     }
@@ -423,6 +429,7 @@ impl Chat {
                     prompts: watch::channel(0).0,
                     limit_guard: AtomicBool::new(false),
                     sdk: AtomicBool::new(self.store.instance(id).ok().flatten().is_some_and(|r| self.instances.claude_sdk_mode(&r))),
+                    brain: AtomicBool::new(crate::assistant::is_brain(&self.store, id)),
                 })
             })
             .clone()
@@ -480,6 +487,12 @@ impl Chat {
         // Codex 的提问工具没有多选字段（答案是数组）：界面上每道题可以自己打开多选
         if inst.agent.launch() == "codex" {
             caps["q_multi_toggle"] = json!(true);
+        }
+        // 助理的大脑：权限由助理的权限模式定（助理页上换），对话里不给换模式、不进计划模式
+        if inst.brain.load(Ordering::Relaxed) {
+            caps["mode"] = json!(false);
+            caps["plan"] = json!(false);
+            caps["assistant"] = json!(true);
         }
         json!({
             "agent": inst.agent.launch(),
@@ -784,12 +797,11 @@ impl Chat {
         if crate::assistant::is_brain(&self.store, id) {
             if name == "UserPromptSubmit" {
                 crate::assistant::note_said(&self.store, ev["prompt"].as_str().unwrap_or_default());
-                let ctx = crate::assistant::turn_context(&self.paths, &self.assistant_doing());
+                let ctx = self.assistant_context();
                 return json!({ "hookSpecificOutput": { "hookEventName": "UserPromptSubmit", "additionalContext": ctx } }).to_string();
             }
             if name == "PreToolUse" {
-                let busy = |p: &std::path::Path| self.project_busy(p, id);
-                match crate::assistant::gate(&self.paths, tool.as_deref().unwrap_or(""), &ev["tool_input"], &busy) {
+                match self.assistant_gate(id, tool.as_deref().unwrap_or(""), &ev["tool_input"]) {
                     crate::assistant::Verdict::Allow => return pre_tool_use("allow", "Allowed by Looklook."),
                     crate::assistant::Verdict::Deny(why) => return pre_tool_use("deny", &why),
                     crate::assistant::Verdict::Ask => return pre_tool_use("ask", "Looklook asks the user to confirm this."),
@@ -804,6 +816,25 @@ impl Chat {
             }
         }
         String::new()
+    }
+
+    /// 这个会话刚当上助理的大脑（建好会话以后才记进 `assistant.brains`）
+    pub fn mark_brain(&self, id: &str) {
+        let inst = self.inst(id);
+        inst.brain.store(true, Ordering::Relaxed);
+        let st = lock(&inst.st);
+        Self::emit_status(&inst, &st);
+    }
+
+    /// 大脑每一轮带上的话（两种引擎共用）
+    pub(super) fn assistant_context(&self) -> String {
+        crate::assistant::turn_context(&self.paths, crate::assistant::settings(&self.store).mode, &self.assistant_doing())
+    }
+
+    /// 大脑要用工具：按助理的权限模式过闸门（Claude Code 的 PreToolUse、Codex 的审批请求都走这里）
+    pub(super) fn assistant_gate(&self, id: &str, tool: &str, input: &Value) -> crate::assistant::Verdict {
+        let busy = |p: &std::path::Path| self.project_busy(p, id);
+        crate::assistant::gate(&self.paths, crate::assistant::settings(&self.store).mode, &crate::guard::load(&self.store), tool, input, &busy)
     }
 
     /// 助理盯着的会话现在怎么样了（每一轮告诉大脑）

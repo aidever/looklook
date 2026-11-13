@@ -3955,7 +3955,6 @@
   "asst": {
     "title": "Assistant",
     "side": "Dispatch log",
-    "no_tasks": "Nothing dispatched yet. Just say what you need — it picks the project and starts a new session or continues an existing one.",
     "unwatch": "Stop tracking",
     "state": {
       "working": "working",
@@ -3966,13 +3965,13 @@
       "not_started": "not started"
     },
     "intro_title": "One place to ask",
-    "intro_1": "Say what you want done. It works out the project, decides whether to start a new session or continue one, and briefs Claude Code / Codex.",
+    "intro_1": "Just say what you want done: it works out which project, whether to start a new session or continue an existing one, and briefs Claude Code or Codex.",
     "intro_2": "Every dispatch shows where it went and why; tap \"Wrong\" to redirect it.",
-    "intro_3": "Small things like checking status or running a read-only command it does itself; project code changes always go to a session, and risky actions ask you first.",
+    "intro_3": "Small things like checking status or running a read-only command it does itself; changes to project code are always handed off. How far it may act on its own is set by the permission mode below.",
     "intro_4": "It tells you when work is done or a session is waiting on you, and keeps standing instructions (\"don't touch payments yet\") in mind.",
     "enable": "Turn on assistant",
-    "enable_note": "Uses Claude Code on this computer (chat mode), Opus by default; usage counts against your Claude account as usual and shows up in usage stats.",
-    "unavailable": "The assistant can't run on this computer: it needs Claude Code installed with chat mode available (not yet on Windows).",
+    "enable_note": "Uses Claude Code or Codex (chat mode) installed on this computer, with a strong model by default; usage is billed to that account as usual and shows up in usage stats. You can switch any time from the page header.",
+    "unavailable": "{{name}} can’t be used as the assistant on this computer: it must be installed and support chat mode (Claude Code chat mode isn’t available on Windows yet).",
     "fixed": "Redirected — the assistant will follow this next time",
     "route": {
       "new": "Started a new session",
@@ -3996,7 +3995,7 @@
     "routes": "Where things went",
     "routes_empty": "Nothing dispatched yet.",
     "stats": "You redirected {{fixed}} of the last {{of}}",
-    "foot": "The assistant dispatches and reports; the working session checks its own work. Default model: {{model}}.",
+    "foot": "The assistant only dispatches work and relays results; each working session checks its own work. Dispatched sessions keep their own permissions — this permission mode doesn’t apply to them.",
     "evt": {
       "turn_end_done": "Done:",
       "turn_end_failed": "Stopped with an error:",
@@ -4007,6 +4006,38 @@
       "rerouted": "Redirected:",
       "show": "Show message",
       "hide": "Hide"
+    },
+    "engine": "Runs on",
+    "engine_hint": "Which tool the assistant uses to think and dispatch. The page, tools and rules are the same; dispatched sessions can use either.",
+    "engine_desc": {
+      "claude": "Claude Code on this computer, Opus by default.",
+      "codex": "Codex on this computer, using the model from Codex’s own config."
+    },
+    "engine_missing": "Not installed on this computer",
+    "engine_new": "First use: starts a new conversation",
+    "engine_switched": "Switched to {{name}}: this is a separate conversation; agreements and dispatch history carry over. Switch back to continue the other one.",
+    "mode_label": "Permission mode",
+    "mode_intro": "What the assistant may do on its own (run commands, edit files). Dispatching, agreements, reading files and writing its own folder never ask; no mode lets it write into a project a session is working in.",
+    "mode": {
+      "read_only": "Read only",
+      "read_only_hint": "Read-only commands run; anything else (other commands, editing files) is refused — it hands the work to a session.",
+      "ask": "Ask first",
+      "ask_hint": "Read-only commands run; other commands and project file edits ask you first.",
+      "auto": "Hands-off",
+      "auto_hint": "Commands and edits run without asking; dangerous commands (your command rules, destructive ones) still ask."
+    },
+    "mode_switched": "Permission mode set to “{{name}}”; it applies from its next action",
+    "recommended": "Recommended",
+    "feishu": {
+      "title": "Feishu / Lark",
+      "none": "Set up Feishu / Lark to talk to the assistant from your phone and get its results there.",
+      "agent_off": "Feishu / Lark is set up, but “Chat with AI in Feishu” is off.",
+      "setup": "Set up",
+      "dm": "Send Feishu DMs to the assistant",
+      "dm_on_hint": "Messages you DM the bot go to the assistant (replying to a session card or /new still goes straight to that session). When work you asked for in Feishu finishes or needs your answer, the assistant’s update is pushed to Feishu too.",
+      "dm_off_hint": "DMs go to the “current session” as before; the assistant is only used on this page.",
+      "on": "Feishu DMs now go to the assistant",
+      "off": "Feishu DMs no longer go to the assistant"
     }
   }
 }

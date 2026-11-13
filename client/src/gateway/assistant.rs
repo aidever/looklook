@@ -8,7 +8,7 @@
 //! - **同一个项目默认排队**：那边有会话在干活时，新开的先记下（`assistant.queue`），等它这一轮做完再开，并告诉大脑；
 //! - **看守**（[`run`]）：每两秒看一遍助理送过话的会话。一轮结束、它在提问 → 整理成一条 `<looklook-event …>` 消息送进大脑
 //!   （最后一段回复截到 1500 字）。审批不告诉大脑，卡片直接给用户；
-//! - **管理台**（`/api/assistant…`）：状态（大脑是哪个会话、在干的活、最近的分派、约定）、打开、改去向。
+//! - **管理台**（`/api/assistant…`）：状态（大脑是哪个会话、引擎和权限模式、在干的活、最近的分派、约定）、打开、换引擎和权限模式、改去向。
 
 use std::collections::HashMap;
 use std::path::Path as FsPath;
@@ -60,33 +60,46 @@ fn queue(app: &App) -> Vec<Queued> {
 
 // ---------------- 大脑 ----------------
 
-/// 大脑那个会话：没有就建一个（不启动终端，对话页用到时才起进程）
-pub async fn ensure_brain(app: &App) -> R<String> {
-    if let Some(id) = core::brain_id(&app.store) {
-        if app.store.instance(&id)?.is_some() {
-            return Ok(id);
+/// 这种引擎的大脑会话：没有就建一个（不启动进程，对话页用到时才起）
+pub async fn ensure_brain(app: &App, engine: core::Engine) -> R<String> {
+    if let Some(id) = core::brains(&app.store).get(engine.launch()) {
+        if app.store.instance(id)?.is_some() {
+            return Ok(id.clone());
         }
+    }
+    if !engine_installed(app, engine).await {
+        return Err(LocalError::new("ASSISTANT_UNAVAILABLE").with("engine", engine.launch()));
     }
     core::prepare(&app.paths, &app.store, app.ui_addr).map_err(|e| LocalError::new("INTERNAL").with("detail", e.to_string()))?;
     let input = Input {
         name: Some("助理".into()),
         name_custom: Some(true),
         workdir: Some(core::dir(&app.paths).display().to_string()),
-        launch: Some("claude".into()),
+        launch: Some(engine.launch().into()),
         chat_ui: Some(true),
         // 大脑不带全部权限：它用工具都要过闸门
         full_access: Some(false),
         ..Default::default()
     };
     let v = super::create_session(app, input, false).await?;
-    if !app.instances.claude_sdk_mode(&v.row) {
+    if engine == core::Engine::Claude && !app.instances.claude_sdk_mode(&v.row) {
         // 这台电脑上对话模式起不来（没有 tmux 后端等）：助理用不了
         let _ = app.instances.delete(&v.row.id).await;
-        return Err(LocalError::new("ASSISTANT_UNAVAILABLE"));
+        return Err(LocalError::new("ASSISTANT_UNAVAILABLE").with("engine", engine.launch()));
     }
-    app.store.set(core::BRAIN_KEY, &v.row.id)?;
-    tracing::info!(id = %v.row.id, "助理：建好了大脑会话");
+    core::set_brain(&app.store, engine, &v.row.id)?;
+    app.chat.mark_brain(&v.row.id);
+    tracing::info!(id = %v.row.id, engine = engine.launch(), "助理：建好了大脑会话");
     Ok(v.row.id)
+}
+
+/// 这台电脑上装了这个工具没有
+async fn engine_installed(app: &App, engine: core::Engine) -> bool {
+    let shell = app.instances.shell().to_string();
+    match engine {
+        core::Engine::Claude => crate::chat::claude_sdk::program(&shell).await.is_some(),
+        core::Engine::Codex => crate::chat::codex_app::program(&shell).await.is_file(),
+    }
 }
 
 // ---------------- 项目和会话 ----------------
@@ -102,8 +115,7 @@ fn own_dir(app: &App, dir: &str) -> bool {
 
 /// 已知的项目：现有会话的目录 + 以前聊过的目录（新到旧）
 async fn projects(app: &App) -> Vec<Value> {
-    let brain = core::brain_id(&app.store);
-    let rows: Vec<_> = app.store.instances().unwrap_or_default().into_iter().filter(|r| Some(&r.id) != brain.as_ref()).collect();
+    let rows: Vec<_> = app.store.instances().unwrap_or_default().into_iter().filter(|r| !core::is_brain(&app.store, &r.id)).collect();
     let mut out: Vec<Value> = vec![];
     let mut seen: Vec<String> = vec![];
     for f in crate::history::folders(1, |_| true).await {
@@ -191,7 +203,6 @@ fn session_view(app: &App, row: &crate::store::InstanceRow, watched: bool) -> Va
 }
 
 async fn sessions(app: &App, project: Option<&str>) -> Result<Vec<Value>, String> {
-    let brain = core::brain_id(&app.store);
     let dir = match project.map(str::trim).filter(|p| !p.is_empty()) {
         Some(p) => Some(resolve_project(app, p).await?),
         None => None,
@@ -202,7 +213,7 @@ async fn sessions(app: &App, project: Option<&str>) -> Result<Vec<Value>, String
         .instances()
         .unwrap_or_default()
         .iter()
-        .filter(|r| Some(&r.id) != brain.as_ref() && matches!(r.launch.as_str(), "claude" | "codex" | "dsh" | "opencode"))
+        .filter(|r| !core::is_brain(&app.store, &r.id) && matches!(r.launch.as_str(), "claude" | "codex" | "dsh" | "opencode"))
         .filter(|r| dir.as_ref().is_none_or(|d| crate::history::same_dir(&r.workdir, d) || core::project_root(FsPath::new(&r.workdir)) == core::project_root(FsPath::new(d))))
         .map(|r| session_view(app, r, watches.contains_key(&r.id)))
         .collect())
@@ -324,9 +335,8 @@ async fn session_start(app: &App, a: &Value) -> Result<Value, String> {
 }
 
 fn session_row(app: &App, id: &str) -> Result<crate::store::InstanceRow, String> {
-    let brain = core::brain_id(&app.store);
     match app.store.instance(id.trim()).ok().flatten() {
-        Some(r) if Some(&r.id) != brain.as_ref() => Ok(r),
+        Some(r) if !core::is_brain(&app.store, &r.id) => Ok(r),
         _ => Err(format!("no such session: {id}; call sessions_list")),
     }
 }
@@ -485,9 +495,24 @@ fn event(kind: &str, session: &str, title: &str, project: &str, extra: &str, bod
 }
 
 async fn tell_brain(app: &App, text: String) {
+    tell_brain_push(app, text, false).await;
+}
+
+/// `push`：用户最近是在飞书里跟助理说的话时，助理这一轮的转告也推到飞书（做完了、在问、没开起来这类用户要知道的）
+pub(crate) async fn tell_brain_push(app: &App, text: String, push: bool) {
     let Some(brain) = core::brain_id(&app.store) else { return };
+    let link = if push { core::feishu_push(&app.store) } else { None };
+    let base = match &link {
+        Some(_) => app.chat.snapshot(&brain).await.ok().and_then(|v| v["total"].as_u64()),
+        None => None,
+    };
+    let since = crate::util::system_ms();
     if let Err(e) = app.chat.input(&brain, &text, &[]).await {
         tracing::warn!(error = ?e, "助理：结果没能送进大脑");
+        return;
+    }
+    if let (Some(link), Some(base)) = (link, base) {
+        crate::feishu_agent::push_assistant(app, &brain, &link.msg, base as usize, since);
     }
 }
 
@@ -524,7 +549,7 @@ pub async fn run(app: App) {
                 let q = b["attn"]["question"].as_str().unwrap_or("").to_string();
                 let opts: Vec<&str> = b["attn"]["options"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
                 let body = format!("它在问：{q}\n选项：{}\n用户能在看看里直接回答这张卡片。只有答案就在用户交代这件活时说过的话里，你才用 session_send 替他答，并告诉他。", if opts.is_empty() { "（自己填）".to_string() } else { opts.join(" / ") });
-                tell_brain(&app, event("question", &sid, &title, &row.workdir, "", &body)).await;
+                tell_brain_push(&app, event("question", &sid, &title, &row.workdir, "", &body), true).await;
             }
             let ended = b["turn"]["ended_at"].as_i64().unwrap_or(0);
             let running = matches!(b["phase"].as_str(), Some("running" | "approval"));
@@ -549,7 +574,7 @@ pub async fn run(app: App) {
                 (_, true) => "这一轮结束了，它没有留下文字回复。".to_string(),
                 _ => format!("它最后说的（最多 {REPLY_MAX} 字，更早的看会话）：\n{}", core::tail_chars(&reply, REPLY_MAX)),
             };
-            tell_brain(&app, event("turn_end", &sid, &title, &row.workdir, &format!(" outcome=\"{outcome}\""), &body)).await;
+            tell_brain_push(&app, event("turn_end", &sid, &title, &row.workdir, &format!(" outcome=\"{outcome}\""), &body), true).await;
         }
     }
 }
@@ -575,7 +600,7 @@ async fn start_queued(app: &App) {
             }
             Err(e) => {
                 tracing::warn!(error = ?e, "助理：排队的会话没开起来");
-                tell_brain(app, event("start_failed", "", &item.title, &item.project, "", &format!("排着队的这件活没能开起来：{}。告诉用户。", e.code))).await;
+                tell_brain_push(app, event("start_failed", "", &item.title, &item.project, "", &format!("排着队的这件活没能开起来：{}。告诉用户。", e.code)), true).await;
             }
         }
     }
@@ -591,8 +616,16 @@ pub async fn state(State(app): State<App>) -> R<Json<Value>> {
     let all = core::dispatches(&app.paths);
     let (fixed, of) = core::fix_rate(&all, 50);
     let recent: Vec<&Dispatch> = all.iter().rev().take(200).collect();
+    let mut engines = vec![];
+    for e in core::Engine::ALL {
+        engines.push(json!({ "id": e.launch(), "installed": engine_installed(&app, e).await, "has_brain": core::brains(&app.store).contains_key(e.launch()) }));
+    }
     Ok(Json(json!({
         "brain": brain,
+        "settings": core::settings(&app.store),
+        "engines": engines,
+        // 飞书配好了没有、私聊里能不能用飞书跟 AI 对话（没开时“交给助理”的开关不显示）
+        "feishu": { "configured": crate::notify::load_feishu(&app.store).is_some(), "agent": crate::notify::load_rules(&app.store).agent },
         "tasks": tasks,
         "dispatches": recent,
         "agreements": core::agreements(&app.paths),
@@ -601,8 +634,45 @@ pub async fn state(State(app): State<App>) -> R<Json<Value>> {
     })))
 }
 
-pub async fn enable(State(app): State<App>) -> R<Json<Value>> {
-    Ok(Json(json!({ "brain": ensure_brain(&app).await? })))
+#[derive(Deserialize, Default)]
+pub struct SettingsReq {
+    #[serde(default)]
+    engine: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    feishu: Option<bool>,
+}
+
+fn parse_settings(app: &App, req: &SettingsReq) -> R<core::Settings> {
+    let mut s = core::settings(&app.store);
+    if let Some(e) = req.engine.as_deref() {
+        s.engine = core::Engine::parse(e).ok_or_else(|| LocalError::invalid("engine", "invalid"))?;
+    }
+    if let Some(m) = req.mode.as_deref() {
+        s.mode = core::Mode::parse(m).ok_or_else(|| LocalError::invalid("mode", "invalid"))?;
+    }
+    if let Some(f) = req.feishu {
+        s.feishu = f;
+    }
+    Ok(s)
+}
+
+/// 开启：选好引擎和权限模式（不带就照原来的），建好大脑
+pub async fn enable(State(app): State<App>, body: Option<Json<SettingsReq>>) -> R<Json<Value>> {
+    let req = body.map(|b| b.0).unwrap_or_default();
+    let s = parse_settings(&app, &req)?;
+    let id = ensure_brain(&app, s.engine).await?;
+    core::save_settings(&app.store, s)?;
+    Ok(Json(json!({ "brain": id, "settings": s })))
+}
+
+/// 换引擎、权限模式。换引擎：用那个引擎的大脑（没有就建一个；换回来接着原来的对话）；权限模式下一次用工具就生效
+pub async fn put_settings(State(app): State<App>, Json(req): Json<SettingsReq>) -> R<Json<Value>> {
+    let s = parse_settings(&app, &req)?;
+    let brain = ensure_brain(&app, s.engine).await?;
+    core::save_settings(&app.store, s)?;
+    Ok(Json(json!({ "brain": brain, "settings": s })))
 }
 
 #[derive(Deserialize)]

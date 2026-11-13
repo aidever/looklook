@@ -1,4 +1,5 @@
 //! 在飞书里和 AI 对话（docs/FEISHU_AGENT.md）：私聊里直接发 = 跟“当前会话”说（第一次开一个），`/new` 开新的；
+//! 开了助理、并且开着“飞书私聊交给助理”时（assistant.rs），私聊里直接发 = 跟助理说，助理派出去的活有了结果也推回来；
 //! 回复某张卡片 = 跟那张卡片的会话说；项目群里一个话题一个会话；转过来的别人的问题按来源定项目、开新会话（§11，`feishu_route.rs`）。
 //!
 //! - **不另写 agent**：开会话照会话页“新建”（`gateway::create_session`），接着说就是 `Chat::input`，
@@ -896,7 +897,17 @@ async fn route(app: &App, api: &Api, chat: &str, id: &str, thread: &[String], te
         let rpc = Rpc::Start { agent: p.agent.clone(), dir: dir.into(), text, anchor: Anchor::Reply { m: id.into(), th: true }, files, typing, origin: None };
         return call(app, dev, rpc, operator).await.map(|_| true);
     }
-    let cur = if proj.is_some() { None } else { current(app, chat) };
+    // 助理（assistant.rs）：私聊里直接发的话交给助理，它自己找项目、派活；回复某张卡片、/new、项目群照旧
+    let brain = if group || proj.is_some() { None } else { crate::assistant::feishu_brain(&app.store) };
+    if let (Some(b), None, None, None) = (&brain, &cmd, &found, &origin) {
+        let dev = own_dev(app)?;
+        set_current(app, chat, Some((&dev, b)));
+        crate::assistant::note_feishu(&app.store, chat, id);
+        call(app, &dev, Rpc::Say { inst: b.clone(), text, msg: id.into(), files, typing }, operator).await?;
+        return Ok(true);
+    }
+    // 当前会话是助理、但现在不交给助理了（关掉了 / 换了引擎）：当没有当前会话。/new 也不能开在助理的目录里
+    let cur = if proj.is_some() { None } else { current(app, chat) }.filter(|c| !crate::assistant::is_brain(&app.store, &c.inst) || (brain.as_deref() == Some(&c.inst) && cmd.is_none()));
     if cmd.is_none() && found.is_none() {
         let origin = origin.or_else(|| (group && cur.is_none()).then(|| Origin { chat: chat.into(), ..Default::default() }));
         if let Some(origin) = origin {
@@ -2045,6 +2056,16 @@ fn image_ext(b: &[u8]) -> &'static str {
 // ---------------- 流式卡片 ----------------
 
 /// 一轮的回复推到一张流式卡片上，直到这一轮结束
+/// 助理（assistant.rs）：派出去的活有了结果，看看把它送进了大脑；大脑这一轮的转告也推到飞书（回复用户在飞书里最后说的那句）。
+/// `base`：送进去之前对话有多少条
+pub fn push_assistant(app: &App, inst: &str, reply_to: &str, base: usize, since: i64) {
+    let rules = load_rules(&app.store);
+    if !rules.agent || load_feishu(&app.store).is_none() || app.notify.agent.following(inst) {
+        return;
+    }
+    tokio::spawn(stream(app.clone(), inst.to_string(), reply_to.to_string(), base, since, false));
+}
+
 async fn stream(app: App, inst: String, reply_to: String, base: usize, since: i64, thread: bool) {
     let me = &app.notify.agent;
     let nonce = notify::nonce();
@@ -2908,6 +2929,41 @@ mod tests {
         assert_eq!(card.json()["reply_in_thread"], true);
         assert_eq!(store.instances().unwrap().len(), n + 1, "项目群里的新话题开了新会话");
         println!("6b. 项目群 ok");
+
+        // 6c. 助理（assistant.rs）：开了助理以后，私聊里直接发的话交给助理（不给当前会话）；
+        //     派出去的活有了结果（这里直接送一条事件进大脑），助理的转告也推回飞书，回复在用户最后说的那句下面
+        let brain = crate::gateway::assistant::ensure_brain(&app, crate::assistant::Engine::Claude).await.expect("建大脑");
+        chat.setting(&brain, "model", "haiku").await.ok();
+        let before = fake.reqs().len();
+        let n = store.instances().unwrap().len();
+        fake.push("event", msg_ev("om_a1", "p2p", "ou_me", "text", json!({ "text": "只回复一个字：助。不要用任何工具。" }), None, json!([]))).await;
+        fake.wait_after(before, "助理的流式卡片回在这句下", 60, |r| r.path.contains("/om_a1/reply") && r.text().contains("card_id")).await;
+        fake.wait_after(before, "助理这一轮做完", 240, |r| is_card_update(r) && r.text().contains("已完成")).await;
+        assert_eq!(store.instances().unwrap().len(), n, "没开新会话");
+        // 记录文件可能晚一点写完
+        let mut snap = Value::Null;
+        for _ in 0..20 {
+            snap = chat.snapshot(&brain).await.unwrap();
+            if snap["items"].as_array().is_some_and(|a| a.iter().any(|i| i["k"] == "user")) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        assert!(snap["items"].as_array().unwrap().iter().any(|i| i["k"] == "user" && i["text"].as_str().is_some_and(|t| t.contains("只回复一个字：助"))), "话交给了助理：当前 {:?}，大脑 {brain}，记录 {}", current(&app, "oc_dm").map(|c| c.inst), snap["items"].to_string().chars().take(1500).collect::<String>());
+        assert_eq!(current(&app, "oc_dm").map(|c| c.inst).as_deref(), Some(brain.as_str()));
+        tokio::time::sleep(END_SETTLE * 2).await;
+        let before = fake.reqs().len();
+        let ev = "<looklook-event type=\"turn_end\" session=\"zzzzzzzz\" title=\"测试\" project=\"/tmp\" outcome=\"done\">\n它最后说的：做完了。\n</looklook-event>";
+        crate::gateway::assistant::tell_brain_push(&app, ev.to_string(), true).await;
+        fake.wait_after(before, "转告推回飞书（回复用户最后那句）", 60, |r| r.path.contains("/om_a1/reply") && r.text().contains("card_id")).await;
+        fake.wait_after(before, "转告那一轮做完", 240, |r| is_card_update(r) && r.text().contains("已完成")).await;
+        // 关掉“飞书私聊交给助理”：回到当前会话那一套（当前会话是助理时当没有）
+        let mut st = crate::assistant::settings(&store);
+        st.feishu = false;
+        crate::assistant::save_settings(&store, st).unwrap();
+        assert!(crate::assistant::feishu_brain(&store).is_none());
+        set_current(&app, "oc_dm", Some(("dev1", &inst)));
+        println!("6c. 助理 ok");
 
         // 7. 过期的停止按钮；关掉开关后私聊只回一句怎么打开
         let resp = fake.push("card", click("stop", &json!({ "a": STOP, "dev": "dev1", "inst": inst, "n": "old" }), json!({}))).await.unwrap();

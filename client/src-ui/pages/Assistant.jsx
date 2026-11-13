@@ -1,21 +1,30 @@
 // 助理（docs/ASSISTANT.md，设计稿 docs/SINGLE_ENTRY_AGENT_DESIGN_2026-11-11.md 零期）：一个入口说话，助理自己判断是哪个项目、
 // 新开会话还是接着原来的，把活派给 Claude Code / Codex；小事自己做。这一页 = 和助理的对话 + 它派出去在干的活 + 每次派到哪、为什么（去向条，能改）
-// + 口头约定。助理是这台电脑上一个藏起来的对话模式 Claude 会话（不在会话列表里），对话直接用 ChatView。
-import { ArrowRightLeft, Bot, Check, ChevronRight, ListChecks, Loader2, MessageCircleQuestion, PanelRight, Sparkles, X } from 'lucide-react';
+// + 口头约定。助理不绑定某个工具：底下用 Claude Code 还是 Codex（引擎）、它自己动手时怎么管（权限模式）都在页头选，
+// 两种引擎各是这台电脑上一个藏起来的对话模式会话（不在会话列表里），对话直接用 ChatView。
+import { ArrowRightLeft, Bot, Check, ChevronRight, Eye, Hand, ListChecks, Loader2, MessageCircleQuestion, PanelRight, Send, Sparkles, X, Zap } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { api, rememberTerminals, selectedDevice, terminalDevice } from '../shared/api.js';
+import { LaunchIcon } from '../shared/brands.jsx';
 import { DeviceSwitcher, useDevices } from '../shared/devices.jsx';
 import { errorText } from '../shared/i18n.js';
 import { isTouch } from '../shared/KeyBar.jsx';
-import { useRouter } from '../shared/router.jsx';
+import { Link, useRouter } from '../shared/router.jsx';
 import Select from '../shared/Select.jsx';
 import { AGENTS, baseName, sessionLaunch, sessionTitle, useSessions } from '../shared/sessions.jsx';
 import { formatTime } from '../shared/time.js';
-import { Button, Empty, Note, Skeleton, useToast } from '../shared/ui.jsx';
+import { Button, Empty, Note, Skeleton, Switch, useToast } from '../shared/ui.jsx';
 import ErrorBoundary from '../shared/ErrorBoundary.jsx';
 import ChatView from './ChatView.jsx';
+
+// 引擎：大脑底下用的工具（界面、工具、规矩都一样，只是接法不同）
+const ENGINES = ['claude', 'codex'];
+const ENGINE_NAMES = { claude: 'Claude Code', codex: 'Codex' };
+// 权限模式：助理自己动手（跑命令、改文件）时怎么办
+const MODES = ['read_only', 'ask', 'auto'];
+const MODE_ICON = { read_only: Eye, ask: Hand, auto: Zap };
 
 const POLL_MS = 4000;
 // 最近一次派活（这么久以内、没改过的）在对话上方单独显示一条，方便马上改
@@ -90,29 +99,42 @@ export default function Assistant() {
       </div>
     );
   }
-  if (!state.brain) return <Enable onDone={load} />;
+  if (!state.brain) return <Enable state={state} onDone={load} />;
   const waiting = state.tasks.filter((x) => x.state === 'waiting_for_user').length;
+  const engine = state.settings?.engine ?? 'claude';
   return (
     <div className="asst" style={fit}>
       <div className="asst-main">
-        <div className="asst-strip">
+        <div className="asst-head">
+          <span className="asst-title">
+            <Sparkles size={16} aria-hidden="true" />
+            <strong>{t('asst.title')}</strong>
+          </span>
+          <EnginePick state={state} onChange={load} />
+          <ModePick state={state} onChange={load} />
+          <span className="grow" />
           {/* 每台电脑一个助理；多台时这里换（手机上在顶栏） */}
           {(devices.multi || devices.localOnly) && (
             <span className="asst-dev">
               <DeviceSwitcher perDevice />
             </span>
           )}
-          <TaskChips tasks={state.tasks} onChange={load} />
-          <button type="button" className="btn btn-plain btn-sm asst-side-btn" onClick={() => setSide(!side)} aria-pressed={side} aria-controls="asst-side">
+          <button type="button" className="btn btn-plain btn-sm asst-side-btn" onClick={() => setSide(!side)} aria-pressed={side} aria-controls="asst-side" title={t('asst.side')}>
             <PanelRight size={15} aria-hidden="true" />
-            <span>{t('asst.side')}</span>
+            <span className="asst-side-label">{t('asst.side')}</span>
             {waiting > 0 && <span className="rail-count asst-count">{waiting}</span>}
           </button>
         </div>
+        {state.tasks.length > 0 && (
+          <div className="asst-strip">
+            <TaskChips tasks={state.tasks} onChange={load} />
+          </div>
+        )}
         <FreshRoutes list={state.dispatches} onChange={load} />
         <div className="asst-chat">
           <ErrorBoundary>
-            <ChatView id={state.brain} launch="claude" active touch={touch} label={t('asst.title')} />
+            {/* 换引擎就是换了一段对话：按大脑重新挂 */}
+            <ChatView key={state.brain} id={state.brain} launch={engine} active touch={touch} label={t('asst.title')} />
           </ErrorBoundary>
         </div>
       </div>
@@ -129,17 +151,106 @@ export default function Assistant() {
   );
 }
 
-/** 还没开：说清楚它是什么、怎么用，点一下建好（建一个藏起来的对话模式 Claude 会话） */
-function Enable({ onDone }) {
+/** 换设置（引擎 / 权限模式）。成功了说一句换了什么 */
+function useSaveSettings(onChange) {
+  const { t } = useTranslation();
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  const save = (body, done) => {
+    setBusy(true);
+    return api
+      .put('/assistant/settings', body)
+      .then(
+        (r) => {
+          toast(done(r), 'success');
+          onChange();
+        },
+        (e) => toast(e?.code === 'ASSISTANT_UNAVAILABLE' ? t('asst.unavailable', { name: ENGINE_NAMES[body.engine] ?? '' }) : errorText(t, e), 'error'),
+      )
+      .finally(() => setBusy(false));
+  };
+  return { busy, save };
+}
+
+/** 页头：底下用哪个工具。换了是另一段对话，换回来接着原来的 */
+function EnginePick({ state, onChange }) {
+  const { t } = useTranslation();
+  const { busy, save } = useSaveSettings(onChange);
+  const cur = state.settings?.engine ?? 'claude';
+  const engines = state.engines ?? ENGINES.map((id) => ({ id, installed: true }));
+  const options = engines.map((e) => [
+    e.id,
+    <span key={e.id} className="asst-opt">
+      <LaunchIcon launch={e.id} size={15} />
+      {ENGINE_NAMES[e.id] ?? e.id}
+    </span>,
+    { disabled: !e.installed, hint: e.installed ? (e.has_brain || e.id === cur ? undefined : t('asst.engine_new')) : t('asst.engine_missing') },
+  ]);
+  return (
+    <Select
+      className="asst-pick"
+      value={cur}
+      disabled={busy}
+      options={options}
+      onChange={(e) => {
+        const engine = e.target.value;
+        if (engine !== cur) save({ engine }, () => t('asst.engine_switched', { name: ENGINE_NAMES[engine] }));
+      }}
+      aria-label={t('asst.engine')}
+      title={t('asst.engine_hint')}
+    />
+  );
+}
+
+/** 页头：权限模式（助理自己动手时怎么办；派出去的会话按它们自己的权限） */
+function ModePick({ state, onChange }) {
+  const { t } = useTranslation();
+  const { busy, save } = useSaveSettings(onChange);
+  const cur = state.settings?.mode ?? 'ask';
+  const options = MODES.map((m) => {
+    const Icon = MODE_ICON[m];
+    return [
+      m,
+      <span key={m} className="asst-opt">
+        <Icon size={14} aria-hidden="true" />
+        {t(`asst.mode.${m}`)}
+      </span>,
+      { hint: t(`asst.mode.${m}_hint`) },
+    ];
+  });
+  return (
+    <Select
+      className="asst-pick"
+      data-mode={cur}
+      value={cur}
+      disabled={busy}
+      options={options}
+      onChange={(e) => {
+        const mode = e.target.value;
+        if (mode !== cur) save({ mode }, () => t('asst.mode_switched', { name: t(`asst.mode.${mode}`) }));
+      }}
+      aria-label={t('asst.mode_label')}
+      title={t('asst.mode_label')}
+    />
+  );
+}
+
+/** 还没开：说清楚它是什么、怎么用；选好底下用哪个工具、权限模式，点一下建好 */
+function Enable({ state, onDone }) {
   const { t } = useTranslation();
   const devices = useDevices();
   const toast = useToast();
+  const engines = state.engines ?? ENGINES.map((id) => ({ id, installed: true }));
+  const firstInstalled = engines.find((e) => e.installed)?.id;
+  const saved = state.settings?.engine;
+  const [engine, setEngine] = useState(engines.find((e) => e.id === saved && e.installed) ? saved : (firstInstalled ?? 'claude'));
+  const [mode, setMode] = useState(state.settings?.mode ?? 'ask');
   const [busy, setBusy] = useState(false);
   const go = () => {
     setBusy(true);
     api
-      .post('/assistant/enable', {})
-      .then(onDone, (e) => toast(e?.code === 'ASSISTANT_UNAVAILABLE' ? t('asst.unavailable') : errorText(t, e), 'error'))
+      .post('/assistant/enable', { engine, mode })
+      .then(onDone, (e) => toast(e?.code === 'ASSISTANT_UNAVAILABLE' ? t('asst.unavailable', { name: ENGINE_NAMES[engine] }) : errorText(t, e), 'error'))
       .finally(() => setBusy(false));
   };
   return (
@@ -156,7 +267,40 @@ function Enable({ onDone }) {
           <li>{t('asst.intro_3')}</li>
           <li>{t('asst.intro_4')}</li>
         </ul>
-        <Button onClick={go} busy={busy} icon={Sparkles}>
+        <div className="asst-setup">
+          <h3 className="asst-h">{t('asst.engine')}</h3>
+          <p className="muted asst-small">{t('asst.engine_hint')}</p>
+          <div className="asst-cards" role="radiogroup" aria-label={t('asst.engine')}>
+            {engines.map((e) => (
+              <button key={e.id} type="button" role="radio" aria-checked={engine === e.id} disabled={!e.installed} className="launch model-option asst-card" onClick={() => setEngine(e.id)}>
+                <span className="model-option-head">
+                  <LaunchIcon launch={e.id} size={18} />
+                  <b className="grow">{ENGINE_NAMES[e.id] ?? e.id}</b>
+                  {engine === e.id && <Check size={16} aria-hidden="true" />}
+                </span>
+                <span className="small muted">{e.installed ? t(`asst.engine_desc.${e.id}`) : t('asst.engine_missing')}</span>
+              </button>
+            ))}
+          </div>
+          <h3 className="asst-h">{t('asst.mode_label')}</h3>
+          <p className="muted asst-small">{t('asst.mode_intro')}</p>
+          <div className="asst-cards asst-cards-3" role="radiogroup" aria-label={t('asst.mode_label')}>
+            {MODES.map((m) => {
+              const Icon = MODE_ICON[m];
+              return (
+                <button key={m} type="button" role="radio" aria-checked={mode === m} className="launch model-option asst-card" onClick={() => setMode(m)}>
+                  <span className="model-option-head">
+                    <Icon size={16} aria-hidden="true" />
+                    <b className="grow">{t(`asst.mode.${m}`)}</b>
+                    {m === 'ask' && <span className="badge">{t('asst.recommended')}</span>}
+                  </span>
+                  <span className="small muted">{t(`asst.mode.${m}_hint`)}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        <Button onClick={go} busy={busy} icon={Sparkles} disabled={!engines.find((e) => e.id === engine)?.installed}>
           {t('asst.enable')}
         </Button>
         <p className="muted asst-note">{t('asst.enable_note')}</p>
@@ -171,7 +315,6 @@ const STATE_ICON = { working: Loader2, waiting_for_user: MessageCircleQuestion, 
 function TaskChips({ tasks, onChange }) {
   const { t } = useTranslation();
   const { navigate } = useRouter();
-  if (tasks.length === 0) return <span className="muted asst-strip-empty">{t('asst.no_tasks')}</span>;
   // 等你的放最前面
   const order = { waiting_for_user: 0, working: 1 };
   const list = [...tasks].sort((a, b) => (order[a.state] ?? 2) - (order[b.state] ?? 2));
@@ -307,6 +450,35 @@ function Route({ d, onChange, onHide, compact = false }) {
   );
 }
 
+/** 飞书联动：私聊里直接发的话交给助理；在飞书里说的活有了结果，转告也推到飞书 */
+function FeishuLink({ state, onChange }) {
+  const { t } = useTranslation();
+  const { busy, save } = useSaveSettings(onChange);
+  const f = state.feishu ?? {};
+  const on = state.settings?.feishu !== false;
+  return (
+    <section>
+      <h3 className="asst-h">
+        <Send size={15} aria-hidden="true" />
+        {t('asst.feishu.title')}
+      </h3>
+      {!f.configured || !f.agent ? (
+        <p className="muted asst-small">
+          {t(f.configured ? 'asst.feishu.agent_off' : 'asst.feishu.none')} <Link to="/ai#notify">{t('asst.feishu.setup')}</Link>
+        </p>
+      ) : (
+        <>
+          <div className="asst-switch">
+            <span>{t('asst.feishu.dm')}</span>
+            <Switch checked={on} disabled={busy} label={t('asst.feishu.dm')} onChange={(v) => save({ feishu: v }, () => t(v ? 'asst.feishu.on' : 'asst.feishu.off'))} />
+          </div>
+          <p className="muted asst-small">{t(on ? 'asst.feishu.dm_on_hint' : 'asst.feishu.dm_off_hint')}</p>
+        </>
+      )}
+    </section>
+  );
+}
+
 /** 右边（手机上是盖上来的一层）：分派记录、口头约定、改正次数 */
 function SidePanel({ state, onChange }) {
   const { t } = useTranslation();
@@ -354,9 +526,10 @@ function SidePanel({ state, onChange }) {
           </div>
         )}
       </section>
+      <FeishuLink state={state} onChange={onChange} />
       <p className="muted asst-small asst-foot">
         <ChevronRight size={12} aria-hidden="true" />
-        {t('asst.foot', { model: state.default_model })}
+        {t('asst.foot')}
       </p>
     </div>
   );

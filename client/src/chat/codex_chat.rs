@@ -390,6 +390,15 @@ pub fn decision(tool: &str, kind: &str, input: &Value, req: &PermissionAnswer) -
     Ok(json!({ "decision": d }))
 }
 
+/// 命令审批里的命令：字符串，或者 argv 数组（拼成一行看）
+fn command_text(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Array(a) => a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" "),
+        _ => String::new(),
+    }
+}
+
 /// 用户消息条目（`userMessage`）里的文字，和发出去时的一样拼起来
 fn user_text(item: &Value) -> String {
     let parts: Vec<&str> = item["content"].as_array().map(|a| a.iter().filter(|c| c["type"] == "text").filter_map(|c| c["text"].as_str()).collect()).unwrap_or_default();
@@ -448,8 +457,14 @@ impl Chat {
         self.inst(id).agent.launch() == "codex"
     }
 
-    /// 界面上选过权限就用选的；否则全部权限的终端不询问、不用沙箱（和 `codex --yolo` 一样）
+    /// 界面上选过权限就用选的；否则全部权限的终端不询问、不用沙箱（和 `codex --yolo` 一样）。
+    /// 助理的大脑：规矩、助理工具、按助理权限模式定的沙箱（见 `assistant::codex_thread`），不看界面选的
     fn codex_policy(&self, id: &str) -> Value {
+        if crate::assistant::is_brain(&self.store, id) {
+            if let Some(addr) = *lock(&self.addr) {
+                return crate::assistant::codex_thread(&self.store, addr);
+            }
+        }
         if let Some(perm) = lock(&self.inst(id).st).codex.perm.clone() {
             let (approval, sandbox, _) = perm_params(&perm);
             json!({ "approvalPolicy": approval, "sandbox": sandbox })
@@ -464,7 +479,14 @@ impl Chat {
     fn codex_thread_opts(&self, id: &str) -> Value {
         let mut v = self.codex_policy(id);
         let profile = crate::codex_profiles::for_instance(&self.store, id);
-        merge(&mut v, crate::codex_profiles::thread_params(&self.paths.home, &profile));
+        let mut p = crate::codex_profiles::thread_params(&self.paths.home, &profile);
+        // 两边都有 `config`（大脑的助理工具 + 配置里的调优）：合在一起，不互相盖掉
+        if let (Some(a), Some(b)) = (v.get("config").and_then(Value::as_object).cloned(), p.get_mut("config").and_then(Value::as_object_mut)) {
+            for (k, x) in a {
+                b.entry(k).or_insert(x);
+            }
+        }
+        merge(&mut v, p);
         v
     }
 
@@ -967,6 +989,30 @@ impl Chat {
             let _ = server.respond(rid, json!({ "decision": "cancel" })).await;
             return;
         };
+        // 助理的大脑：沙箱挡下来、来问的，先过助理的闸门（放行的不用问用户，拒绝的告诉它为什么）
+        if kind == "permission" && crate::assistant::is_brain(&self.store, &inst.id) {
+            use crate::assistant::Verdict;
+            let verdict = if tool == "Bash" {
+                self.assistant_gate(&inst.id, "Bash", &json!({ "command": command_text(&p["command"]) }))
+            } else {
+                // 改文件：每个文件都要放行才放行，有一个拒绝就拒绝
+                let files: Vec<String> = input["changes"].as_array().into_iter().flatten().filter_map(|c| c["path"].as_str().map(String::from)).collect();
+                let all: Vec<Verdict> = if files.is_empty() { vec![self.assistant_gate(&inst.id, "Edit", &json!({}))] } else { files.iter().map(|f| self.assistant_gate(&inst.id, "Edit", &json!({ "file_path": f }))).collect() };
+                all.iter().find(|v| matches!(v, Verdict::Deny(_))).cloned().or_else(|| all.iter().find(|v| **v == Verdict::Ask).cloned()).unwrap_or(Verdict::Allow)
+            };
+            match verdict {
+                Verdict::Allow => {
+                    let _ = server.respond(rid, json!({ "decision": "accept" })).await;
+                    return;
+                }
+                Verdict::Deny(why) => {
+                    let _ = server.respond(rid, json!({ "decision": "decline" })).await;
+                    self.codex_say_later(&inst.id, why);
+                    return;
+                }
+                Verdict::Ask | Verdict::Pass => {}
+            }
+        }
         // 命令规则（docs/PLAN_2026-10-27.md §3.2）：Codex 只在它自己来问时能用上。拒绝的替用户拒绝，并告诉它为什么
         let guard = match p["command"].as_str().filter(|_| tool == "Bash").and_then(|c| crate::guard::check(&crate::guard::load(&self.store), c)) {
             Some(hit) if hit.action == crate::guard::Action::Deny => {
@@ -1090,6 +1136,11 @@ impl Chat {
             Self::set_phase(&inst, &mut st, Phase::Running, None);
             return Ok(json!({ "delivered": true }));
         }
+        // 助理的大脑：记下用户原话（派活时附上；看看送进去的结果消息不算）
+        let brain = crate::assistant::is_brain(&self.store, id);
+        if brain {
+            crate::assistant::note_said(&self.store, text);
+        }
         let mut input = text_input(text, images);
         // `$技能名`：和 TUI 一样另外带上技能（名字 + SKILL.md 的路径），Codex 才会按技能读进来
         if text.contains('$') {
@@ -1122,16 +1173,27 @@ impl Chat {
         }
         // 默认模式自带的说明不让模型用提问工具（要用户回答时“用一句纯文字问”），对话页就没有选择框：换成允许它用的说明。
         // collaborationMode 会盖过 model / effort，所以一起放进去；还不知道用的哪个模型时不换（照 Codex 默认的来）
+        // 助理的大脑：每一轮的环境、约定、在干的活也放进这段说明（developer 消息，不进用户看到的对话，压缩后照样每轮都有）；
+        // 刚开的对话这时才知道模型，再取一次
+        let current = current.or_else(|| if brain { lock(&inst.st).actual_model.clone() } else { None });
         if let Some(m) = model.or(current) {
+            let mut instructions = codex_app::DEFAULT_MODE.to_string();
+            if brain {
+                instructions = format!("{instructions}\n\n{}", self.assistant_context());
+            }
             params["collaborationMode"] = json!({
                 "mode": "default",
-                "settings": { "model": m, "reasoning_effort": effort, "developer_instructions": codex_app::DEFAULT_MODE },
+                "settings": { "model": m, "reasoning_effort": effort, "developer_instructions": instructions },
             });
         }
         if let Some(e) = effort {
             params["effort"] = json!(e);
         }
-        if let Some(perm) = lock(&inst.st).codex.perm.clone() {
+        if brain {
+            // 权限只由助理的权限模式定（沙箱挡下来的来问时过闸门）
+            params["approvalPolicy"] = json!("on-request");
+            params["sandboxPolicy"] = crate::assistant::codex_sandbox(crate::assistant::settings(&self.store).mode).1;
+        } else if let Some(perm) = lock(&inst.st).codex.perm.clone() {
             let (approval, _, sandbox) = perm_params(&perm);
             params["approvalPolicy"] = approval;
             params["sandboxPolicy"] = sandbox;
@@ -1326,6 +1388,10 @@ impl Chat {
             "mode" => {
                 if !PERMS.contains(&value) {
                     return Err(LocalError::invalid("value", "invalid"));
+                }
+                // 助理的大脑：权限由助理的权限模式定（助理页上换）
+                if inst.brain.load(Ordering::Relaxed) || crate::assistant::is_brain(&self.store, id) {
+                    return Err(LocalError::new("CHAT_MODE_UNAVAILABLE"));
                 }
                 st.codex.perm = Some(value.to_string());
                 st.mode = Some(value.to_string());
@@ -1852,6 +1918,10 @@ impl Chat {
         }
         let mut params = self.codex_thread_opts(&id);
         merge(&mut params, json!({ "cwd": cwd, "ephemeral": true, "threadSource": "thread_title", "sandbox": "read-only", "approvalPolicy": "never", "config": config }));
+        // 起名不用助理的规矩
+        if let Some(o) = params.as_object_mut() {
+            o.remove("developerInstructions");
+        }
         if let Some(m) = model {
             params["model"] = json!(m);
         }

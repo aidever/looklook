@@ -240,7 +240,11 @@ impl Chat {
         let shell = self.instances.shell().to_string();
         let program = claude_sdk::program(&shell).await.ok_or_else(|| LocalError::new("CLAUDE_NOT_FOUND"))?;
         let mut args: Vec<String> = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio"].map(String::from).to_vec();
-        args.push(if opts.full_access { "--dangerously-skip-permissions" } else { "--allow-dangerously-skip-permissions" }.into());
+        // 助理的大脑：权限只由闸门（PreToolUse）管，不能跳过权限，也不让切到跳过权限
+        let brain = crate::assistant::is_brain(&self.store, id);
+        if !brain {
+            args.push(if opts.full_access { "--dangerously-skip-permissions" } else { "--allow-dangerously-skip-permissions" }.into());
+        }
         if let Ok(p) = super::hooks::ensure_terminal_settings(&self.paths) {
             args.extend(["--settings".into(), p.display().to_string()]);
         }
@@ -266,7 +270,6 @@ impl Chat {
             }
         }
         // 助理的大脑（assistant.rs）：带上规矩和只给它的工具；没选过模型时用好的
-        let brain = crate::assistant::is_brain(&self.store, id);
         if brain {
             args.extend(crate::assistant::brain_args(&self.paths));
         }
@@ -276,7 +279,7 @@ impl Chat {
         if let Some(e) = effort {
             args.extend(["--effort".into(), e]);
         }
-        if let Some(m) = mode {
+        if let Some(m) = if brain { Some("default".to_string()) } else { mode } {
             args.extend(["--permission-mode".into(), m]);
         }
         // 对话里发的附件（图片以外的文件只给路径）放在附件目录，不在项目里：加进可访问的目录，读的时候不用一个个确认
@@ -1176,6 +1179,10 @@ impl Chat {
                 const MODES: [&str; 5] = ["default", "acceptEdits", "plan", "auto", "bypassPermissions"];
                 if !MODES.contains(&value) {
                     return Err(LocalError::invalid("value", "invalid"));
+                }
+                // 助理的大脑：权限由助理的权限模式定（助理页上换）
+                if crate::assistant::is_brain(&self.store, id) {
+                    return Err(LocalError::new("CHAT_MODE_UNAVAILABLE"));
                 }
             }
             _ => return Err(LocalError::invalid("kind", "invalid")),

@@ -634,7 +634,8 @@ impl Notifier {
         let bot_on = crate::feishu_bot::enabled(app) && crate::assistant::feishu_push(&app.store).is_some();
         for id in &ids {
             let Some(brief) = app.chat.brief(id) else { continue };
-            let brain = crate::assistant::is_brain(&app.store, id);
+            // 跑腿和大脑一样：只发审批，做完由助理转告
+            let brain = crate::assistant::is_gated(&app.store, id);
             let muted = app.store.instance(id).ok().flatten().is_some_and(|r| rules.muted.contains(&r.workdir));
             let key = attn_key(&brief);
             // 这个会话现在挂着的卡片
@@ -698,7 +699,7 @@ impl Notifier {
             }
         }
         if !quiet && !fg && rules.stall_min > 0 {
-            for id in ids.iter().filter(|id| !crate::assistant::is_brain(&app.store, id)) {
+            for id in ids.iter().filter(|id| !crate::assistant::is_gated(&app.store, id)) {
                 self.check_stall(app, out, &own, id, &rules, now).await;
             }
         }

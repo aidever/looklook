@@ -793,9 +793,9 @@ impl Chat {
         if name == "UserPromptSubmit" {
             self.checkpoint_turn(id, ev["prompt"].as_str().unwrap_or_default(), true).await;
         }
-        // 助理的大脑（assistant.rs）：每一轮带上环境、约定、在干的活；用工具先过闸门
-        if crate::assistant::is_brain(&self.store, id) {
-            if name == "UserPromptSubmit" {
+        // 助理的大脑（assistant.rs）：每一轮带上环境、约定、在干的活；用工具先过闸门（跑腿也过）
+        if crate::assistant::is_gated(&self.store, id) {
+            if name == "UserPromptSubmit" && crate::assistant::is_brain(&self.store, id) {
                 crate::assistant::note_said(&self.store, ev["prompt"].as_str().unwrap_or_default());
                 let ctx = self.assistant_context();
                 return json!({ "hookSpecificOutput": { "hookEventName": "UserPromptSubmit", "additionalContext": ctx } }).to_string();
@@ -828,7 +828,8 @@ impl Chat {
 
     /// 大脑每一轮带上的话（两种引擎共用）
     pub(super) fn assistant_context(&self) -> String {
-        crate::assistant::turn_context(&self.paths, crate::assistant::settings(&self.store).mode, &self.assistant_doing())
+        let (errands, doing): (Vec<_>, Vec<_>) = self.assistant_doing().into_iter().partition(|d| crate::assistant::is_errand(&self.store, &d.session));
+        crate::assistant::turn_context(&self.paths, crate::assistant::settings(&self.store).mode, &doing, &errands)
     }
 
     /// 大脑要用工具：按助理的权限模式过闸门（Claude Code 的 PreToolUse、Codex 的审批请求都走这里）
@@ -865,7 +866,7 @@ impl Chat {
     pub fn busy_session(&self, path: &std::path::Path, except: &str) -> Option<String> {
         let root = crate::assistant::project_root(path);
         self.store.instances().unwrap_or_default().into_iter().find_map(|r| {
-            if r.id == except || crate::assistant::is_brain(&self.store, &r.id) {
+            if r.id == except || crate::assistant::is_hidden(&self.store, &r.id) {
                 return None;
             }
             let dir = std::path::Path::new(&r.workdir);
@@ -2207,6 +2208,8 @@ impl Chat {
             return Err(LocalError::new("CHAT_UNAVAILABLE"));
         }
         crate::claude_profiles::get(&self.store, profile).ok_or_else(|| LocalError::invalid("claude_profile", "not_found"))?;
+        // 卡在额度用完 / 账号出错上时，从哪里换（用量面板、等待卡片）都接着跑：换账号就是为了接着这段活
+        let go_on = go_on || Self::stuck_on_account(&lock(&self.inst(id).st));
         if self.is_sdk(id) {
             return self.sdk_switch_profile(id, profile, go_on).await;
         }
@@ -2248,6 +2251,96 @@ impl Chat {
             tracing::warn!(id, "换账号后一分钟内 Claude Code 没起来，不发 continue");
         });
         Ok(())
+    }
+
+    /// 助理的大脑跟着默认账号走（gateway::assistant::follow_account）：换成 `profile`（Claude Code 的账号 / Codex 的配置），
+    /// 重新起进程（Codex：重新接上对话）才用得上新的 Key、新登录的账号。在跑、在等审批时不换，返回 false 下次再试。
+    /// 卡在额度用完、账号出错上的（Claude Code）换完接着跑
+    pub async fn follow_profile(self: &Arc<Self>, id: &str, profile: &str) -> Result<bool, LocalError> {
+        self.require(id)?;
+        let inst = self.inst(id);
+        let (busy, stuck, bound) = {
+            let st = lock(&inst.st);
+            (matches!(st.phase, Phase::Running | Phase::Approval), Self::stuck_on_account(&st), st.binding.is_some())
+        };
+        if busy {
+            return Ok(false);
+        }
+        match inst.agent.launch() {
+            "claude" if self.is_sdk(id) && bound => self.sdk_switch_profile(id, profile, stuck).await?,
+            "claude" => {
+                crate::claude_profiles::pin(&self.store, id, Some(profile))?;
+                if self.is_sdk(id) {
+                    self.sdk_stop(&inst);
+                }
+            }
+            "codex" => {
+                crate::codex_profiles::pin(&self.store, id, Some(profile))?;
+                self.codex_reload(id).await;
+            }
+            _ => {}
+        }
+        Ok(true)
+    }
+
+    /// 卡在额度用完 / 账号出错上（[`Self::stuck_on_account`]）
+    pub fn stuck(&self, id: &str) -> bool {
+        Self::stuck_on_account(&lock(&self.inst(id).st))
+    }
+
+    /// 在跑或者在等审批
+    pub fn busy(&self, id: &str) -> bool {
+        matches!(lock(&self.inst(id).st).phase, Phase::Running | Phase::Approval)
+    }
+
+    /// 开一段新对话（原来的留在“以前的对话”里），按现在记的账号 / 配置起。Claude Code（对话模式）和 Codex
+    pub async fn fresh(self: &Arc<Self>, id: &str) -> Result<(), LocalError> {
+        self.require(id)?;
+        if self.busy(id) {
+            return Err(LocalError::new("CHAT_RUNNING"));
+        }
+        match self.inst(id).agent.launch() {
+            "claude" if self.is_sdk(id) => self.sdk_fresh(id).await,
+            "codex" => self.codex_input(id, "/new", &[]).await.map(|_| ()),
+            _ => Err(LocalError::new("CHAT_UNAVAILABLE")),
+        }
+    }
+
+    /// 强制重启（助理页的“重启”）：结束进程，按现在的账号、Key 重新起，接着同一段对话。
+    /// Codex：放下这段对话，app-server 记成要换（没有别的对话在跑时下次用到就换新进程，读到新的登录和 Key）
+    pub async fn restart(self: &Arc<Self>, id: &str) -> Result<(), LocalError> {
+        self.require(id)?;
+        let inst = self.inst(id);
+        match inst.agent.launch() {
+            "claude" if self.is_sdk(id) => {
+                {
+                    let mut st = lock(&inst.st);
+                    st.error = None;
+                    st.sdk.limit_tries = 0;
+                }
+                self.sdk_relaunch(id).await
+            }
+            "codex" => {
+                self.codex.stale.store(true, Ordering::SeqCst);
+                self.codex_reload(id).await;
+                {
+                    let mut st = lock(&inst.st);
+                    st.error = None;
+                    // 还没开始过对话：下次发消息时自然按新的起
+                    if st.binding.is_none() {
+                        return Ok(());
+                    }
+                }
+                self.codex_attach(id).await.map(|_| ())
+            }
+            _ => Err(LocalError::new("CHAT_UNAVAILABLE")),
+        }
+    }
+
+    /// 这一轮因为账号停着：在等额度重置后自动继续，或者 StopFailure 报了账号问题（界面上 `ACCOUNT_ERRORS` 那几种）
+    fn stuck_on_account(st: &State) -> bool {
+        const ACCOUNT_ERRORS: &[&str] = &["oauth_org_not_allowed", "account_on_hold", "billing_error", "authentication_failed", "rate_limit", "quota_expired"];
+        st.limit_wait.is_some() || st.limit_auto_at.is_some() || st.sdk.limit_resume.is_some() || st.error.as_deref().is_some_and(|e| ACCOUNT_ERRORS.contains(&e))
     }
 
     /// 这个会话能换账号：Claude Code、不在容器里（容器里的不用看看的账号，model_wrap）

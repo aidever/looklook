@@ -45,6 +45,8 @@ pub fn routes(app: App) -> Router<App> {
         .route("/assistant", get(super::assistant::state))
         .route("/assistant/enable", post(super::assistant::enable))
         .route("/assistant/settings", axum::routing::put(super::assistant::put_settings))
+        .route("/assistant/restart", post(super::assistant::restart))
+        .route("/assistant/of/{id}", get(super::assistant::of_session))
         .route("/assistant/dispatches/{id}/fix", post(super::assistant::fix))
         .route("/assistant/agreements/remove", post(super::assistant::agreement_remove))
         .route("/assistant/watch/{session}", delete(super::assistant::unwatch))

@@ -99,7 +99,7 @@ pub struct SdkSt {
     /// 不知道什么时候重置（第三方接口多半不说）：现在等的是猜的时间，界面上照实说；
     /// 连着猜了几次（每次多等一些，见 [`LIMIT_RETRY_MS`]），一轮正常做完后清零
     pub(super) limit_guess: bool,
-    limit_tries: u32,
+    pub(super) limit_tries: u32,
     /// 交给终端了（毫秒，什么时候交的）：终端里的 TUI（`claude --resume`）在接着这段对话，对话页只看；
     /// 在对话页发消息时收回来（[`Chat::sdk_take_back`]）。存在数据库里（[`term_key`]），客户端重启后还认
     pub(super) term: Option<i64>,
@@ -242,7 +242,9 @@ impl Chat {
         let mut args: Vec<String> = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio"].map(String::from).to_vec();
         // 助理的大脑：权限只由闸门（PreToolUse）管，不能跳过权限，也不让切到跳过权限
         let brain = crate::assistant::is_brain(&self.store, id);
-        if !brain {
+        // 跑腿和大脑一样只由闸门管权限
+        let gated = brain || crate::assistant::is_errand(&self.store, id);
+        if !gated {
             args.push(if opts.full_access { "--dangerously-skip-permissions" } else { "--allow-dangerously-skip-permissions" }.into());
         }
         if let Ok(p) = super::hooks::ensure_terminal_settings(&self.paths) {
@@ -272,6 +274,8 @@ impl Chat {
         // 助理的大脑（assistant.rs）：带上规矩和只给它的工具；没选过模型时用好的
         if brain {
             args.extend(crate::assistant::brain_args(&self.paths));
+        } else if gated {
+            args.extend(crate::assistant::errand_args());
         }
         if let Some(m) = model.or_else(|| brain.then(|| crate::assistant::DEFAULT_MODEL.to_string())) {
             args.extend(["--model".into(), m]);
@@ -279,7 +283,7 @@ impl Chat {
         if let Some(e) = effort {
             args.extend(["--effort".into(), e]);
         }
-        if let Some(m) = if brain { Some("default".to_string()) } else { mode } {
+        if let Some(m) = if gated { Some("default".to_string()) } else { mode } {
             args.extend(["--permission-mode".into(), m]);
         }
         // 对话里发的附件（图片以外的文件只给路径）放在附件目录，不在项目里：加进可访问的目录，读的时候不用一个个确认
@@ -989,7 +993,7 @@ impl Chat {
     }
 
     /// 结束进程、忘掉当前这段对话，起一个新的
-    async fn sdk_fresh(self: &Arc<Self>, id: &str) -> Result<(), LocalError> {
+    pub(super) async fn sdk_fresh(self: &Arc<Self>, id: &str) -> Result<(), LocalError> {
         let inst = self.inst(id);
         self.sdk_stop(&inst);
         {
@@ -1180,8 +1184,8 @@ impl Chat {
                 if !MODES.contains(&value) {
                     return Err(LocalError::invalid("value", "invalid"));
                 }
-                // 助理的大脑：权限由助理的权限模式定（助理页上换）
-                if crate::assistant::is_brain(&self.store, id) {
+                // 助理的大脑、跑腿：权限由助理的权限模式定（助理页上换）
+                if crate::assistant::is_gated(&self.store, id) {
                     return Err(LocalError::new("CHAT_MODE_UNAVAILABLE"));
                 }
             }
@@ -1244,7 +1248,14 @@ impl Chat {
         lock(&inst.st).binding.as_ref().ok_or_else(|| LocalError::new("CHAT_NOT_RUNNING"))?;
         crate::claude_profiles::pin(&self.store, id, Some(profile))?;
         self.sdk_stop(&inst);
-        Self::set_phase(&inst, &mut lock(&inst.st), Phase::Idle, None);
+        {
+            // 换了账号就不用再等原来那个账号的额度了（不然到点还会再发一次 continue）
+            let mut st = lock(&inst.st);
+            st.error = None;
+            st.sdk.limit_tries = 0;
+            self.limit_set(&inst, &mut st, None);
+            Self::set_phase(&inst, &mut st, Phase::Idle, None);
+        }
         self.sdk_attach(id).await?;
         if go_on {
             self.sdk_input(id, "continue", &[]).await?;

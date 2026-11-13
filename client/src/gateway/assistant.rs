@@ -1,13 +1,17 @@
 //! 助理碰会话的那一半（docs/ASSISTANT.md）：大脑用的工具、盯结果的看守、管理台用的接口。规矩和闸门在 `crate::assistant`。
 //!
 //! - **助理工具**（`POST /mcp/assistant`，MCP）：只认大脑的令牌、只收本机。`projects_list`、`sessions_list`、
-//!   `session_start`、`session_send`、`session_get`、`session_stop`、`agreement_add`、`agreement_done`。
+//!   `session_start`、`session_send`、`session_get`、`session_stop`、`errand_start`、`agreement_add`、`agreement_done`。
 //!   没有“批准审批”、没有“取全文”：审批只有用户能点；大脑的上下文留给跟用户说话，不背干活的记录；
 //! - **开会话**就是会话页的“新建”（[`super::create_session`]），送话就是 `Chat::input`：干活的是普通会话，会话列表里看得见、
 //!   用户随时能自己接着说；
 //! - **同一个项目默认排队**：那边有会话在干活时，新开的先记下（`assistant.queue`），等它这一轮做完再开，并告诉大脑；
 //! - **看守**（[`run`]）：每两秒看一遍助理送过话的会话。一轮结束、它在提问 → 整理成一条 `<looklook-event …>` 消息送进大脑
 //!   （最后一段回复截到 1500 字）。审批不告诉大脑，卡片直接给用户；
+//! - **跑腿**（[`errand_start`]）：要查一阵的事交给后台一个藏起来的会话，大脑马上结束这一轮，用户接着说话不用等；
+//!   查完和派出去的会话一样由看守送回大脑（事件带 `kind="errand"`），做完一天后删掉；
+//! - **账号跟着默认走**（[`follow_account`]）：大脑不记死建好时的账号；默认账号换了、那个账号的 Key / 设置改了，
+//!   大脑空闲时重新起进程用新的（卡在额度、账号出错上的接着跑）；
 //! - **管理台**（`/api/assistant…`）：状态（大脑是哪个会话、引擎和权限模式、在干的活、最近的分派、约定）、打开、换引擎和权限模式、改去向。
 
 use std::collections::HashMap;
@@ -52,6 +56,9 @@ struct Queued {
     engine: String,
     /// 整理好的第一句话
     first: String,
+    /// 新会话的权限（[`session_perm`] 定好的）
+    #[serde(default)]
+    perm: Option<core::Mode>,
 }
 
 fn queue(app: &App) -> Vec<Queued> {
@@ -276,6 +283,7 @@ fn session_view(app: &App, row: &crate::store::InstanceRow, watched: bool) -> Va
         "context_tokens": app.chat.context(&row.id),
         "last_active": b["active_at"].as_i64().filter(|t| *t > 0).map(crate::util::fmt_ms),
         "started_by_assistant": watched,
+        "errand": core::is_errand(&app.store, &row.id),
     })
 }
 
@@ -290,7 +298,7 @@ async fn sessions(app: &App, project: Option<&str>) -> Result<Vec<Value>, String
         .instances()
         .unwrap_or_default()
         .iter()
-        .filter(|r| !core::is_brain(&app.store, &r.id) && matches!(r.launch.as_str(), "claude" | "codex" | "dsh" | "opencode"))
+        .filter(|r| !core::is_hidden(&app.store, &r.id) && matches!(r.launch.as_str(), "claude" | "codex" | "dsh" | "opencode"))
         .filter(|r| dir.as_ref().is_none_or(|d| crate::history::same_dir(&r.workdir, d) || core::project_root(FsPath::new(&r.workdir)) == core::project_root(FsPath::new(d))))
         .map(|r| session_view(app, r, watches.contains_key(&r.id)))
         .collect())
@@ -346,9 +354,22 @@ fn watch(app: &App, session: &str, dispatch: &str) {
     });
 }
 
-/// 真的开一个会话，把第一句话交给它
-async fn open_session(app: &App, project: &str, title: &str, engine: &str, first: &str) -> R<String> {
-    let short = first.chars().count() <= FIRST_MAX;
+/// 派出去的会话用什么权限：用户在话里说了的（大脑填的 `permission`）> 跟助理同一档（右侧面板的开关，默认开）> 设置里新会话的默认（None）
+fn session_perm(app: &App, asked: Option<core::Mode>) -> Option<core::Mode> {
+    let s = core::settings(&app.store);
+    asked.or(s.inherit.then_some(s.mode))
+}
+
+/// 真的开一个会话，把第一句话交给它。`perm`：放手做 = 全部权限；动手前问 = 默认（要改要跑先问）；
+/// 只看不动 = Claude Code 的计划模式 / Codex 的只读。None = 设置里新会话的默认
+async fn open_session(app: &App, project: &str, title: &str, engine: &str, first: &str, perm: Option<core::Mode>) -> R<String> {
+    let read_only = perm == Some(core::Mode::ReadOnly);
+    // 只读要先换好模式再送第一句话
+    let short = first.chars().count() <= FIRST_MAX && !read_only;
+    let full_access = match perm {
+        Some(m) => m == core::Mode::Auto,
+        None => crate::settings::Settings::load(&app.store).default_full_access,
+    };
     let input = Input {
         name: Some(title.chars().take(40).collect()).filter(|t: &String| !t.trim().is_empty()),
         // 用助理起的标题（第一句话是交代，拿它当标题没法看）
@@ -356,11 +377,17 @@ async fn open_session(app: &App, project: &str, title: &str, engine: &str, first
         workdir: Some(project.to_string()),
         launch: Some(engine.to_string()),
         chat_ui: Some(true),
-        full_access: Some(crate::settings::Settings::load(&app.store).default_full_access),
+        full_access: Some(full_access),
         prompt: short.then(|| first.to_string()),
         ..Default::default()
     };
     let v = super::create_session(app, input, true).await?;
+    if read_only {
+        let mode = if engine == "codex" { "readOnly" } else { "plan" };
+        if let Err(e) = app.chat.setting(&v.row.id, "mode", mode).await {
+            tracing::warn!(error = ?e, id = %v.row.id, "助理：新会话没能换成只读");
+        }
+    }
     if !short {
         app.chat.input(&v.row.id, first, &[]).await?;
     }
@@ -386,13 +413,18 @@ async fn session_start(app: &App, a: &Value) -> Result<Value, String> {
     let brain = core::brain_id(&app.store).unwrap_or_default();
     let busy = app.chat.busy_session(FsPath::new(&project), &brain);
     let now = a["now"].as_bool().unwrap_or(false);
+    let asked = match s("permission").as_str() {
+        "" => None,
+        p => Some(core::Mode::parse(p).ok_or_else(|| format!("unknown permission {p}; use read_only, ask or auto"))?),
+    };
+    let perm = session_perm(app, asked);
     let mut d = new_dispatch("start", "", &project, &title, &engine, &reason, &said, &brief);
     if let (Some(after), false) = (&busy, now) {
         // 默认排队：同一个项目里并行，没进 git 的文件、依赖、端口都会撞
         let first = core::compose_brief(Some(&said), &brief, false);
         d.queued_after = Some(after.clone());
         let mut q = queue(app);
-        q.push(Queued { dispatch: d.id.clone(), after: after.clone(), project: project.clone(), title: title.clone(), engine: engine.clone(), first });
+        q.push(Queued { dispatch: d.id.clone(), after: after.clone(), project: project.clone(), title: title.clone(), engine: engine.clone(), first, perm });
         app.store.set(QUEUE_KEY, &q).map_err(|e| e.to_string())?;
         core::dispatch_add(&app.paths, d.clone()).map_err(|e| e.to_string())?;
         let after_title = title_by_id(app, after);
@@ -404,11 +436,11 @@ async fn session_start(app: &App, a: &Value) -> Result<Value, String> {
         }));
     }
     let first = core::compose_brief(Some(&said), &brief, busy.is_some());
-    let id = open_session(app, &project, &title, &engine, &first).await.map_err(|e| format!("could not start the session: {} {}", e.code, serde_json::to_string(&e.params).unwrap_or_default()))?;
+    let id = open_session(app, &project, &title, &engine, &first, perm).await.map_err(|e| format!("could not start the session: {} {}", e.code, serde_json::to_string(&e.params).unwrap_or_default()))?;
     d.session = id.clone();
     core::dispatch_add(&app.paths, d.clone()).map_err(|e| e.to_string())?;
     watch(app, &id, &d.id);
-    Ok(json!({ "session": id, "dispatch": d.id, "project": project, "engine": engine, "note": "Started. You will get an event when it has a result or a question; do not poll." }))
+    Ok(json!({ "session": id, "dispatch": d.id, "project": project, "engine": engine, "permission": perm.map(core::Mode::id).unwrap_or("default"), "note": "Started. You will get an event when it has a result or a question; do not poll." }))
 }
 
 fn session_row(app: &App, id: &str) -> Result<crate::store::InstanceRow, String> {
@@ -447,6 +479,66 @@ async fn session_get(app: &App, a: &Value) -> Result<Value, String> {
     Ok(v)
 }
 
+/// 跑腿（[`core::Errand`]）：开一个藏起来的会话，在后台查一件事，查完由看守把结果送回大脑
+async fn errand_start(app: &App, a: &Value) -> Result<Value, String> {
+    let s = |k: &str| a[k].as_str().unwrap_or("").trim().to_string();
+    let (title, task) = (s("title"), s("task"));
+    if title.is_empty() {
+        return Err("title is required: a few words the user will see".into());
+    }
+    if task.is_empty() {
+        return Err("task is required: what to find out, and what the answer should contain".into());
+    }
+    let running = core::errands(&app.store).keys().filter(|id| app.chat.brief(id).is_some_and(|b| b["board"] == "working")).count();
+    if running >= core::ERRAND_MAX {
+        return Err(format!("{running} errands are already running; wait for one to come back (you will get an event), or do this one yourself if it is quick"));
+    }
+    let project = match s("project") {
+        p if p.is_empty() => core::scratch(&app.paths).display().to_string(),
+        p => resolve_project(app, &p).await?,
+    };
+    let engine = core::settings(&app.store).engine;
+    let input = Input {
+        name: Some(title.chars().take(40).collect()),
+        name_custom: Some(true),
+        workdir: Some(project.clone()),
+        launch: Some(engine.launch().into()),
+        chat_ui: Some(true),
+        full_access: Some(false),
+        ..Default::default()
+    };
+    // 先建好、记成跑腿，再送话：起进程时要按跑腿带规矩、过闸门
+    let v = super::create_session(app, input, false).await.map_err(|e| format!("could not start the errand: {}", e.code))?;
+    let id = v.row.id.clone();
+    if engine == core::Engine::Claude && !app.instances.claude_sdk_mode(&v.row) {
+        let _ = app.instances.delete(&id).await;
+        return Err("errands are not available on this computer; do it yourself".into());
+    }
+    core::errand_update(&app.store, |m| {
+        m.insert(id.clone(), core::Errand { title: title.clone(), project: project.clone(), started_at: crate::util::system_ms() });
+    });
+    // 跑腿也接着用大脑的账号
+    if engine == core::Engine::Claude {
+        if let Some(brain) = core::brain_id(&app.store) {
+            let _ = crate::claude_profiles::pin(&app.store, &id, crate::claude_profiles::pinned(&app.store, &brain).as_deref());
+        }
+    }
+    watch(app, &id, "");
+    let said = core::said(&app.store).map(|x| x.text).unwrap_or_default();
+    let text = if said.is_empty() { task } else { format!("{task}\n\n（用户的原话，供参考）\n{said}") };
+    if let Err(e) = app.chat.input(&id, &text, &[]).await {
+        core::errand_update(&app.store, |m| {
+            m.remove(&id);
+        });
+        core::watch_update(&app.store, |m| {
+            m.remove(&id);
+        });
+        let _ = app.instances.delete(&id).await;
+        return Err(format!("could not start the errand: {}", e.code));
+    }
+    Ok(json!({ "errand": id, "project": project, "note": "Running in the background. You will get an event with kind=\"errand\" when it is done. Tell the user in one short line that you are on it, then end this turn." }))
+}
+
 async fn call_tool(app: &App, name: &str, a: &Value) -> Option<Result<Value, String>> {
     Some(match name {
         "projects_list" => Ok(json!({ "projects": projects(app).await, "scratch": core::scratch(&app.paths), "note": "For work that belongs to no project, use project=\"scratch\"." })),
@@ -454,6 +546,7 @@ async fn call_tool(app: &App, name: &str, a: &Value) -> Option<Result<Value, Str
         "session_start" => session_start(app, a).await,
         "session_send" => session_send(app, a).await,
         "session_get" => session_get(app, a).await,
+        "errand_start" => errand_start(app, a).await,
         "session_stop" => match session_row(app, a["session"].as_str().unwrap_or("")) {
             Ok(row) => app.chat.interrupt(&row.id).await.map(|_| json!({ "stopped": row.id })).map_err(|e| format!("could not stop: {}", e.code)),
             Err(e) => Err(e),
@@ -478,6 +571,7 @@ fn tool_defs() -> Value {
               "reason": { "type": "string", "description": "One sentence, in the user's language, shown to the user: why a new session, why here." },
               "engine": { "type": "string", "enum": ENGINES, "description": "Only when the user named one, or the project is known to use one. Default: claude." },
               "now": { "type": "boolean", "description": "Start right away even though another session is working in the same project. Only when the user asked for that." },
+              "permission": { "type": "string", "enum": ["read_only", "ask", "auto"], "description": "Only when the user said how much this session may do on its own (\"let it go ahead\" = auto, \"only look, don't change\" = read_only, \"ask me first\" = ask). Omit otherwise: Looklook applies the user's setting (usually the same level as yours)." },
           }), &["project", "title", "reason"]) },
         { "name": "session_send", "description": "Send a follow-up into an EXISTING session: more requirements, a correction, an answer to its question. Use for the same piece of work, or the same area of code while its context is not full.",
           "inputSchema": obj(json!({
@@ -488,6 +582,12 @@ fn tool_defs() -> Value {
         { "name": "session_get", "description": "The current state of one session and the end of its last reply (at most 1500 characters). Use this before answering \"how is it going\". There is no way to fetch a whole transcript; give the user the session instead.",
           "inputSchema": obj(json!({ "session": { "type": "string" } }), &["session"]) },
         { "name": "session_stop", "description": "Interrupt a session's current turn. Only when the user just asked for it.", "inputSchema": obj(json!({ "session": { "type": "string" } }), &["session"]) },
+        { "name": "errand_start", "description": "Hand something that takes more than a few steps to a background helper so this turn can end and the user does not have to wait: investigating, searching several repos, running tests or builds to see the result, web research, comparing, summarising. Not for changing code (use session_start). It runs as a hidden session with the same permissions as you, cannot ask the user anything, and reports back with an event (kind=\"errand\"). Several errands can run at once.",
+          "inputSchema": obj(json!({
+              "title": { "type": "string", "description": "A few words, in the user's language, shown in the activity list." },
+              "task": { "type": "string", "description": "What to find out and what the answer must contain. Self-contained: it does not see this conversation (the user's latest words are attached)." },
+              "project": { "type": "string", "description": "Project to work in (name from projects_list or an absolute path). Omit for your scratch folder." },
+          }), &["title", "task"]) },
         { "name": "agreement_add", "description": "Record a standing instruction the user gave in conversation that has a condition or an end (\"don't touch payments until I confirm\", \"no pushes this week\"). It is shown to you on every turn from now on, so it survives long conversations.",
           "inputSchema": obj(json!({ "text": { "type": "string", "description": "The instruction, in the user's words, under 300 characters." }, "until": { "type": "string", "description": "When it ends, if the user said (their words)." } }), &["text"]) },
         { "name": "agreement_done", "description": "Remove a standing agreement that has expired or that the user cancelled.", "inputSchema": obj(json!({ "id": { "type": "string" } }), &["id"]) },
@@ -606,6 +706,8 @@ pub async fn run(app: App) {
             continue;
         }
         start_queued(&app).await;
+        follow_account(&app).await;
+        sweep_errands(&app).await;
         for (sid, w) in core::watches(&app.store) {
             let Some(row) = app.store.instance(&sid).ok().flatten() else {
                 core::watch_update(&app.store, |m| {
@@ -615,6 +717,7 @@ pub async fn run(app: App) {
             };
             let Some(b) = app.chat.brief(&sid) else { continue };
             let title = title_of(&app, &row, &b);
+            let kind = if core::is_errand(&app.store, &sid) { " kind=\"errand\"" } else { "" };
             // 它在提问：告诉大脑（它可能答得上，答不上就转给用户）。审批不告诉：卡片直接给用户
             let pending = b["attn"]["pending_id"].as_u64().filter(|_| b["attn"]["kind"] == "question");
             if pending.is_some() && pending != w.told_pending {
@@ -626,7 +729,7 @@ pub async fn run(app: App) {
                 let q = b["attn"]["question"].as_str().unwrap_or("").to_string();
                 let opts: Vec<&str> = b["attn"]["options"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
                 let body = format!("它在问：{q}\n选项：{}\n用户能在看看里直接回答这张卡片。只有答案就在用户交代这件活时说过的话里，你才用 session_send 替他答，并告诉他。", if opts.is_empty() { "（自己填）".to_string() } else { opts.join(" / ") });
-                tell_brain_push(&app, event("question", &sid, &title, &row.workdir, "", &body), true).await;
+                tell_brain_push(&app, event("question", &sid, &title, &row.workdir, kind, &body), true).await;
             }
             let ended = b["turn"]["ended_at"].as_i64().unwrap_or(0);
             let running = matches!(b["phase"].as_str(), Some("running" | "approval"));
@@ -651,8 +754,251 @@ pub async fn run(app: App) {
                 (_, true) => "这一轮结束了，它没有留下文字回复。".to_string(),
                 _ => format!("它最后说的（最多 {REPLY_MAX} 字，更早的看会话）：\n{}", core::tail_chars(&reply, REPLY_MAX)),
             };
-            tell_brain_push(&app, event("turn_end", &sid, &title, &row.workdir, &format!(" outcome=\"{outcome}\""), &body), true).await;
+            tell_brain_push(&app, event("turn_end", &sid, &title, &row.workdir, &format!("{kind} outcome=\"{outcome}\""), &body), true).await;
         }
+    }
+}
+
+/// 多久看一次账号变了没有（要读 `.claude.json`，不每两秒读）
+const ACCOUNT_EVERY: Duration = Duration::from_secs(30);
+
+/// 大脑跟着默认账号走：大脑不是用户开的干活会话，不该记死建好那天的默认账号。
+/// 默认账号换了、那个账号的 Key / 设置 / 登录的账号变了：大脑空闲时换过去、重新起进程（卡在额度上的接着跑）。
+/// 用户在对话里给大脑手动换了别的账号，到默认账号再变之前都不动它。跑腿起的时候用大脑的账号
+async fn follow_account(app: &App) {
+    static LAST: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+    {
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        if last.is_some_and(|t| t.elapsed() < ACCOUNT_EVERY) {
+            return;
+        }
+        *last = Some(Instant::now());
+    }
+    for (engine, brain) in core::brains(&app.store) {
+        let Some((def, sig)) = default_account(app, &engine) else { continue };
+        let key = format!("assistant.account.{engine}");
+        let seen: Option<String> = app.store.get(&key).ok().flatten();
+        let Some(seen) = seen else {
+            // 第一次（升级上来）：记下现在的，不动
+            let _ = app.store.set(&key, &sig);
+            continue;
+        };
+        if seen == sig || app.store.instance(&brain).ok().flatten().is_none() {
+            continue;
+        }
+        match brain_to(app, &brain, &def, None).await {
+            Ok(true) => {
+                tracing::info!(engine, profile = %def, "助理：默认账号或它的 Key、登录变了，大脑换过去");
+                let _ = app.store.set(&key, &sig);
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(error = ?e, engine, "助理：大脑没能换到默认账号");
+                let _ = app.store.set(&key, &sig);
+            }
+        }
+    }
+}
+
+// ---------------- 换引擎、换服务商：把对话带过去 ----------------
+
+/// 每个大脑带走到哪一条了（`ts`）：换引擎来回切时只带上次之后的
+const HANDED_KEY: &str = "assistant.handed";
+/// 带过去的对话最多多少字（从最近的往前留）
+const DIGEST_MAX: usize = 12_000;
+const DIGEST_ITEM_MAX: usize = 800;
+
+fn clip(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        return s.to_string();
+    }
+    format!("{}…", s.chars().take(n).collect::<String>())
+}
+
+/// 把对话（快照里的最近一段，`since` 之后的）整理成“用户：/助理：”几行，最近的优先、最多 [`DIGEST_MAX`] 字。
+/// 看看送进去的事件只留一行（带过来的对话那种不留，免得来回切越滚越长）。返回 (文字, 最后一条的 ts)
+/// `expand`：带过来的对话那种事件展开成里面的内容（同一个大脑换服务商时，旧对话可能只有上次带过来的那些）；
+/// 换引擎时不展开（那是从对面带过来的，对面本来就有）
+fn digest_items(items: &[Value], since: Option<&str>, expand: bool) -> (String, Option<String>) {
+    let mut lines = vec![];
+    let mut last = None;
+    for it in items {
+        let ts = it["ts"].as_str().unwrap_or("");
+        if since.is_some_and(|s| ts <= s) {
+            continue;
+        }
+        let line = match it["k"].as_str() {
+            Some("user") => {
+                let t = it["text"].as_str().unwrap_or("").trim();
+                if t.is_empty() {
+                    continue;
+                }
+                match t.strip_prefix(EVENT_OPEN) {
+                    Some(ev) if ev.contains("type=\"handoff\"") => {
+                        if !expand {
+                            continue;
+                        }
+                        // 头一句是说明、最后一句是“接着答 / 回一句”，中间是带过来的对话
+                        let body = ev.split_once('>').map(|x| x.1).unwrap_or("").trim().trim_end_matches("</looklook-event>").trim();
+                        let mid = body.split_once("\n\n").map(|x| x.1).unwrap_or(body);
+                        let mid = mid.rsplit_once("\n\n").map(|x| x.0).unwrap_or(mid);
+                        if mid.trim().is_empty() {
+                            continue;
+                        }
+                        mid.trim().to_string()
+                    }
+                    Some(ev) => {
+                        let (head, body) = ev.split_once('>').unwrap_or((ev, ""));
+                        let body = body.trim().trim_end_matches("</looklook-event>").trim();
+                        format!("（看看送来的消息{}）{}", head.trim_end(), clip(body, 300))
+                    }
+                    None => format!("用户：{}", clip(t, DIGEST_ITEM_MAX)),
+                }
+            }
+            Some("assistant") => {
+                let t: Vec<&str> = it["blocks"].as_array().into_iter().flatten().filter(|b| b["t"] == "text").filter_map(|b| b["text"].as_str()).collect();
+                let t = t.join("\n");
+                if t.trim().is_empty() {
+                    continue;
+                }
+                format!("助理：{}", clip(t.trim(), DIGEST_ITEM_MAX))
+            }
+            _ => continue,
+        };
+        last = Some(ts.to_string());
+        lines.push(line);
+    }
+    let mut out = vec![];
+    let mut n = 0;
+    for l in lines.iter().rev() {
+        n += l.chars().count() + 1;
+        if n > DIGEST_MAX {
+            break;
+        }
+        out.push(l.as_str());
+    }
+    out.reverse();
+    (out.join("\n"), last)
+}
+
+async fn digest(app: &App, brain: &str, since: Option<&str>, expand: bool) -> (String, Option<String>) {
+    match app.chat.snapshot(brain).await {
+        Ok(v) => digest_items(v["items"].as_array().map(Vec::as_slice).unwrap_or(&[]), since, expand),
+        Err(_) => (String::new(), None),
+    }
+}
+
+/// 把整理好的对话送进现在的大脑（界面上是一张“带过来的对话”卡片）。`stuck`：用户最后那句因为账号问题没答上，接着答
+async fn hand_in(app: &App, from: &str, text: &str, stuck: bool) {
+    if text.is_empty() && !stuck {
+        return;
+    }
+    let tail = if stuck { "用户最后那句因为账号问题没答上，现在接着答。" } else { "这条不用细回，回一句“接上了”就行，等用户往下说。" };
+    let body = format!("下面是你（同一个助理）之前在「{from}」里和用户的对话（最近的部分，更早的省略了）。现在换到这里，接着往下聊；还有效的约定、在干的活以每一轮附带的信息为准。\n\n{text}\n\n{tail}");
+    tell_brain_push(app, event("handoff", "", from, "", "", &body), stuck).await;
+}
+
+/// 换引擎（Claude Code ↔ Codex）：把旧引擎大脑上次带走之后的对话带给新的
+async fn hand_over(app: &App, from_brain: &str, from: core::Engine) {
+    let mut handed: std::collections::BTreeMap<String, String> = app.store.get(HANDED_KEY).ok().flatten().unwrap_or_default();
+    let (text, last) = digest(app, from_brain, handed.get(from_brain).map(String::as_str), false).await;
+    if let Some(l) = last {
+        handed.insert(from_brain.to_string(), l);
+        let _ = app.store.set(HANDED_KEY, &handed);
+    }
+    let name = match from {
+        core::Engine::Claude => "Claude Code",
+        core::Engine::Codex => "Codex",
+    };
+    hand_in(app, name, &text, false).await;
+}
+
+/// 大脑现在记的、和要换的那个配置是不是同一家（见 `claude_profiles::provider_key`）。返回 (同一家, 新配置的名字)
+fn same_provider(app: &App, brain: &str, launch: &str, profile: &str) -> R<(bool, String)> {
+    match launch {
+        "claude" => {
+            use crate::claude_profiles as cp;
+            let to = cp::get(&app.store, profile).ok_or_else(|| LocalError::invalid("claude_profile", "not_found"))?;
+            Ok((cp::provider_key(&cp::for_instance(&app.store, brain)) == cp::provider_key(&to), to.name))
+        }
+        "codex" => {
+            use crate::codex_profiles as xp;
+            let to = xp::get(&app.store, profile).ok_or_else(|| LocalError::invalid("codex_profile", "not_found"))?;
+            Ok((xp::provider_key(&xp::for_instance(&app.store, brain)) == xp::provider_key(&to), to.name))
+        }
+        _ => Err(LocalError::new("CHAT_UNAVAILABLE")),
+    }
+}
+
+/// 大脑换账号 / 配置。同一家（都是官方账号，或者同一个第三方地址）接着原来那段对话（`--resume` / `thread/resume`）；
+/// 换了家：旧对话里的思考内容对方认不了，接着用会报错——开一段新对话，把前面的带过去。
+/// `go_on`：None = 跟着默认走（在跑时不换，返回 false）；Some = 用户点的换账号（卡在账号上时都接着跑）
+pub(crate) async fn brain_to(app: &App, brain: &str, profile: &str, go_on: Option<bool>) -> R<bool> {
+    if app.chat.busy(brain) {
+        if go_on.is_none() {
+            return Ok(false);
+        }
+        return Err(LocalError::new("CHAT_RUNNING"));
+    }
+    let row = app.store.instance(brain)?.ok_or_else(LocalError::not_found)?;
+    let (same, _) = same_provider(app, brain, &row.launch, profile)?;
+    if same {
+        return match go_on {
+            None => app.chat.follow_profile(brain, profile).await,
+            Some(g) => app.chat.switch_profile(brain, profile, g).await.map(|_| true),
+        };
+    }
+    let stuck = app.chat.stuck(brain);
+    let (text, _) = digest(app, brain, None, true).await;
+    match row.launch.as_str() {
+        "claude" => crate::claude_profiles::pin(&app.store, brain, Some(profile))?,
+        _ => crate::codex_profiles::pin(&app.store, brain, Some(profile))?,
+    }
+    app.chat.fresh(brain).await?;
+    tracing::info!(brain, profile, "助理：换了一家模型服务，开新对话把前面的带过去");
+    hand_in(app, "换账号之前", &text, stuck).await;
+    Ok(true)
+}
+
+/// 这个引擎现在的默认配置和它的 signature（见 [`follow_account`]）
+fn default_account(app: &App, engine: &str) -> Option<(String, String)> {
+    let home = &app.paths.home;
+    match engine {
+        "claude" => {
+            let def = crate::claude_profiles::default_id(&app.store);
+            let p = crate::claude_profiles::get(&app.store, &def)?;
+            Some((def, crate::claude_profiles::signature(home, &p)))
+        }
+        "codex" => {
+            let def = crate::codex_profiles::default_id(&app.store);
+            let p = crate::codex_profiles::get(&app.store, &def)?;
+            Some((def, crate::codex_profiles::signature(home, &p)))
+        }
+        _ => None,
+    }
+}
+
+/// 跑腿做完一天了（或者会话已经没了）：删掉
+async fn sweep_errands(app: &App) {
+    let now = crate::util::system_ms();
+    for (id, e) in core::errands(&app.store) {
+        let gone = app.store.instance(&id).ok().flatten().is_none();
+        let busy = app.chat.brief(&id).is_some_and(|b| matches!(b["board"].as_str(), Some("working" | "attn")));
+        if !gone && (busy || now - e.started_at < core::ERRAND_KEEP_MS) {
+            continue;
+        }
+        if !gone {
+            if let Err(e) = app.instances.delete(&id).await {
+                tracing::warn!(error = ?e, id, "助理：删不掉做完的跑腿");
+                continue;
+            }
+        }
+        core::errand_update(&app.store, |m| {
+            m.remove(&id);
+        });
+        core::watch_update(&app.store, |m| {
+            m.remove(&id);
+        });
     }
 }
 
@@ -669,7 +1015,7 @@ async fn start_queued(app: &App) {
             left.push(item);
             continue;
         }
-        match open_session(app, &item.project, &item.title, &item.engine, &item.first).await {
+        match open_session(app, &item.project, &item.title, &item.engine, &item.first, item.perm).await {
             Ok(id) => {
                 core::dispatch_update(&app.paths, &item.dispatch, |d| d.session = id.clone());
                 watch(app, &id, &item.dispatch);
@@ -724,6 +1070,8 @@ pub struct SettingsReq {
     mode: Option<String>,
     #[serde(default)]
     feishu: Option<bool>,
+    #[serde(default)]
+    inherit: Option<bool>,
 }
 
 fn parse_settings(app: &App, req: &SettingsReq) -> R<core::Settings> {
@@ -736,6 +1084,9 @@ fn parse_settings(app: &App, req: &SettingsReq) -> R<core::Settings> {
     }
     if let Some(f) = req.feishu {
         s.feishu = f;
+    }
+    if let Some(v) = req.inherit {
+        s.inherit = v;
     }
     Ok(s)
 }
@@ -752,9 +1103,50 @@ pub async fn enable(State(app): State<App>, body: Option<Json<SettingsReq>>) -> 
 /// 换引擎、权限模式。换引擎：用那个引擎的大脑（没有就建一个；换回来接着原来的对话）；权限模式下一次用工具就生效
 pub async fn put_settings(State(app): State<App>, Json(req): Json<SettingsReq>) -> R<Json<Value>> {
     let s = parse_settings(&app, &req)?;
+    let old = core::settings(&app.store).engine;
+    let from = core::brain_id(&app.store);
     let brain = ensure_brain(&app, s.engine).await?;
     core::save_settings(&app.store, s)?;
+    // 换引擎：两边是两段对话，把旧的那边上次带走之后说的带过来（后台做，不让页面等）
+    if let Some(from) = from.filter(|f| s.engine != old && *f != brain) {
+        let app = app.clone();
+        tokio::spawn(async move { hand_over(&app, &from, old).await });
+    }
     Ok(Json(json!({ "brain": brain, "settings": s })))
+}
+
+/// 强制重启助理：停下在跑的这一轮，按现在的默认账号、Key 重新起（换 Key 没生效、卡住时用）。卡在账号问题上的接着跑
+pub async fn restart(State(app): State<App>) -> R<Json<Value>> {
+    let brain = core::brain_id(&app.store).ok_or_else(LocalError::not_found)?;
+    let engine = core::settings(&app.store).engine.launch();
+    if app.chat.busy(&brain) {
+        let _ = app.chat.interrupt(&brain).await;
+        let until = Instant::now() + Duration::from_secs(10);
+        while app.chat.busy(&brain) && Instant::now() < until {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+    let (def, sig) = default_account(&app, engine).ok_or_else(LocalError::not_found)?;
+    let pinned = match engine {
+        "claude" => crate::claude_profiles::pinned(&app.store, &brain),
+        _ => crate::codex_profiles::pinned(&app.store, &brain),
+    };
+    let stuck = app.chat.stuck(&brain);
+    if pinned.as_deref() != Some(def.as_str()) {
+        brain_to(&app, &brain, &def, Some(stuck)).await?;
+    } else {
+        app.chat.restart(&brain).await?;
+        if stuck {
+            app.chat.input(&brain, "continue", &[]).await?;
+        }
+    }
+    let _ = app.store.set(&format!("assistant.account.{engine}"), &sig);
+    tracing::info!(brain, profile = %def, "助理：强制重启");
+    let name = match engine {
+        "claude" => crate::claude_profiles::get(&app.store, &def).map(|p| p.name),
+        _ => crate::codex_profiles::get(&app.store, &def).map(|p| p.name),
+    };
+    Ok(Json(json!({ "profile": def, "name": name.unwrap_or_default(), "continued": stuck })))
 }
 
 #[derive(Deserialize)]
@@ -776,7 +1168,7 @@ pub async fn fix(State(app): State<App>, Path(id): Path<String>, Json(req): Json
         "new" if d.kind == "send" => {
             let first = core::compose_brief(Some(&d.said), &d.brief, false);
             let title = d.said.lines().next().unwrap_or(&d.title).chars().take(30).collect::<String>();
-            open_session(&app, &d.project, &title, if ENGINES.contains(&d.engine.as_str()) { &d.engine } else { "claude" }, &first).await?
+            open_session(&app, &d.project, &title, if ENGINES.contains(&d.engine.as_str()) { &d.engine } else { "claude" }, &first, session_perm(&app, None)).await?
         }
         "into" => {
             let target = req.session.as_deref().map(str::trim).filter(|s| !s.is_empty() && Some(*s) != wrong.as_deref()).ok_or_else(|| LocalError::invalid("session", "required"))?;
@@ -827,6 +1219,15 @@ pub async fn agreement_remove(State(app): State<App>, Json(req): Json<AgreementR
 }
 
 /// 不再盯着这个会话（“在干的活”里点掉）
+/// 这个会话是不是助理派来的（会话页顶上那条“助理派来的”）：最近一次派到它的原因；跑腿也算。都不是时 404
+pub async fn of_session(State(app): State<App>, Path(id): Path<String>) -> R<Json<Value>> {
+    if let Some(e) = core::errands(&app.store).get(&id) {
+        return Ok(Json(json!({ "errand": true, "title": e.title, "reason": "", "at": e.started_at })));
+    }
+    let d = core::dispatches(&app.paths).into_iter().rev().find(|d| d.session == id && d.fixed.is_none()).ok_or_else(LocalError::not_found)?;
+    Ok(Json(json!({ "errand": false, "title": d.title, "reason": d.reason, "at": d.at })))
+}
+
 pub async fn unwatch(State(app): State<App>, Path(session): Path<String>) -> StatusCode {
     core::watch_update(&app.store, |m| {
         m.remove(&session);
@@ -852,6 +1253,31 @@ pub async fn lark_next(State(app): State<App>) -> R<Json<crate::lark_cli::Status
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn digest_keeps_latest_and_skips_handoff() {
+        let items = vec![
+            json!({ "ts": "2026-11-13T01:00:00Z", "k": "user", "text": "修一下登录" }),
+            json!({ "ts": "2026-11-13T01:00:01Z", "k": "assistant", "blocks": [{ "t": "tool_use" }, { "t": "text", "text": "派给会话了" }] }),
+            json!({ "ts": "2026-11-13T01:00:02Z", "k": "user", "text": "<looklook-event type=\"handoff\" session=\"\" title=\"Codex\" project=\"\">\n说明\n\n用户：旧的一句\n助理：旧的回答\n\n回一句接上了\n</looklook-event>" }),
+            json!({ "ts": "2026-11-13T01:00:03Z", "k": "user", "text": "<looklook-event type=\"turn_end\" session=\"s1\" title=\"修登录\" project=\"/w\">\n修好了\n</looklook-event>" }),
+            json!({ "ts": "2026-11-13T01:00:04Z", "k": "assistant", "blocks": [] }),
+        ];
+        let (t, last) = digest_items(&items, None, false);
+        assert_eq!(last.as_deref(), Some("2026-11-13T01:00:03Z"));
+        assert!(t.starts_with("用户：修一下登录\n助理：派给会话了\n（看看送来的消息"), "{t}");
+        assert!(t.contains("修好了") && !t.contains("旧的"), "{t}");
+        // 只带上次之后的
+        let (t, _) = digest_items(&items, Some("2026-11-13T01:00:01Z"), false);
+        assert!(!t.contains("修一下登录") && t.contains("修好了"));
+        // 同一个大脑换服务商：带过来的那段展开（只留中间的对话）
+        let (t, _) = digest_items(&items, None, true);
+        assert!(t.contains("用户：旧的一句\n助理：旧的回答") && !t.contains("说明") && !t.contains("接上了"), "{t}");
+        // 太长时留最近的
+        let many: Vec<Value> = (0..100).map(|i| json!({ "ts": format!("2026-11-13T02:{i:02}:00Z"), "k": "user", "text": format!("第{i}句{}", "长".repeat(500)) })).collect();
+        let (t, _) = digest_items(&many, None, false);
+        assert!(t.chars().count() <= DIGEST_MAX && t.contains("第99句") && !t.contains("第0句"));
+    }
 
     #[test]
     fn repos_in_project() {

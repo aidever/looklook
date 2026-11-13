@@ -267,6 +267,11 @@ fn yes() -> bool {
 
 /// 换个 Claude Code 账号接着同一段对话继续
 pub async fn switch_profile(State(app): State<App>, Path(id): Path<String>, Json(req): Json<SwitchProfileReq>) -> R<StatusCode> {
+    // 助理的大脑：换了一家模型服务时要开新对话把前面的带过去（gateway::assistant::brain_to）
+    if crate::assistant::is_brain(&app.store, &id) {
+        super::assistant::brain_to(&app, &id, &req.profile, Some(req.go_on)).await?;
+        return Ok(StatusCode::NO_CONTENT);
+    }
     app.chat.switch_profile(&id, &req.profile, req.go_on).await?;
     Ok(StatusCode::NO_CONTENT)
 }

@@ -392,7 +392,8 @@ impl Instances {
         let mut rows = self.store.instances()?;
         // 助理的大脑是个会话，但不列出来（在助理页上用）
         let brains = crate::assistant::brains(&self.store);
-        rows.retain(|r| !brains.values().any(|b| *b == r.id));
+        let errands = crate::assistant::errands(&self.store);
+        rows.retain(|r| !brains.values().any(|b| *b == r.id) && !errands.contains_key(&r.id));
         let sessions = self.tmux_sessions().await;
         let mut views: Vec<View> = rows.into_iter().map(|r| self.view(r, sessions.as_ref())).collect();
         let stale = lock(&self.titles).at.is_none_or(|at| at.elapsed() >= TITLE_TTL);

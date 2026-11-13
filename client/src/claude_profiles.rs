@@ -197,6 +197,32 @@ pub fn config_paths(home: &Path, p: &Profile) -> (PathBuf, PathBuf) {
     }
 }
 
+/// 是哪一家：官方账号之间（换个登录）能接着同一段对话；换到别家（官方↔第三方、换个第三方地址）旧对话里的思考内容对方认不了，
+/// 助理换家时开新对话把前面的带过去（gateway::assistant::brain_to）
+pub fn provider_key(p: &Profile) -> String {
+    match p.kind {
+        Kind::Official => "anthropic".into(),
+        Kind::Api => format!("api|{}", p.base_url.as_deref().unwrap_or("").trim_end_matches('/')),
+    }
+}
+
+/// 起进程时用到的这个配置的全部东西（设置、Key 文件改没改、登录的是哪个账号）合成的一个串：变了就要重新起进程才生效。
+/// 登录看 `.claude.json` 的 `oauthAccount.accountUuid`（换了账号才变，令牌刷新不变）
+pub fn signature(home: &Path, p: &Profile) -> String {
+    let key = std::fs::metadata(key_path(home, &p.id)).ok().map(|m| format!("{:?}/{}", m.modified().ok(), m.len())).unwrap_or_default();
+    let account = match p.kind {
+        Kind::Official => {
+            let state = config_paths(home, p).1;
+            std::fs::read(&state).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).and_then(|v| v["oauthAccount"]["accountUuid"].as_str().map(String::from)).unwrap_or_default()
+        }
+        Kind::Api => String::new(),
+    };
+    // 改名不算
+    let mut p = p.clone();
+    p.name.clear();
+    format!("{}|{key}|{account}", serde_json::to_string(&p).unwrap_or_default())
+}
+
 /// 新建或修改时填的
 #[derive(Debug, Default, Deserialize)]
 pub struct Input {

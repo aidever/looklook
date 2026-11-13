@@ -3935,6 +3935,8 @@
     "title": "Assistant",
     "side": "Dispatch log",
     "unwatch": "Stop tracking",
+    "errand": "Errand",
+    "stop": "Stop this turn",
     "state": {
       "working": "working",
       "waiting_for_user": "needs you",
@@ -3948,6 +3950,7 @@
     "intro_2": "Every dispatch shows where it went and why; tap \"Wrong\" to redirect it.",
     "intro_3": "Small things like checking status or running a read-only command it does itself; changes to project code are always handed off. How far it may act on its own is set by the permission mode below.",
     "intro_4": "It tells you when work is done or a session is waiting on you, and keeps standing instructions (\"don't touch payments yet\") in mind.",
+    "intro_5": "Anything that takes a while to look into goes to a background errand, so you never wait: just say the next thing. It reports back when the errand is done.",
     "enable": "Turn on assistant",
     "enable_note": "Uses Claude Code or Codex (chat mode) installed on this computer, with a strong model by default; usage is billed to that account as usual and shows up in usage stats. You can switch any time from the page header.",
     "unavailable": "{{name}} can’t be used as the assistant on this computer: it must be installed and support chat mode (Claude Code chat mode isn’t available on Windows yet).",
@@ -3984,7 +3987,8 @@
       "start_failed": "Queued work failed to start:",
       "rerouted": "Redirected:",
       "show": "Show message",
-      "hide": "Hide"
+      "hide": "Hide",
+      "handoff": "Conversation carried over from"
     },
     "engine": "Runs on",
     "engine_hint": "Which tool the assistant uses to think and dispatch. The page, tools and rules are the same; dispatched sessions can use either.",
@@ -4030,6 +4034,37 @@
       "lark_need_node": "This computer has no npm. Install Node.js first.",
       "lark_failed": "The last install failed: {{msg}}",
       "lark_also": "You can also send “help” to the bot in Feishu to install it."
-    }
+    },
+    "activity": "Activity",
+    "side_show": "Show activity",
+    "side_hide": "Hide",
+    "tab": {
+      "activity": "Activity",
+      "agreements": "Agreements",
+      "settings": "Settings"
+    },
+    "group": {
+      "waiting": "Needs you",
+      "working": "Working",
+      "done": "Done"
+    },
+    "activity_empty": "Nothing handed off right now. Sessions the assistant starts and its background errands show up here.",
+    "back_activity": "Back to activity",
+    "open_full": "Open session page",
+    "inherit": "Sessions it starts get its permission level",
+    "inherit_on": "Sessions it starts now use the assistant's permission level",
+    "inherit_off": "Sessions it starts now use the default for new sessions",
+    "inherit_on_hint": "Currently \"{{mode}}\": new sessions it starts get the same (hands-off = full access, look only = read-only). Applies from the next hand-off; if you say otherwise (\"let it go ahead\"), your words win.",
+    "inherit_off_hint": "Sessions it starts use the default permission for new sessions from Settings; if you say otherwise, your words win.",
+    "restart": "Restart assistant",
+    "restart_hint": "Ends the assistant's process and starts it again with the current default account and key, continuing the same conversation. Use it when a new key or login hasn't taken effect, or it seems stuck.",
+    "restarted": "Assistant restarted, using: {{name}}",
+    "restarted_go_on": "Assistant restarted ({{name}}) and is answering your last message",
+    "account_builtin": "Default account on this computer",
+    "agreements_hint": "Things you asked for with a condition or an end date. The assistant checks them every turn; tap × when they no longer apply.",
+    "from": "Started by the assistant",
+    "from_errand": "Assistant's background errand",
+    "back": "Back to assistant",
+    "clear_done": "Clear"
   }
 }

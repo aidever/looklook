@@ -133,6 +133,35 @@ pub fn key_set(home: &Path, id: &str) -> bool {
     std::fs::metadata(key_path(home, id)).is_ok_and(|m| m.len() > 0)
 }
 
+/// 见 `claude_profiles::provider_key`
+pub fn provider_key(p: &Profile) -> String {
+    match &p.base_url {
+        Some(u) => format!("api|{}", u.trim_end_matches('/')),
+        None => "openai".into(),
+    }
+}
+
+/// 见 `claude_profiles::signature`：设置、Key 文件、本机默认登录的账号（`auth.json` 的 `tokens.account_id`，刷新令牌不变）
+pub fn signature(home: &Path, p: &Profile) -> String {
+    let key = std::fs::metadata(key_path(home, &p.id)).ok().map(|m| format!("{:?}/{}", m.modified().ok(), m.len())).unwrap_or_default();
+    let account = if p.is_api() {
+        String::new()
+    } else {
+        let auth = crate::agents::codex_home().join("auth.json");
+        std::fs::read(auth).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).map(|v| {
+            // 用 API Key 登录的：Key 换了也算（只存摘要）
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            v["OPENAI_API_KEY"].as_str().unwrap_or("").hash(&mut h);
+            format!("{}/{:x}", v["tokens"]["account_id"].as_str().unwrap_or(""), h.finish())
+        }).unwrap_or_default()
+    };
+    // 改名不算
+    let mut p = p.clone();
+    p.name.clear();
+    format!("{}|{key}|{account}", serde_json::to_string(&p).unwrap_or_default())
+}
+
 /// 新建或修改时填的
 #[derive(Debug, Default, Deserialize)]
 pub struct Input {

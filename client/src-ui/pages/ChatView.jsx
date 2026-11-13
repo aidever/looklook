@@ -163,6 +163,7 @@ import { clockAt } from '../shared/board.js';
 import { touchUi, useLayer } from '../shared/layers.js';
 import { connManaged, isOnline, useConn } from '../shared/conn.js';
 import { takeChatInsert } from '../shared/chatInsert.js';
+import { AssistantOpen, useOpenSession } from '../shared/assistantOpen.js';
 
 // ---------------- 数据 ----------------
 
@@ -1157,6 +1158,42 @@ function AssistantEvent({ text }) {
         )}
       </div>
       {open && <pre className="chat-aevt-body">{ev.body}</pre>}
+    </div>
+  );
+}
+
+/** 助理派来的会话（在会话页打开时）：一条窄条写着为什么派到这里，能回到助理。在助理页里打开的不显示（本来就在旁边） */
+function FromAssistant({ id }) {
+  const { t } = useTranslation();
+  const { navigate } = useRouter();
+  const inAssistant = useContext(AssistantOpen);
+  const [d, setD] = useState(null);
+  const [hide, setHide] = useState(false);
+  useEffect(() => {
+    if (inAssistant) return undefined;
+    let live = true;
+    setD(null);
+    deviceApi(terminalDevice(id))
+      .get(`/assistant/of/${id}`)
+      .then((r) => live && setD(r), () => {});
+    return () => {
+      live = false;
+    };
+  }, [id, inAssistant]);
+  if (inAssistant || !d || hide) return null;
+  return (
+    <div className="chat-from-asst" role="note">
+      <Sparkles size={14} aria-hidden="true" />
+      <span className="chat-from-asst-text">
+        {t(d.errand ? 'asst.from_errand' : 'asst.from')}
+        {d.reason && <span className="muted"> · {d.reason}</span>}
+      </span>
+      <button type="button" className="btn btn-plain btn-sm" onClick={() => navigate('/assistant')}>
+        {t('asst.back')}
+      </button>
+      <button type="button" className="btn btn-plain btn-icon btn-sm" onClick={() => setHide(true)} aria-label={t('action.close')}>
+        <X size={14} aria-hidden="true" />
+      </button>
     </div>
   );
 }
@@ -4725,7 +4762,8 @@ function UsageTab({ id, status, onCompact }) {
       {/* 随时能换：订阅到期这类情况不一定报成额度用完、账号出错（见 AccountFail） */}
       {agentId === 'claude' && status?.phase === 'idle' && (
         <div className="chat-acts">
-          <SwitchProfile id={id} goOn={false} />
+          {/* 在等额度重置时换号：换完接着跑（服务端也会这样判断） */}
+          <SwitchProfile id={id} goOn={!!status?.limit} />
         </div>
       )}
       {lim?.five_hour && <Meter label={t('chat.usage_5h')} value={lim.five_hour.used} sub={resetText(t, lim.five_hour.resets_at)} />}
@@ -5495,6 +5533,7 @@ export default function ChatView({ id, launch, active, touch, offline = false, o
       {files.viewer}
       <div className="chat-col">
         <div className="chat-main">
+          <FromAssistant id={id} />
           {finding && <FindBar list={list} inner={inner} more={chat.start > 0} deps={[items, side]} onClose={() => setFinding(false)} />}
           <SelectionActions id={id} list={list} disabled={phase === 'detached'} />
           <div className="chat-list" ref={list} onScroll={onScroll} onWheel={onWheel} onTouchStart={onTouchStart} onTouchMove={onTouchMove} tabIndex={-1}>

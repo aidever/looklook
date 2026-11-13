@@ -4019,20 +4019,17 @@
       "off": "Feishu bot is off",
       "offline": "The Feishu connection is down; messages won't arrive.",
       "lark_title": "Feishu CLI",
-      "lark_intro": "The bot can only talk as a bot. Install Feishu's official CLI so the assistant can read and write your docs, calendar, Base and chats as you (it asks before sending anything).",
-      "lark_missing": "Step 1/3: install on this computer",
-      "lark_need_config": "Step 2/3: create the CLI's own Feishu app",
-      "lark_need_login": "Step 3/3: sign in with your Feishu account",
-      "lark_ready": "Ready",
-      "lark_go_missing": "Install",
-      "lark_go_need_config": "Get link",
-      "lark_go_need_login": "Get sign-in link",
-      "lark_open": "Open link",
-      "lark_waiting": "Confirm in Feishu; this updates by itself.",
+      "lark_intro": "The bot can only talk as a bot. Install Feishu's official CLI and its skills so the assistant can read and write your docs, calendar, Base and chats as you (it asks before sending anything).",
+      "lark_missing": "Not installed",
+      "lark_ready": "Installed",
+      "lark_ready_hint": "The assistant uses it by following Feishu's official skills. The first time, it sends you a link to authorize in Feishu.",
+      "lark_no_skills": "The command is installed but its official skills are missing; installing again adds them.",
+      "lark_install": "Install the official way",
+      "lark_copy": "Copy command",
       "lark_installing": "Installing (1–3 minutes)…",
       "lark_need_node": "This computer has no npm. Install Node.js first.",
-      "lark_failed": "The last step failed: {{msg}}",
-      "lark_also": "You can also send “help” to the bot in Feishu and follow the card."
+      "lark_failed": "The last install failed: {{msg}}",
+      "lark_also": "You can also send “help” to the bot in Feishu to install it."
     }
   }
 }

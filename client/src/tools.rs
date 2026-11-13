@@ -102,11 +102,6 @@ pub fn install_command(tool: &str, mirror: &str) -> Option<String> {
     Some(format!("npm install -g {} --registry={}", package(tool)?, registry(mirror)))
 }
 
-/// 装完以后再做的：飞书 CLI 要把它的技能装进各个 AI 助手（`npx skills add larksuite/cli -y -g`），AI 助手才知道怎么用
-fn after_install(tool: &str, mirror: &str) -> Option<String> {
-    (tool == "lark-cli").then(|| format!("npx -y --registry={} skills add larksuite/cli -y -g", registry(mirror)))
-}
-
 // ---------------- 安装任务 ----------------
 
 /// 输出最多留这么多字节（只留最后的部分）。
@@ -151,11 +146,13 @@ fn push_output(job: &Mutex<Job>, chunk: &str) {
 
 /// 开始安装（同一个工具已经在装时返回那个任务）。stdout、stderr 合在一起；`--loglevel=http` 让 npm 在没有终端时也逐个打印下载，看得到进度。
 pub fn start_install(shell: &str, tool: &str, mirror: &str) -> Option<Job> {
-    let command = install_command(tool, mirror)?;
-    let mut line = format!("{command} --loglevel=http --no-fund --no-audit");
-    if let Some(next) = after_install(tool, mirror) {
-        line = format!("{line} && {next}");
+    // 飞书 CLI 用官方的安装命令（装命令 + 官方技能）；选了国内源当中文环境
+    if tool == "lark-cli" {
+        let (shown, line) = crate::lark_cli::install_command(mirror != "official");
+        return Some(start_command(shell, tool, &shown, &line));
     }
+    let command = install_command(tool, mirror)?;
+    let line = format!("{command} --loglevel=http --no-fund --no-audit");
     Some(start_command(shell, tool, &command, &line))
 }
 
@@ -267,8 +264,6 @@ mod tests {
         assert_eq!(install_command("dsh", "npmmirror").unwrap(), "npm install -g @deepseek-ai/dsh --registry=https://registry.npmmirror.com/");
         assert!(install_command("vim", "official").is_none());
         assert_eq!(install_command("lark-cli", "official").unwrap(), "npm install -g @larksuite/cli --registry=https://registry.npmjs.org/");
-        assert!(after_install("lark-cli", "npmmirror").unwrap().contains("skills add larksuite/cli"));
-        assert!(after_install("codex", "npmmirror").is_none());
     }
 
     #[test]

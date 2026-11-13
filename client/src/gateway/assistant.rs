@@ -701,13 +701,13 @@ pub async fn state(State(app): State<App>) -> R<Json<Value>> {
         "brain": brain,
         "settings": core::settings(&app.store),
         "engines": engines,
-        // 飞书机器人：飞书应用配好、绑定了没有；飞书 CLI 到哪一步了（feishu_bot.rs、lark_cli.rs）
+        // 飞书机器人：飞书应用配好、绑定了没有；飞书 CLI 装没装（feishu_bot.rs、lark_cli.rs）
         "feishu": {
             "configured": crate::notify::load_feishu(&app.store).is_some(),
             "bound": crate::notify::load_feishu(&app.store).is_some_and(|f| f.open_id.is_some()),
             "connected": app.notify.status().connected,
         },
-        "lark": crate::lark_cli::status(app.instances.shell(), false).await,
+        "lark": crate::lark_cli::status(app.instances.shell(), lark_zh(&app), false).await,
         "tasks": tasks,
         "dispatches": recent,
         "agreements": core::agreements(&app.paths),
@@ -834,14 +834,19 @@ pub async fn unwatch(State(app): State<App>, Path(session): Path<String>) -> Sta
     StatusCode::NO_CONTENT
 }
 
-/// `GET /api/assistant/lark`：飞书 CLI 现在到哪一步（`fresh` 不用缓存）
-pub async fn lark(State(app): State<App>) -> Json<crate::lark_cli::Status> {
-    Json(crate::lark_cli::status(app.instances.shell(), true).await)
+/// 飞书 CLI 的语言跟通知语言走（飞书卡片也用它）：中文环境用中文安装、国内源
+fn lark_zh(app: &App) -> bool {
+    !crate::notify::load_rules(&app.store).lang.starts_with("en")
 }
 
-/// `POST /api/assistant/lark`：走飞书 CLI 的下一步（装 / 建应用 / 登录），有链接时带着链接
+/// `GET /api/assistant/lark`：飞书 CLI 装没装（不用缓存）
+pub async fn lark(State(app): State<App>) -> Json<crate::lark_cli::Status> {
+    Json(crate::lark_cli::status(app.instances.shell(), lark_zh(&app), true).await)
+}
+
+/// `POST /api/assistant/lark`：用官方方式装飞书 CLI（命令 + 官方技能）
 pub async fn lark_next(State(app): State<App>) -> R<Json<crate::lark_cli::Status>> {
-    Ok(Json(crate::lark_cli::next(app.instances.shell(), |_| {}).await?))
+    Ok(Json(crate::lark_cli::install(app.instances.shell(), lark_zh(&app), |_| {}).await?))
 }
 
 #[cfg(test)]

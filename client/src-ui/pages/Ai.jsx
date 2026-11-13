@@ -25,7 +25,7 @@ import UsageStatsCard from './UsageStats.jsx';
 
 const PAGE_TOOLS = ['list_mappings', 'find_mapping', 'ensure_mapping'];
 const SSH_TOOLS = ['list_ssh_hosts', 'ssh_run'];
-// 飞书 CLI：装（和 src/tools.rs 里一键安装的一样）、第一次登录
+// 飞书 CLI：官方安装命令（一键安装在 src/lark_cli.rs，加了 --lang）、第一次登录（AI 助手照官方技能做，也可以自己跑）
 const LARK_INSTALL = 'npx @larksuite/cli@latest install';
 const LARK_LOGIN = ['lark-cli config init --new', 'lark-cli auth login --recommend'];
 
@@ -47,7 +47,7 @@ function ToolList({ names, on }) {
 // 飞书：不给看看的应用申请用户权限，引导装飞书官方的 lark-cli（带技能，Claude Code、Codex 装好就会用），
 // 以你本人的身份读群聊和私聊、找人、读写云文档、发消息都交给它
 function LarkGroup() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [tools, error, reload] = useLoad(() => api.get('/tools'), []);
   const { busy, error: actError, run } = useAction();
   const [job, setJob] = useState(null);
@@ -62,7 +62,9 @@ function LarkGroup() {
     return () => clearInterval(iv);
   }, [running]);
   const install = async () => {
-    const j = await run(() => api.post('/tools/install', { tool: 'lark-cli', mirror: 'npmmirror' }));
+    // 官方安装命令；中文界面用国内源和中文（--lang zh），英文界面用 npm 官方源
+    const mirror = i18n.language?.startsWith('en') ? 'official' : 'npmmirror';
+    const j = await run(() => api.post('/tools/install', { tool: 'lark-cli', mirror }));
     if (j) setJob(j);
   };
   const path = tools?.tools?.['lark-cli'];

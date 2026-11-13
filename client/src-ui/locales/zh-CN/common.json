@@ -4019,20 +4019,17 @@
       "off": "飞书机器人关了",
       "offline": "飞书长连接没连上，消息收不到。",
       "lark_title": "飞书 CLI",
-      "lark_intro": "机器人只能以机器人的身份收发。装上飞书官方的命令行工具，助理就能以你的身份读写文档、日历、多维表格和聊天记录（发消息前会先问你）。",
-      "lark_missing": "第 1/3 步：装到这台电脑",
-      "lark_need_config": "第 2/3 步：建一个 CLI 自己用的飞书应用",
-      "lark_need_login": "第 3/3 步：用你的飞书账号登录",
-      "lark_ready": "已就绪",
-      "lark_go_missing": "装到这台电脑",
-      "lark_go_need_config": "拿链接",
-      "lark_go_need_login": "拿登录链接",
-      "lark_open": "打开链接",
-      "lark_waiting": "在飞书里确认完，这里会自己更新。",
+      "lark_intro": "机器人只能以机器人的身份收发。装上飞书官方的命令行工具和配套技能，助理就能以你的身份读写文档、日历、多维表格和聊天记录（发消息前会先问你）。",
+      "lark_missing": "未安装",
+      "lark_ready": "已安装",
+      "lark_ready_hint": "助理会照飞书官方的技能来用它；第一次用时会发链接让你在飞书里授权。",
+      "lark_no_skills": "命令装好了，还缺官方配套技能；再装一次会补上。",
+      "lark_install": "用官方方式安装",
+      "lark_copy": "复制命令",
       "lark_installing": "正在装（1–3 分钟）…",
       "lark_need_node": "这台电脑没有 npm，先装 Node.js。",
-      "lark_failed": "上一步没成：{{msg}}",
-      "lark_also": "在飞书里发“帮助”也能一步步做完。"
+      "lark_failed": "上次没装上：{{msg}}",
+      "lark_also": "在飞书里发“帮助”也能装。"
     }
   }
 }

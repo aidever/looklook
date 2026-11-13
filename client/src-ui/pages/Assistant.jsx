@@ -15,7 +15,7 @@ import { Link, useRouter } from '../shared/router.jsx';
 import Select from '../shared/Select.jsx';
 import { AGENTS, baseName, sessionLaunch, sessionTitle, useSessions } from '../shared/sessions.jsx';
 import { formatTime } from '../shared/time.js';
-import { Button, Empty, Note, Skeleton, Switch, useToast } from '../shared/ui.jsx';
+import { Button, CopyButton, Empty, Note, Skeleton, Switch, useToast } from '../shared/ui.jsx';
 import ErrorBoundary from '../shared/ErrorBoundary.jsx';
 import ChatView from './ChatView.jsx';
 
@@ -481,15 +481,13 @@ function FeishuBot({ state, onChange }) {
   );
 }
 
-const LARK_STEPS = ['missing', 'need_config', 'need_login'];
-
-/** 飞书 CLI：现在到哪一步、下一步按钮；有链接时给链接，等的时候每 3 秒看一次 */
+/** 飞书 CLI：看看只管装没装、用官方方式装；配应用、登录、怎么用由助理照官方技能做。装的时候每 3 秒看一次 */
 function LarkSteps({ initial }) {
   const { t } = useTranslation();
   const toast = useToast();
   const [st, setSt] = useState(initial);
   const [busy, setBusy] = useState(false);
-  useEffect(() => setSt(initial), [initial?.state, initial?.running, initial?.url]);
+  useEffect(() => setSt(initial), [initial?.state, initial?.running]);
   const waiting = Boolean(st?.running);
   useEffect(() => {
     if (!waiting) return undefined;
@@ -497,7 +495,7 @@ function LarkSteps({ initial }) {
     return () => clearInterval(iv);
   }, [waiting]);
   if (!st) return null;
-  const next = () => {
+  const install = () => {
     setBusy(true);
     api
       .post('/assistant/lark')
@@ -509,32 +507,29 @@ function LarkSteps({ initial }) {
     <div className="asst-lark">
       <div className="asst-switch">
         <b>{t('asst.feishu.lark_title')}</b>
-        {ready && <span className="badge badge-ok">{t('asst.feishu.lark_ready')}</span>}
+        <span className={`badge ${ready ? 'badge-ok' : ''}`}>{t(ready ? 'asst.feishu.lark_ready' : 'asst.feishu.lark_missing')}</span>
       </div>
-      {!ready && (
+      {ready ? (
+        <p className="muted asst-small">{t('asst.feishu.lark_ready_hint')}</p>
+      ) : (
         <>
           <p className="muted asst-small">{t('asst.feishu.lark_intro')}</p>
-          <p className="asst-small">{t(`asst.feishu.lark_${st.state}`)}</p>
+          {st.cli && !st.skills && <p className="asst-small">{t('asst.feishu.lark_no_skills')}</p>}
           {st.error && <Note kind="warn">{t('asst.feishu.lark_failed', { msg: st.error })}</Note>}
-          {st.url ? (
-            <>
-              <a className="btn btn-primary btn-sm" href={st.url} target="_blank" rel="noopener noreferrer">
-                {t('asst.feishu.lark_open')}
-              </a>
-              <p className="muted asst-small">{t('asst.feishu.lark_waiting')}</p>
-            </>
-          ) : st.running === 'install' ? (
+          {st.running ? (
             <p className="muted asst-small">
               <Loader2 size={13} className="spin" aria-hidden="true" /> {t('asst.feishu.lark_installing')}
             </p>
           ) : (
-            LARK_STEPS.includes(st.state) && (
-              <Button className="btn-sm" busy={busy || waiting} disabled={st.state === 'missing' && !st.npm} onClick={next}>
-                {t(`asst.feishu.lark_go_${st.state}`)}
+            <div className="nt-actions">
+              <Button className="btn-sm" busy={busy} disabled={!st.npm} onClick={install}>
+                {t('asst.feishu.lark_install')}
               </Button>
-            )
+              <CopyButton text={st.command} label={t('asst.feishu.lark_copy')} />
+            </div>
           )}
-          {st.state === 'missing' && !st.npm && <p className="muted asst-small">{t('asst.feishu.lark_need_node')}</p>}
+          <code className="mono asst-small ellipsis">{st.command}</code>
+          {!st.npm && <p className="muted asst-small">{t('asst.feishu.lark_need_node')}</p>}
           <p className="muted asst-small">{t('asst.feishu.lark_also')}</p>
         </>
       )}

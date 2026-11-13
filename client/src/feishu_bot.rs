@@ -735,11 +735,13 @@ fn source_line(group: bool, mentions: &[Who], lark: Option<bool>, en: bool) -> S
             let names: Vec<String> = mentions.iter().map(|w| if w.name.is_empty() { tr(en, "被引用的人", "the quoted person") } else { w.name.clone() }).collect();
             parts.push(tr(en, &format!("回答会自动 @ {}，你不用写 @", names.join("、")), &format!("your answer will @ {} automatically; don't write @ yourself", names.join(", "))));
         }
+        parts.push(tr(en, "回答像同事随手回：一两句人话，只说结论和要谁做什么，不讲过程", "reply like a colleague would: one or two plain sentences, just the result and who needs to do what, no process"));
     } else {
         parts.push(tr(en, "私聊", "direct message"));
+        parts.push(tr(en, "回答简短、说人话，不讲过程", "keep it short and plain, no process"));
     }
     if lark == Some(false) {
-        parts.push(tr(en, "飞书 CLI 还没就绪：要读写飞书（文档、日历、聊天记录）时请用户发“帮助”按卡片装好", "Feishu CLI isn't ready: to read or write Feishu, ask the user to send “help” and follow the card"));
+        parts.push(tr(en, "飞书 CLI 还没装：要读写飞书（文档、日历、聊天记录）时请用户发“帮助”按卡片装好", "Feishu CLI isn't installed: to read or write Feishu, ask the user to send “help” and tap install on the card"));
     }
     format!("[{}]", parts.join(" · "))
 }
@@ -766,7 +768,7 @@ async fn deliver(app: &App, api: &Api, chat: &str, ins: Vec<In>, typing: Vec<(St
     if lark.is_none() {
         let shell = app.instances.shell().to_string();
         tokio::spawn(async move {
-            crate::lark_cli::status(&shell, false).await;
+            crate::lark_cli::status(&shell, !en, false).await;
         });
     }
     Ok(())
@@ -836,7 +838,7 @@ async fn stop_cmd(app: &App, api: &Api, id: &str, en: bool) {
 // ---------------- 帮助、欢迎、飞书 CLI ----------------
 
 async fn help_card(app: &App, api: &Api, id: &str, en: bool) {
-    let st = crate::lark_cli::status(app.instances.shell(), true).await;
+    let st = crate::lark_cli::status(app.instances.shell(), !en, true).await;
     let c = card::bot_help(en, &st, &lark_act(app), &page(app, "assistant"), false);
     if let Err(e) = api.reply(id, "interactive", &c, false).await {
         app.notify.record_err(&e);
@@ -850,7 +852,7 @@ async fn welcome(app: &App, api: &Api, id: &str, en: bool) {
         return;
     }
     let _ = app.store.set(WELCOMED_KEY, &f.app_id);
-    let st = crate::lark_cli::status(app.instances.shell(), true).await;
+    let st = crate::lark_cli::status(app.instances.shell(), !en, true).await;
     let c = card::bot_help(en, &st, &lark_act(app), &page(app, "assistant"), true);
     if let Err(e) = api.reply(id, "interactive", &c, false).await {
         app.notify.record_err(&e);
@@ -871,23 +873,23 @@ pub async fn on_card(app: &App, act: &Act, ev: &Value) -> Value {
             let Some(card_msg) = ev["context"]["open_message_id"].as_str().map(String::from) else { return notify::toast("error", "?") };
             let app2 = app.clone();
             let shell = app.instances.shell().to_string();
-            // 这一步结束时：把卡片换成下一步
+            // 装完时：卡片换成装好了 / 没装上
             let done_app = app.clone();
             let done_msg = card_msg.clone();
             let done = move |r: Result<(), String>| {
                 tokio::spawn(async move {
                     if let Err(e) = &r {
-                        tracing::warn!(error = %e, "飞书 CLI：这一步没成");
+                        tracing::warn!(error = %e, "飞书 CLI：没装上");
                     }
                     lark_refresh(&done_app, &done_msg, en).await;
                 });
             };
             tokio::spawn(async move {
-                match crate::lark_cli::next(&shell, done).await {
+                match crate::lark_cli::install(&shell, !en, done).await {
                     Ok(_) => lark_refresh(&app2, &card_msg, en).await,
                     Err(e) => {
                         let Some(f) = load_feishu(&app2.store) else { return };
-                        let mut st = crate::lark_cli::status(&shell, true).await;
+                        let mut st = crate::lark_cli::status(&shell, !en, true).await;
                         st.error = Some(if e.code == "LARK_NEED_NODE" { tr(en, "这台电脑没有 npm，先装 Node.js。", "This computer has no npm. Install Node.js first.") } else { e.code.clone() });
                         let _ = app2.notify.api(&f).patch_card(&card_msg, &card::bot_help(en, &st, &lark_act(&app2), &page(&app2, "assistant"), false)).await;
                     }
@@ -901,7 +903,7 @@ pub async fn on_card(app: &App, act: &Act, ev: &Value) -> Value {
 
 async fn lark_refresh(app: &App, card_msg: &str, en: bool) {
     let Some(f) = load_feishu(&app.store) else { return };
-    let st = crate::lark_cli::status(app.instances.shell(), true).await;
+    let st = crate::lark_cli::status(app.instances.shell(), !en, true).await;
     if let Err(e) = app.notify.api(&f).patch_card(card_msg, &card::bot_help(en, &st, &lark_act(app), &page(app, "assistant"), false)).await {
         tracing::debug!(error = %e, "飞书：飞书 CLI 卡片没改上");
     }
@@ -1440,8 +1442,9 @@ mod tests {
     fn source_and_post() {
         let at = vec![Who { id: "ou_zs".into(), name: "张三".into() }, Who { id: "ou_x".into(), name: String::new() }];
         let s = source_line(true, &at, Some(false), false);
-        assert!(s.starts_with("[飞书 · 群聊") && s.contains("@ 张三、被引用的人") && s.contains("飞书 CLI 还没就绪"), "{s}");
-        assert_eq!(source_line(false, &[], Some(true), false), "[飞书 · 私聊]");
+        assert!(s.starts_with("[飞书 · 群聊") && s.contains("@ 张三、被引用的人") && s.contains("飞书 CLI 还没装"), "{s}");
+        assert!(s.contains("一两句人话"), "{s}");
+        assert_eq!(source_line(false, &[], Some(true), false), "[飞书 · 私聊 · 回答简短、说人话，不讲过程]");
         let p = post_content(&at, "**好了**");
         assert_eq!(p["zh_cn"]["content"][0][0], json!({ "tag": "at", "user_id": "ou_zs" }));
         assert_eq!(p["zh_cn"]["content"][1][0], json!({ "tag": "md", "text": "**好了**" }));

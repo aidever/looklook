@@ -527,31 +527,22 @@ pub fn bot_help(en: bool, lark: &crate::lark_cli::Status, act: &Act, page: &str,
         "**Message me directly**: talk to the LookLook assistant, same as on its page. It finds the project, hands work to Claude Code / Codex and reports back\n**In a group**: add me and @ me. For someone else's question, quote their message and @ me; my answer will @ them (say “don't @” to skip). Only you can call me; I ignore others\n**stop**: stop the assistant's current turn\n**help**: show this card again",
     );
     let mut els = vec![json!({ "tag": "markdown", "content": how }), json!({ "tag": "hr" })];
-    let (state, next) = match lark.state {
-        State::Ready => (tr(en, "✅ **飞书 CLI 已就绪**：助理能以你的身份读写飞书（文档、日历、多维表格、聊天记录），发消息前会先问你。", "✅ **Feishu CLI is ready**: the assistant can read and write Feishu as you (docs, calendar, Base, chats) and asks before sending anything."), None),
-        State::Missing => (
-            tr(en, "**飞书 CLI（第 1/3 步）**：机器人只能以机器人的身份收发消息。装上飞书官方的命令行工具，助理就能以你的身份读写文档、日历、多维表格和聊天记录。", "**Feishu CLI (step 1/3)**: the bot can only talk as a bot. Install Feishu's official CLI so the assistant can read and write your docs, calendar, Base and chats as you."),
-            Some(tr(en, "装到这台电脑", "Install on this computer")),
+    let state = match lark.state {
+        State::Ready => tr(en, "✅ **飞书 CLI 已装好**：助理会照飞书官方的技能以你的身份读写飞书（文档、日历、多维表格、聊天记录）；第一次用时它会发链接让你在飞书里授权，发消息前会先问你。", "✅ **Feishu CLI is installed**: the assistant follows Feishu's official skills to read and write Feishu as you (docs, calendar, Base, chats). The first time, it sends you a link to authorize in Feishu, and it asks before sending anything."),
+        State::Missing => tr(
+            en,
+            &format!("**飞书 CLI**：机器人只能以机器人的身份收发消息。装上飞书官方的命令行工具和配套技能，助理就能以你的身份读写文档、日历、多维表格和聊天记录。\n官方安装命令：`{}`", lark.command),
+            &format!("**Feishu CLI**: the bot can only talk as a bot. Install Feishu's official CLI and its skills so the assistant can read and write your docs, calendar, Base and chats as you.\nOfficial install command: `{}`", lark.command),
         ),
-        State::NeedConfig => (tr(en, "**飞书 CLI（第 2/3 步）**：已经装好。下一步建一个 CLI 自己用的飞书应用，点按钮拿链接，在飞书里确认。", "**Feishu CLI (step 2/3)**: installed. Next, create the CLI's own Feishu app: tap the button for a link and confirm in Feishu."), Some(tr(en, "建 CLI 用的应用", "Create the CLI app"))),
-        State::NeedLogin => (tr(en, "**飞书 CLI（第 3/3 步）**：用你的飞书账号登录一次，点按钮拿链接，在飞书里授权。", "**Feishu CLI (step 3/3)**: sign in once with your Feishu account. Tap the button for a link and authorize in Feishu."), Some(tr(en, "用我的飞书账号登录", "Sign in with my account"))),
     };
     els.push(json!({ "tag": "markdown", "content": state }));
     if let Some(e) = &lark.error {
-        els.push(note(&tr(en, &format!("上一步没成：{e}"), &format!("The last step failed: {e}"))));
+        els.push(note(&tr(en, &format!("上次没装上：{e}"), &format!("The last install failed: {e}"))));
     }
-    match (&lark.url, lark.running) {
-        (Some(url), _) => {
-            els.push(note(&tr(en, "点下面的链接，在飞书里确认。确认完这张卡片会自己更新。", "Open the link and confirm in Feishu. This card updates by itself afterwards.")));
-            els.push(row(vec![json!({ "tag": "button", "text": plain(&tr(en, "打开链接", "Open link")), "type": "primary", "behaviors": [{ "type": "open_url", "default_url": url }] })]));
-        }
-        (None, Some("install")) => els.push(note(&tr(en, "正在装（1–3 分钟），装好这张卡片会自己更新。", "Installing (1–3 minutes). This card updates when it's done."))),
-        (None, Some(_)) => els.push(note(&tr(en, "正在准备链接…", "Getting the link…"))),
-        (None, None) => {
-            if let Some(label) = next {
-                els.push(row(vec![button(&label, "primary", act, None), link(&tr(en, "在看看里看", "Open in LookLook"), page)]));
-            }
-        }
+    if lark.running.is_some() {
+        els.push(note(&tr(en, "正在装（1–3 分钟），装好这张卡片会自己更新。", "Installing (1–3 minutes). This card updates when it's done.")));
+    } else if lark.state == State::Missing {
+        els.push(row(vec![button(&tr(en, "装到这台电脑", "Install on this computer"), "primary", act, None), link(&tr(en, "在看看里看", "Open in LookLook"), page)]));
     }
     card(header(&title, "", "blue", None), &title, els)
 }
@@ -684,16 +675,15 @@ mod tests {
 
         // 帮助 / 欢迎卡片：飞书 CLI 每一步
         use crate::lark_cli::{State, Status};
-        let st = |state, url: Option<&str>, running| Status { state, url: url.map(String::from), running, error: None, npm: true };
+        let st = |state, running| Status { state, cli: false, skills: false, running, error: None, npm: true, command: "npx @larksuite/cli@latest install --lang zh".into() };
         let act = Act { a: "bot_lark".into(), n: "n".into(), ..Default::default() };
-        let c = bot_help(false, &st(State::Missing, None, None), &act, "u", true);
-        assert!(c.to_string().contains("你好，我是看看助理") && c.to_string().contains("引用那条消息再 @ 我"));
+        let c = bot_help(false, &st(State::Missing, None), &act, "u", true);
+        assert!(c.to_string().contains("你好，我是看看助理") && c.to_string().contains("引用那条消息再 @ 我") && c.to_string().contains("npx @larksuite/cli@latest install"));
         assert_eq!(buttons(&c), ["装到这台电脑", "在看看里看"]);
-        assert_eq!(buttons(&bot_help(false, &st(State::NeedConfig, None, None), &act, "u", false)), ["建 CLI 用的应用", "在看看里看"]);
-        assert_eq!(buttons(&bot_help(false, &st(State::NeedLogin, Some("https://x"), Some("login")), &act, "u", false)), ["打开链接"]);
-        assert!(buttons(&bot_help(false, &st(State::Missing, None, Some("install")), &act, "u", false)).is_empty());
-        let ready = bot_help(true, &st(State::Ready, None, None), &act, "u", false);
-        assert!(ready.to_string().contains("Feishu CLI is ready") && buttons(&ready).is_empty());
+        let busy = bot_help(false, &st(State::Missing, Some("install")), &act, "u", false);
+        assert!(buttons(&busy).is_empty() && busy.to_string().contains("正在装"));
+        let ready = bot_help(true, &st(State::Ready, None), &act, "u", false);
+        assert!(ready.to_string().contains("Feishu CLI is installed") && buttons(&ready).is_empty());
     }
 
     #[test]

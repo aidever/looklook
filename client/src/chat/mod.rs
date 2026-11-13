@@ -1068,31 +1068,31 @@ impl Chat {
         self.require(id)?;
         let inst = self.inst(id);
         inst.sdk.store(self.is_sdk(id), Ordering::Relaxed);
-        // 交给终端了：不起进程（发消息时才收回来）
-        if inst.sdk.load(Ordering::Relaxed) && lock(&inst.st).sdk.term.is_none() {
-            if let Err(e) = self.sdk_attach(id).await {
-                let mut st = lock(&inst.st);
-                st.error = Some(e.params.get("detail").and_then(Value::as_str).map(String::from).unwrap_or_else(|| e.code.to_string()).chars().take(500).collect());
-                Self::set_phase(&inst, &mut st, Phase::Detached, Some("claude_sdk"));
-            }
+        // 交给终端了：不起进程（发消息时才收回来）。没在跑的（还没起过、空闲太久结束了）在后台起：
+        // 起 claude 要等它 initialize（几百毫秒到几秒），不能让打开对话页等着——内容从 transcript 读，起好了状态自己推过去
+        let alive = lock(&inst.st).sdk.proc.as_ref().is_some_and(|p| p.alive());
+        if inst.sdk.load(Ordering::Relaxed) && lock(&inst.st).sdk.term.is_none() && !alive {
+            let (me, id, inst) = (self.clone(), id.to_string(), inst.clone());
+            tokio::spawn(async move {
+                if let Err(e) = me.sdk_attach(&id).await {
+                    let mut st = lock(&inst.st);
+                    st.error = Some(e.params.get("detail").and_then(Value::as_str).map(String::from).unwrap_or_else(|| e.code.to_string()).chars().take(500).collect());
+                    Self::set_phase(&inst, &mut st, Phase::Detached, Some("claude_sdk"));
+                }
+            });
         }
         if inst.agent.launch() == "codex" {
-            if let Err(e) = self.codex_attach(id).await {
-                let mut st = lock(&inst.st);
-                if e.code == "CHAT_FOREIGN" {
-                    // 不是看看打开的：界面上说明，不算出错
-                    Self::set_phase(&inst, &mut st, Phase::Detached, Some("not_attached"));
-                } else if e.code == "CHAT_TERMINAL_ONLY" {
-                    // 后台连不上时终端在本机直接跑：说明对话暂时不可用，终端照常能用
-                    Self::set_phase(&inst, &mut st, Phase::Detached, Some("terminal_only"));
-                } else if e.code == "CODEX_RESUME_FAILED" {
-                    // app-server 好好的，只是这段会话接不上：界面上让用户新开或者换一段
-                    st.error = e.params.get("detail").and_then(Value::as_str).map(|d| d.chars().take(500).collect());
-                    Self::set_phase(&inst, &mut st, Phase::Detached, Some("resume_failed"));
-                } else {
-                    st.error = Some(format!("{:?}", e).chars().take(500).collect());
-                    Self::set_phase(&inst, &mut st, Phase::Detached, Some("app_server"));
-                }
+            // 有记录文件的（内容从文件读）：接上 app-server（可能要起它、resume 这段对话）放后台，不让打开对话页等着
+            let has_file = lock(&inst.st).binding.as_ref().is_some_and(|b| b.transcript_path.is_file());
+            if has_file {
+                let (me, id, inst) = (self.clone(), id.to_string(), inst.clone());
+                tokio::spawn(async move {
+                    if let Err(e) = me.codex_attach(&id).await {
+                        Self::codex_attach_failed(&inst, e);
+                    }
+                });
+            } else if let Err(e) = self.codex_attach(id).await {
+                Self::codex_attach_failed(&inst, e);
             }
         }
         if inst.agent.launch() == "dsh" {
@@ -1121,6 +1121,25 @@ impl Chat {
         drop(tr);
         let status = Self::status_of(&inst, &lock(&inst.st));
         Ok(json!({ "status": status, "total": total, "start": total - items.len(), "items": items }))
+    }
+
+    /// 接不上 Codex 的 app-server：按原因在界面上说明
+    fn codex_attach_failed(inst: &Inst, e: LocalError) {
+        let mut st = lock(&inst.st);
+        if e.code == "CHAT_FOREIGN" {
+            // 不是看看打开的：界面上说明，不算出错
+            Self::set_phase(inst, &mut st, Phase::Detached, Some("not_attached"));
+        } else if e.code == "CHAT_TERMINAL_ONLY" {
+            // 后台连不上时终端在本机直接跑：说明对话暂时不可用，终端照常能用
+            Self::set_phase(inst, &mut st, Phase::Detached, Some("terminal_only"));
+        } else if e.code == "CODEX_RESUME_FAILED" {
+            // app-server 好好的，只是这段会话接不上：界面上让用户新开或者换一段
+            st.error = e.params.get("detail").and_then(Value::as_str).map(|d| d.chars().take(500).collect());
+            Self::set_phase(inst, &mut st, Phase::Detached, Some("resume_failed"));
+        } else {
+            st.error = Some(format!("{:?}", e).chars().take(500).collect());
+            Self::set_phase(inst, &mut st, Phase::Detached, Some("app_server"));
+        }
     }
 
     /// 往上翻：`before` 之前的 `limit` 条。

@@ -24,6 +24,8 @@ fn view(app: &App) -> Value {
             "bound": f.open_id.is_some(),
             "bound_at": f.bound_at,
             "callback_ok": f.callback_ok,
+            // 飞书通知渠道开着（和机器人分开，机器人在助理页开关）
+            "notify": !f.no_notify,
         })),
         "rules": notify::load_rules(&app.store),
         "status": st,
@@ -110,6 +112,18 @@ pub async fn register_cancel(State(app): State<App>) -> R<Json<Value>> {
 pub async fn delete_feishu(State(app): State<App>) -> R<Json<Value>> {
     notify::save_feishu(&app, None)?;
     app.notify.reset();
+    Ok(Json(view(&app)))
+}
+
+#[derive(Deserialize)]
+pub struct FeishuNotifyReq {
+    on: bool,
+}
+
+/// 飞书这个通知渠道开 / 关（机器人不受影响）
+pub async fn feishu_notify(State(app): State<App>, Json(req): Json<FeishuNotifyReq>) -> R<Json<Value>> {
+    let f = notify::load_feishu(&app.store).ok_or_else(|| LocalError::new("NOTIFY_NOT_CONFIGURED"))?;
+    notify::save_feishu(&app, Some(&Feishu { no_notify: !req.on, ..f }))?;
     Ok(Json(view(&app)))
 }
 
@@ -203,12 +217,4 @@ pub async fn action(State(app): State<App>, Extension(access): Extension<Access>
         return Err(LocalError::new("SYNC_NEED_RTC"));
     }
     Ok(Json(notify::receive(&app, req).await?))
-}
-
-/// 另一台电脑转来的“在飞书里和 AI 对话”请求（docs/FEISHU_AGENT.md）：同样只接受经 WebRTC、带设备签名的
-pub async fn agent(State(app): State<App>, Extension(access): Extension<Access>, Json(req): Json<notify::ActionReq>) -> R<Json<Value>> {
-    if !matches!(access, Access::Rtc { .. }) {
-        return Err(LocalError::new("SYNC_NEED_RTC"));
-    }
-    Ok(Json(crate::feishu_agent::receive(&app, req).await?))
 }

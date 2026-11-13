@@ -1,5 +1,5 @@
 //! 测试用的假飞书：开放接口（记下每个请求，按路径给固定的回答）+ 长连接（发事件、收应答）。
-//! 照官方文档的请求和回应格式写，和真飞书对不上的地方要靠真机发现（docs/FEISHU_AGENT.md §7）。
+//! 照官方文档的请求和回应格式写，和真飞书对不上的地方要靠真机发现（docs/FEISHU_BOT.md §6）。
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -103,6 +103,14 @@ impl Fake {
                         { "message_id": "om_fwd_b", "msg_type": "merge_forward", "body": { "content": "Merged and Forwarded Message" } },
                         { "message_id": "om_fwd_b1", "upper_message_id": "om_fwd_b", "chat_id": "oc_dm", "sender": { "id": "ou_zhang", "id_type": "open_id", "sender_type": "user" }, "msg_type": "text", "body": { "content": "{\"text\":\"第二个暗号是 OTTER\"}" } },
                     ] })),
+                    // 群里被引用的一条：张三 @ 了用户本人问问题
+                    ("GET", "/open-apis/im/v1/messages/om_q") => ok(json!({ "items": [
+                        { "message_id": "om_q", "msg_type": "text", "chat_id": "oc_group", "sender": { "id": "ou_zhang", "id_type": "open_id", "sender_type": "user" }, "mentions": [{ "key": "@_user_1", "id": "ou_me", "id_type": "open_id", "name": "我" }], "body": { "content": "{\"text\":\"@_user_1 发布脚本在哪个目录？\"}" } },
+                    ] })),
+                    // 机器人自己之前在群里的回复
+                    ("GET", p) if p.starts_with("/open-apis/im/v1/messages/om_b") => ok(json!({ "items": [
+                        { "message_id": p.rsplit('/').next().unwrap_or_default(), "msg_type": "post", "chat_id": "oc_group", "sender": { "id": "cli_test", "id_type": "app_id", "sender_type": "app" }, "body": { "content": "{\"title\":\"\",\"content\":[[{\"tag\":\"text\",\"text\":\"在 scripts/ 下\"}]]}" } },
+                    ] })),
                     ("POST", "/open-apis/im/v1/images") => ok(json!({ "image_key": format!("img_up{n}") })),
                     ("POST", "/open-apis/im/v1/files") => ok(json!({ "file_key": format!("file_up{n}") })),
                     // 发给人（私聊）的带上私聊的 chat_id
@@ -163,11 +171,6 @@ impl Fake {
 
     pub fn reqs(&self) -> Vec<Req> {
         self.reqs.lock().unwrap().clone()
-    }
-
-    /// 等到满足条件的请求出现，返回它
-    pub async fn wait(&self, what: &str, secs: u64, f: impl Fn(&Req) -> bool) -> Req {
-        self.wait_after(0, what, secs, f).await
     }
 
     /// 只看第 `from` 个之后的请求

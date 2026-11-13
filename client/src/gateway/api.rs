@@ -48,6 +48,7 @@ pub fn routes(app: App) -> Router<App> {
         .route("/assistant/dispatches/{id}/fix", post(super::assistant::fix))
         .route("/assistant/agreements/remove", post(super::assistant::agreement_remove))
         .route("/assistant/watch/{session}", delete(super::assistant::unwatch))
+        .route("/assistant/lark", get(super::assistant::lark).post(super::assistant::lark_next))
         .route("/instances", get(list_instances).post(create_instance))
         .route("/instances/idle", get(list_idle).post(stop_idle))
         // 项目的运行按钮（▶，run_actions.rs）
@@ -210,6 +211,7 @@ pub fn routes(app: App) -> Router<App> {
         .route("/notify", get(super::notify::get))
         .route("/notify/feishu", put(super::notify::put_feishu).delete(super::notify::delete_feishu))
         .route("/notify/feishu/register", post(super::notify::register).delete(super::notify::register_cancel))
+        .route("/notify/feishu/notify", put(super::notify::feishu_notify))
         .route("/notify/unbind", post(super::notify::unbind))
         .route("/notify/rules", put(super::notify::put_rules))
         .route("/notify/test", post(super::notify::test))
@@ -218,7 +220,6 @@ pub fn routes(app: App) -> Router<App> {
         .route("/notify/hooks/{id}", delete(super::notify::delete_hook))
         .route("/notify/hooks/{id}/test", post(super::notify::test_hook))
         .route("/notify/action", post(super::notify::action))
-        .route("/notify/agent", post(super::notify::agent))
         .route("/projects", get(get_projects).put(put_projects))
         .route("/git/remotes", post(git_remotes))
         .route("/history", get(list_history))
@@ -553,7 +554,7 @@ async fn create_instance(State(app): State<App>, Json(req): Json<CreateReq>) -> 
     Ok((StatusCode::CREATED, Json(v)))
 }
 
-/// 新建一个会话（会话页“新建”，也给飞书里开会话用，docs/FEISHU_AGENT.md §2.1）
+/// 新建一个会话（会话页“新建”）
 pub async fn create_session(app: &App, input: Input, start: bool) -> R<crate::instances::View> {
     let (prompt, resume) = (input.prompt.clone().map(|p| p.trim().to_string()).filter(|p| !p.is_empty()), input.resume.clone());
     // DSH：网页版（每台电脑一个，带网页端口）走 create_dsh；对话模式（默认）和别的一样，可以有很多个

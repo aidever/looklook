@@ -450,8 +450,8 @@ function Route({ d, onChange, onHide, compact = false }) {
   );
 }
 
-/** 飞书联动：私聊里直接发的话交给助理；在飞书里说的活有了结果，转告也推到飞书 */
-function FeishuLink({ state, onChange }) {
+/** 飞书机器人（docs/FEISHU_BOT.md）：私聊、群里 @ 它就是跟助理说话；下面是飞书 CLI 一步步装好 */
+function FeishuBot({ state, onChange }) {
   const { t } = useTranslation();
   const { busy, save } = useSaveSettings(onChange);
   const f = state.feishu ?? {};
@@ -462,9 +462,9 @@ function FeishuLink({ state, onChange }) {
         <Send size={15} aria-hidden="true" />
         {t('asst.feishu.title')}
       </h3>
-      {!f.configured || !f.agent ? (
+      {!f.bound ? (
         <p className="muted asst-small">
-          {t(f.configured ? 'asst.feishu.agent_off' : 'asst.feishu.none')} <Link to="/ai#notify">{t('asst.feishu.setup')}</Link>
+          {t(f.configured ? 'asst.feishu.unbound' : 'asst.feishu.none')} <Link to="/ai#remote">{t('asst.feishu.setup')}</Link>
         </p>
       ) : (
         <>
@@ -472,10 +472,73 @@ function FeishuLink({ state, onChange }) {
             <span>{t('asst.feishu.dm')}</span>
             <Switch checked={on} disabled={busy} label={t('asst.feishu.dm')} onChange={(v) => save({ feishu: v }, () => t(v ? 'asst.feishu.on' : 'asst.feishu.off'))} />
           </div>
-          <p className="muted asst-small">{t(on ? 'asst.feishu.dm_on_hint' : 'asst.feishu.dm_off_hint')}</p>
+          <p className="muted asst-small">{t(on ? 'asst.feishu.on_hint' : 'asst.feishu.off_hint')}</p>
+          {on && !f.connected && <Note kind="warn">{t('asst.feishu.offline')}</Note>}
+          {on && <LarkSteps initial={state.lark} />}
         </>
       )}
     </section>
+  );
+}
+
+const LARK_STEPS = ['missing', 'need_config', 'need_login'];
+
+/** 飞书 CLI：现在到哪一步、下一步按钮；有链接时给链接，等的时候每 3 秒看一次 */
+function LarkSteps({ initial }) {
+  const { t } = useTranslation();
+  const toast = useToast();
+  const [st, setSt] = useState(initial);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => setSt(initial), [initial?.state, initial?.running, initial?.url]);
+  const waiting = Boolean(st?.running);
+  useEffect(() => {
+    if (!waiting) return undefined;
+    const iv = setInterval(() => api.get('/assistant/lark').then(setSt, () => {}), 3000);
+    return () => clearInterval(iv);
+  }, [waiting]);
+  if (!st) return null;
+  const next = () => {
+    setBusy(true);
+    api
+      .post('/assistant/lark')
+      .then(setSt, (e) => toast(e?.code === 'LARK_NEED_NODE' ? t('asst.feishu.lark_need_node') : errorText(t, e), 'error'))
+      .finally(() => setBusy(false));
+  };
+  const ready = st.state === 'ready';
+  return (
+    <div className="asst-lark">
+      <div className="asst-switch">
+        <b>{t('asst.feishu.lark_title')}</b>
+        {ready && <span className="badge badge-ok">{t('asst.feishu.lark_ready')}</span>}
+      </div>
+      {!ready && (
+        <>
+          <p className="muted asst-small">{t('asst.feishu.lark_intro')}</p>
+          <p className="asst-small">{t(`asst.feishu.lark_${st.state}`)}</p>
+          {st.error && <Note kind="warn">{t('asst.feishu.lark_failed', { msg: st.error })}</Note>}
+          {st.url ? (
+            <>
+              <a className="btn btn-primary btn-sm" href={st.url} target="_blank" rel="noopener noreferrer">
+                {t('asst.feishu.lark_open')}
+              </a>
+              <p className="muted asst-small">{t('asst.feishu.lark_waiting')}</p>
+            </>
+          ) : st.running === 'install' ? (
+            <p className="muted asst-small">
+              <Loader2 size={13} className="spin" aria-hidden="true" /> {t('asst.feishu.lark_installing')}
+            </p>
+          ) : (
+            LARK_STEPS.includes(st.state) && (
+              <Button className="btn-sm" busy={busy || waiting} disabled={st.state === 'missing' && !st.npm} onClick={next}>
+                {t(`asst.feishu.lark_go_${st.state}`)}
+              </Button>
+            )
+          )}
+          {st.state === 'missing' && !st.npm && <p className="muted asst-small">{t('asst.feishu.lark_need_node')}</p>}
+          <p className="muted asst-small">{t('asst.feishu.lark_also')}</p>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -526,7 +589,7 @@ function SidePanel({ state, onChange }) {
           </div>
         )}
       </section>
-      <FeishuLink state={state} onChange={onChange} />
+      <FeishuBot state={state} onChange={onChange} />
       <p className="muted asst-small asst-foot">
         <ChevronRight size={12} aria-hidden="true" />
         {t('asst.foot')}

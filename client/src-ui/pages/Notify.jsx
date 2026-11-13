@@ -1,6 +1,6 @@
 // AI 页“远程与通知”（docs/TASK_BOARD.md §6.1、§6.5，按 docs/DONT_MAKE_ME_THINK_2026-11.md 的规矩）：
-// - FeishuCard：没配时一个按钮“用飞书扫码创建机器人”，手动配置收起来；配好后一行状态 + “发一条测试” + ⋯（修改、补权限、解绑、断开）；
-// - AgentCard：飞书机器人（在飞书里和 AI 对话、自动建项目群、群里 @），用法和少用的选项收起来；
+// - FeishuCard：没配时一个按钮“用飞书扫码创建机器人”，手动配置收起来；配好后一行状态 + “发一条测试” + ⋯（修改、补权限、解绑、断开），
+//   再一个“飞书通知”开关。同一个飞书应用也是助理的飞书机器人，机器人的开关在助理页（docs/FEISHU_BOT.md）；
 // - RulesCard：什么时候通知；勿扰、合并、卡住提醒、静音项目收进“少打扰”；
 // - HooksCard：只通知的渠道（企业微信、钉钉、Server酱、PushPlus、Bark、ntfy），每行“发一条测试” + ⋯。
 // 配置只在这台电脑上（不在电脑之间同步）；连接状态也是这台电脑的。
@@ -8,9 +8,11 @@ import { CheckCircle2, ExternalLink, KeyRound, Link2Off, Pencil, Power, Trash2 }
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+
 import { api } from '../shared/api.js';
 import { isTouch } from '../shared/KeyBar.jsx';
 import PopMenu from '../shared/PopMenu.jsx';
+import { Link } from '../shared/router.jsx';
 import { useSessions } from '../shared/sessions.jsx';
 import { Button, Card, CopyButton, ErrorNote, Field, More, Note, PasswordInput, QrCode, Row, Switch, useAction, useLoad } from '../shared/ui.jsx';
 import Select from '../shared/Select.jsx';
@@ -28,11 +30,8 @@ const SCOPES = [
   'im:message.group_at_msg:readonly',
   'im:message.reactions:write_only',
   'im:message:readonly',
-  'im:chat:create',
 ];
-const EVENTS = ['im.message.receive_v1', 'application.bot.menu_v6'];
-// 机器人菜单（推送事件）的 key：新会话、正在跑的会话、任务页（src/feishu_agent.rs on_menu）
-const MENU_KEYS = ['new', 'sessions', 'tasks'];
+const EVENTS = ['im.message.receive_v1'];
 const CALLBACK = 'card.action.trigger';
 // 常见错误码 → 怎么办（notify.feishu_hint_*）
 const HINTS = [10003, 10014, 230013, 99991672, 1000040346, 1000040350];
@@ -279,6 +278,9 @@ export function FeishuCard({ data, reload }) {
   const grant = async () => {
     if (await run(() => api.post('/notify/feishu/register', { update: true }))) reload();
   };
+  const setNotify = async (on) => {
+    if (await run(() => api.put('/notify/feishu/notify', { on }))) reload();
+  };
 
   const steps = (
     <ol className="nt-steps">
@@ -366,6 +368,16 @@ export function FeishuCard({ data, reload }) {
         {st.error && <FeishuError error={{ code: 'NOTIFY_FEISHU', params: st.error }} />}
         {/* 一次只一条：连不上时只说连不上 */}
         {f.bound && st.connected && !st.error && !f.callback_ok && <Note>{t(tested ? 'notify.test_sent' : 'notify.callback_pending')}</Note>}
+        {f.bound && (
+          <Row label={t('notify.feishu_notify')} hint={t('notify.feishu_notify_hint')}>
+            <Switch checked={f.notify !== false} disabled={busy} onChange={setNotify} label={t('notify.feishu_notify')} />
+          </Row>
+        )}
+        {f.bound && (
+          <p className="small muted">
+            {t('notify.feishu_bot_hint')} <Link to="/assistant">{t('notify.feishu_bot_link')}</Link>
+          </p>
+        )}
         {editing && <CredsForm data={data} onSaved={saved} onCancel={() => setEditing(false)} />}
         <ScanSetup data={data} reload={reload} update />
         <ErrorNote error={error && error.code !== 'NOTIFY_FEISHU' ? error : null} />
@@ -641,56 +653,7 @@ export function RulesCard({ data, reload }) {
   );
 }
 
-const HOW = ['dm', 'group', 'reply', 'new', 'stop', 'forward', 'help'];
-
-/** 飞书机器人：在飞书里和 AI 对话（docs/FEISHU_AGENT.md）。绑定好飞书以后才有 */
-export function AgentCard({ data, reload }) {
-  const { t } = useTranslation();
-  const { r, save, busy, error } = useRules(data, reload);
-  if (!r || !data.feishu?.bound) return null;
-  const toggle = (k, title, hint) => <Toggle r={r} k={k} title={title} hint={hint} busy={busy} save={save} />;
-  // 和 AI 对话要能在飞书里处理（审批）：打开时一起打开
-  const on = r.agent && r.actions;
-  return (
-    <Card id="nt-agent" title={t('notify.agent_title')} sub={on ? undefined : t('notify.agent_lead')}>
-      <Toggle r={r} title={t('notify.rule_agent')} hint={t('notify.rule_agent_hint')} busy={busy} checked={on} onChange={(v) => save(v ? { agent: true, actions: true } : { agent: false })} />
-      {on && (
-        <>
-          {toggle('auto_groups', t('notify.rule_auto_groups'), t('notify.rule_auto_groups_hint'))}
-          {toggle('agent_groups', t('notify.rule_agent_groups'), t('notify.rule_agent_groups_hint'))}
-          {/* 打开了“回答直接发在群里”（有风险）时露在外面，否则收进“怎么用和更多选项” */}
-          {r.agent_groups && r.agent_group_public && (
-            <>
-              {toggle('agent_group_public', t('notify.rule_agent_group_public'), t('notify.rule_agent_group_public_hint'))}
-              <Note kind="warn">{t('notify.agent_group_public_warn')}</Note>
-            </>
-          )}
-          <More summary={t('notify.agent_how_title')}>
-            {r.agent_groups && !r.agent_group_public && toggle('agent_group_public', t('notify.rule_agent_group_public'), t('notify.rule_agent_group_public_hint'))}
-            <ul className="nt-intro">
-              {HOW.map((k) => (
-                <li key={k}>{t(`notify.agent_how_${k}`)}</li>
-              ))}
-            </ul>
-            <p className="small muted">{t('notify.rule_agent_note')}</p>
-            <div className="stack" style={{ gap: 6 }}>
-              <b className="small">{t('notify.agent_menu_title')}</b>
-              <span className="small muted">{t('notify.agent_menu')}</span>
-              {MENU_KEYS.map((k) => (
-                <span key={k} className="small">
-                  {t(`notify.agent_menu_${k}`)} <Code text={k} />
-                </span>
-              ))}
-            </div>
-          </More>
-        </>
-      )}
-      <ErrorNote error={error} />
-    </Card>
-  );
-}
-
-/** AI 页“远程与通知”：先连飞书，再是飞书机器人、什么时候通知，最后是只通知的渠道 */
+/** AI 页“远程与通知”：通知渠道（飞书、其它渠道）和什么时候通知。飞书机器人在助理页 */
 export default function NotifySection() {
   const [data, error, reload] = useLoad(() => api.get('/notify'));
   const configured = data?.feishu || data?.hooks?.length > 0;
@@ -698,7 +661,6 @@ export default function NotifySection() {
     <>
       <ErrorNote error={error} />
       <FeishuCard data={data} reload={reload} />
-      <AgentCard data={data} reload={reload} />
       {configured && <RulesCard data={data} reload={reload} />}
       <HooksCard data={data} reload={reload} />
     </>

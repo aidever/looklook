@@ -8,6 +8,8 @@
 //!   留给升级前别的电脑发出去的旧卡片，对方没有配置时会回“没配置”；
 //! - **绑定**：设置页显示 6 位绑定码 = HMAC(App Secret, 时间窗) 的前 6 位，私聊机器人发这个码。收到的电脑自己就能校验，不用存。
 //! - **只通知的渠道**（`notify/hooks`，`push.rs`）：企业微信、钉钉、Server酱、PushPlus、Bark、ntfy，和飞书同时发同样的事，只带“打开”的链接。
+//! - **飞书机器人**（`feishu_bot.rs`）和飞书通知共用一个飞书应用、各有开关：通知是这里，机器人是助理的另一个输入框。
+//!   飞书通知关了（`Feishu::no_notify`）时卡片不发，但助理在飞书里说话时它要的审批照样发到私聊。
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
@@ -62,6 +64,9 @@ pub struct Feishu {
     /// 在哪台电脑上配的（设备 id）。配置同步那时（2026-11-10 之前）用来认哪台是配它的电脑，升级时 [`localize`] 按它留下或清掉
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub home: String,
+    /// 飞书这个通知渠道关掉了（机器人照常用）。缺省 = 开
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_notify: bool,
 }
 
 /// 旧的本机开关“这台电脑的会话也发提醒”（配置同步那时用的）：升级时 [`localize`] 看一眼就删掉
@@ -109,6 +114,23 @@ pub fn localize(app: &App) -> bool {
     store.set(LOCAL_KEY, &true).is_ok()
 }
 
+/// 飞书机器人改成只接助理（2026-11-12，docs/FEISHU_BOT.md）以后，旧的“在飞书里和 AI 对话”留下的记录清掉（只做一次）
+fn forget_old_bot(app: &App) {
+    const KEY: &str = "notify.old_bot_gone";
+    let store = &app.store;
+    if store.get::<bool>(KEY).ok().flatten() == Some(true) {
+        return;
+    }
+    let ids: Vec<String> = ["agent_current", "agent_projects", "agent_origins", "agent_last"].iter().map(|s| s.to_string()).collect();
+    if let Err(e) = settings_sync::drop_local(store, COLLECTION, &ids) {
+        tracing::warn!(error = ?e, "通知：旧的飞书对话记录没清掉");
+        return;
+    }
+    let _ = store.remove("feishu_agent.routes");
+    let _ = store.remove("feishu_agent.seeds");
+    let _ = store.set(KEY, &true);
+}
+
 /// 规则（`notify/rules`，§6.5）
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -129,31 +151,13 @@ pub struct Rules {
     pub done_batch: u32,
     /// 正在干活、但这么多分钟没有新进展时提醒一次（0 = 不提醒）
     pub stall_min: u32,
-    /// 在飞书里和 AI 对话：私聊发一句开会话、在话题里回复接着说（docs/FEISHU_AGENT.md）。默认关
-    pub agent: bool,
-    /// 私聊直接发一句时不问，直接在上次选的项目里开（`/new` 不带话照样问）
-    pub agent_direct: bool,
-    /// 群里 @ 机器人也能用（只认绑定的人）
-    pub agent_groups: bool,
-    /// 群里 @ 的回答直接发在群里（群里的人都看得到）。默认关：回答、选项目、审批都发到私聊，群里只加一个表情
-    pub agent_group_public: bool,
-    /// 飞书机器人自动建项目群：在飞书里开会话的项目、有通知的项目，没有群就建一个（要“创建群”权限）；
-    /// 这个项目的会话的通知发到它的群里，一个会话一个话题。默认开（2026-11-03 从“每个项目一个群”改来，旧的 `project_groups` 不认了）
-    pub auto_groups: bool,
     /// 看看开着（在前台）时不发外部通知，改成看看里的提醒。在飞书里对话的会话照常发
     pub fg_quiet: bool,
 }
 
 impl Default for Rules {
     fn default() -> Self {
-        Self { done: true, failed: true, actions: true, content: true, muted: vec![], lang: "zh-CN".into(), quiet: None, done_batch: 0, stall_min: 20, agent: false, agent_direct: false, agent_groups: false, agent_group_public: false, auto_groups: true, fg_quiet: true }
-    }
-}
-
-impl Rules {
-    /// 自动建项目群、通知发到项目群：要开着飞书机器人（在飞书里处理、和 AI 对话）
-    pub fn groups_on(&self) -> bool {
-        self.auto_groups && self.agent && self.actions
+        Self { done: true, failed: true, actions: true, content: true, muted: vec![], lang: "zh-CN".into(), quiet: None, done_batch: 0, stall_min: 20, fg_quiet: true }
     }
 }
 
@@ -198,6 +202,11 @@ fn quiet_now(rules: &Rules) -> bool {
 pub fn load_feishu(store: &crate::store::Store) -> Option<Feishu> {
     let v = settings_sync::values(store, COLLECTION).ok()?.remove("feishu")?;
     serde_json::from_value::<Feishu>(v).ok().filter(|f| !f.app_id.is_empty() && !f.app_secret.is_empty())
+}
+
+/// 飞书这个通知渠道开着
+fn f_notify(app: &App) -> bool {
+    load_feishu(&app.store).is_some_and(|f| !f.no_notify)
 }
 
 pub fn load_rules(store: &crate::store::Store) -> Rules {
@@ -386,7 +395,10 @@ pub struct HookStatus {
 
 /// 这一轮发到哪：飞书（绑定好了才有）+ 只通知的渠道
 struct Out {
+    /// 飞书应用和绑定的人（通知渠道关了也有：助理的审批要用）
     feishu: Option<(Arc<Api>, String)>,
+    /// 飞书这个通知渠道开着
+    feishu_notify: bool,
     hooks: Vec<Hook>,
     /// 没登录：`(英文, 注册页)`，通知里加一句开通远程访问
     guest: Option<(bool, String)>,
@@ -418,29 +430,14 @@ pub struct Notifier {
     auth_failed: AtomicBool,
     http: std::sync::OnceLock<reqwest::Client>,
     hooks: Arc<Mutex<HashMap<String, HookStatus>>>,
-    /// 在飞书里和 AI 对话（src/feishu_agent.rs）
-    pub agent: crate::feishu_agent::Agent,
+    /// 飞书机器人（src/feishu_bot.rs）
+    pub bot: crate::feishu_bot::Bot,
     /// 正在进行的扫码建应用（一台电脑同时只有一个）
     reg: Mutex<Option<Reg>>,
     /// 看看的页面在前台到什么时候（页面每 20 秒报一次，`POST /api/notify/foreground`）
     fg_until: AtomicI64,
-    /// 项目群里每个会话的话题：会话 → 话题开头那条消息
-    topics: Mutex<HashMap<String, String>>,
-    /// 项目群没建成的项目（`电脑|文件夹`）→ 什么时候：半小时内不再试
-    group_failed: Mutex<HashMap<String, Instant>>,
-    /// 正在建项目群的地方
-    group_making: Mutex<std::collections::HashSet<String>>,
 }
 
-/// 通知发到哪
-enum Target {
-    /// 绑定的人的私聊
-    Dm,
-    /// 回复这条消息（`true`：回复到话题里）
-    Reply(String, bool),
-    /// 项目群里给这个会话开一个话题
-    Topic { chat: String, inst: String },
-}
 
 /// 扫码建应用（[`feishu::register`]）在这台电脑上的进度，给设置页看
 #[derive(Debug, Clone, Serialize)]
@@ -538,13 +535,17 @@ impl Notifier {
             tick = tick.wrapping_add(1);
             if !local {
                 local = localize(&app);
+                if local {
+                    forget_old_bot(&app);
+                }
             }
             let f = load_feishu(&app.store);
             if tick.is_multiple_of(3) {
                 self.keep_connected(&app, f.as_ref());
             }
             let feishu = f.filter(|f| f.open_id.is_some() && !self.auth_failed.load(Ordering::SeqCst)).map(|f| (self.api(&f), f.open_id.clone().unwrap_or_default()));
-            let out = Out { feishu, hooks: load_hooks(&app.store), guest: guest(&app) };
+            let feishu_notify = f_notify(&app);
+            let out = Out { feishu, feishu_notify, hooks: load_hooks(&app.store), guest: guest(&app) };
             if out.feishu.is_none() && out.hooks.is_empty() {
                 continue;
             }
@@ -629,8 +630,11 @@ impl Notifier {
         // 看看开着：外部通知先不发（看看里有提醒）。在飞书里对话的会话照常发
         let fg = rules.fg_quiet && self.fg_until.load(Ordering::SeqCst) > now;
         let ids = app.chat.ids();
+        // 助理用户最近是在飞书里说的话：助理要的审批发到飞书私聊（不管飞书通知开没开），助理的结果由机器人推
+        let bot_on = crate::feishu_bot::enabled(app) && crate::assistant::feishu_push(&app.store).is_some();
         for id in &ids {
             let Some(brief) = app.chat.brief(id) else { continue };
+            let brain = crate::assistant::is_brain(&app.store, id);
             let muted = app.store.instance(id).ok().flatten().is_some_and(|r| rules.muted.contains(&r.workdir));
             let key = attn_key(&brief);
             // 这个会话现在挂着的卡片
@@ -642,14 +646,26 @@ impl Notifier {
                     self.close(out, s, &close_text(&brief, s.info.en)).await;
                 }
             }
-            // 在飞书里对话过的会话：卡片回复到那个话题里
-            let anchor = self.agent.anchor(app, id);
+            if brain {
+                // 助理：只发审批（用户在飞书里跟它说话时），做完 / 卡住这些不发
+                if let Some(k) = key.as_ref().filter(|_| !busy && bot_on) {
+                    let fresh = live.as_ref().is_none_or(|s| s.key.as_ref() != Some(k));
+                    if fresh && attn_due(&brief, now, false, false) {
+                        if let Some(info) = self.info(app, id, &brief, &rules) {
+                            self.send_attn(app, out, &own, id, k, &brief, info, true).await;
+                        }
+                    }
+                }
+                if let Some(end) = brief["turn"]["ended_at"].as_i64() {
+                    lock(&self.seen).entry(id.clone()).or_default().last_end = end;
+                }
+                continue;
+            }
             if let Some(k) = key.as_ref().filter(|_| !busy) {
                 let fresh = live.as_ref().is_none_or(|s| s.key.as_ref() != Some(k));
-                if fresh && !quiet && !(fg && anchor.is_none()) && attn_due(&brief, now, muted, self.agent.following(id)) {
+                if fresh && !quiet && !fg && attn_due(&brief, now, muted, false) {
                     if let Some(info) = self.info(app, id, &brief, &rules) {
-                        let to = self.target(app, out, id, anchor.clone(), &rules).await;
-                        self.send_attn(app, out, &own, id, k, &brief, info, to).await;
+                        self.send_attn(app, out, &own, id, k, &brief, info, false).await;
                     }
                 }
             }
@@ -658,11 +674,7 @@ impl Notifier {
             let first = !lock(&self.seen).contains_key(id);
             let last = lock(&self.seen).entry(id.clone()).or_default().last_end;
             let mut notice = end_notice(&brief, last, first, &rules, muted, now);
-            // 这一轮已经用流式卡片推过结果了
-            if matches!(notice, EndNotice::Send { .. } | EndNotice::Wait) && turn["ended_at"].as_i64().is_some_and(|e| self.agent.covers(id, e)) {
-                notice = EndNotice::Record;
-            }
-            if fg && anchor.is_none() && matches!(notice, EndNotice::Send { .. }) {
+            if fg && matches!(notice, EndNotice::Send { .. }) {
                 notice = EndNotice::Record;
             }
             if let (EndNotice::Record | EndNotice::Send { .. }, Some(end)) = (&notice, turn["ended_at"].as_i64()) {
@@ -681,18 +693,13 @@ impl Notifier {
                 let base = Act { dev: own.clone(), inst: id.clone(), n: n.clone(), ..Default::default() };
                 let c = card::ended(&info.info(), failed, text, end - started, &base);
                 let m = push::ended(&info.info(), failed, text, end - started);
-                let to = self.target(app, out, id, anchor, &rules).await;
-                let msg = self.send(app, out, &c, &m, to).await;
+                let msg = self.send(out, &c, &m, false).await;
                 self.remember(Sent { msg, inst: id.clone(), key: None, nonce: n, busy: false, info });
             }
         }
-        if !quiet && rules.stall_min > 0 {
-            for id in &ids {
-                let anchor = self.agent.anchor(app, id);
-                if fg && anchor.is_none() {
-                    continue;
-                }
-                self.check_stall(app, out, &own, id, &rules, now, anchor).await;
+        if !quiet && !fg && rules.stall_min > 0 {
+            for id in ids.iter().filter(|id| !crate::assistant::is_brain(&app.store, id)) {
+                self.check_stall(app, out, &own, id, &rules, now).await;
             }
         }
         // 会话没了：清掉记录
@@ -703,13 +710,13 @@ impl Notifier {
         if dropped > 0 && self.budget() {
             self.dropped.store(0, Ordering::SeqCst);
             let (en, url) = (rules.lang.starts_with("en"), page_url(app, "tasks"));
-            self.send(app, out, &card::digest(en, dropped, &url), &push::digest(en, dropped, &url), Target::Dm).await;
+            self.send(out, &card::digest(en, dropped, &url), &push::digest(en, dropped, &url), false).await;
         }
     }
 
     /// 卡住提醒：正在干活、但 `stall_min` 分钟没有新进展（额度用完在等重置的不算）。同一次停顿只提醒一次
     #[allow(clippy::too_many_arguments)]
-    async fn check_stall(&self, app: &App, out: &Out, own: &str, id: &str, rules: &Rules, now: i64, anchor: Option<String>) {
+    async fn check_stall(&self, app: &App, out: &Out, own: &str, id: &str, rules: &Rules, now: i64) {
         let Some(brief) = app.chat.brief(id) else { return };
         if brief["board"] != "working" || !brief["limit"].is_null() || brief["watched"] == true {
             return;
@@ -734,8 +741,7 @@ impl Notifier {
         // `p` 带上这次停顿的开始时间：点“停止”时还是这次停顿才停
         let base = Act { dev: own.into(), inst: id.into(), p: active.to_string(), n: n.clone(), ..Default::default() };
         let c = card::stalled(&info.info(), &doing, now - active, &base);
-        let to = self.target(app, out, id, anchor, rules).await;
-        let msg = self.send(app, out, &c, &push::stalled(&info.info(), &doing, now - active), to).await;
+        let msg = self.send(out, &c, &push::stalled(&info.info(), &doing, now - active), false).await;
         self.remember(Sent { msg, inst: id.into(), key: None, nonce: n, busy: false, info });
     }
 
@@ -752,11 +758,12 @@ impl Notifier {
         };
         let (en, url) = (rules.lang.starts_with("en"), page_url(app, "tasks"));
         let c = card::summary(en, lines.1, &lines.0, rules.content, &url);
-        self.send(app, out, &c, &push::summary(en, lines.1, &lines.0, rules.content, &url), Target::Dm).await;
+        self.send(out, &c, &push::summary(en, lines.1, &lines.0, rules.content, &url), false).await;
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn send_attn(&self, app: &App, out: &Out, own: &str, id: &str, key: &str, brief: &Value, info: Owned, to: Target) {
+    /// `bot`：助理要的审批，只发飞书私聊
+    async fn send_attn(&self, _app: &App, out: &Out, own: &str, id: &str, key: &str, brief: &Value, info: Owned, bot: bool) {
         let a = &brief["attn"];
         let options: Vec<String> = a["options"].as_array().map(|o| o.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
         let limit_wait = options.iter().position(|o| o.starts_with(crate::chat::screen::LIMIT_AUTO));
@@ -765,56 +772,8 @@ impl Notifier {
         let n = nonce();
         let base = Act { dev: own.into(), inst: id.into(), p: key.into(), n: n.clone(), ..Default::default() };
         let c = card::attn(&info.info(), &at, &base);
-        let msg = self.send(app, out, &c, &push::attn(&info.info(), &at), to).await;
+        let msg = self.send(out, &c, &push::attn(&info.info(), &at), bot).await;
         self.remember(Sent { msg, inst: id.into(), key: Some(key.into()), nonce: n, busy: false, info });
-    }
-
-    /// 一个会话的通知发到哪：在飞书里对话过的回复到那里；开了飞书机器人和“自动建项目群”时发到项目群里这个会话的话题（没有群就建）；其它发私聊
-    async fn target(&self, app: &App, out: &Out, inst: &str, anchor: Option<String>, rules: &Rules) -> Target {
-        if let Some(a) = anchor {
-            return Target::Reply(a, false);
-        }
-        let Some((api, open_id)) = out.feishu.as_ref().filter(|_| rules.groups_on()) else { return Target::Dm };
-        if let Some(m) = lock(&self.topics).get(inst).cloned() {
-            return Target::Reply(m, true);
-        }
-        let Ok(Some(row)) = app.store.instance(inst) else { return Target::Dm };
-        match self.project_group(app, api, open_id, &row.workdir, &row.launch, rules).await {
-            Some((chat, _)) => Target::Topic { chat, inst: inst.into() },
-            None => Target::Dm,
-        }
-    }
-
-    /// 这台电脑上 `workdir` 的项目群，没有就建（建不成时半小时内不再试）。返回 (群, 是不是刚建的)
-    pub(crate) async fn project_group(&self, app: &App, api: &Api, open_id: &str, workdir: &str, launch: &str, rules: &Rules) -> Option<(String, bool)> {
-        let own = app.account.session().map(|s| s.device_id).unwrap_or_default();
-        let place = format!("{own}|{workdir}");
-        if let Some(chat) = crate::feishu_agent::project_group_of(app, &place) {
-            return Some((chat, false));
-        }
-        if lock(&self.group_failed).get(&place).is_some_and(|t| t.elapsed() < Duration::from_secs(1800)) {
-            return None;
-        }
-        // 同时来了两件事（开会话、发通知）：只建一个
-        if !lock(&self.group_making).insert(place.clone()) {
-            return None;
-        }
-        let en = rules.lang.starts_with("en");
-        let agent = if matches!(launch, "claude" | "codex") { launch } else { "claude" };
-        let title = format!("{} · {}", tr(en, "看看", "LookLook"), std::path::Path::new(workdir).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| workdir.into()));
-        let r = crate::feishu_agent::make_project_group(app, api, &own, workdir, agent, &title, open_id, en).await;
-        lock(&self.group_making).remove(&place);
-        match r {
-            Ok(chat) => Some((chat, true)),
-            Err(e) => {
-                tracing::warn!(error = %e, place, "飞书：项目群没建成，先发私聊");
-                if feishu::code_of(&e).is_some_and(feishu::is_scope_error) {
-                    crate::feishu_agent::grant(app, api, "group", &[]).await;
-                }
-                lock(&self.group_failed).insert(place, Instant::now());
-                None
-            }
-        }
     }
 
     /// 看看的页面在前台（页面每 20 秒报一次）
@@ -839,9 +798,9 @@ impl Notifier {
         g.len() < PER_MINUTE
     }
 
-    /// 发一条：飞书发卡片，只通知的渠道各发一条消息（后台发，不等）。超出每分钟上限时不发、记一笔（之后合并成一条）。返回飞书的消息 id。
-    /// `to`：飞书卡片发到哪（私聊、回复在飞书里对话过的会话、项目群的话题）
-    async fn send(&self, app: &App, out: &Out, c: &Value, m: &Msg, to: Target) -> Option<String> {
+    /// 发一条：飞书发卡片（发私聊），只通知的渠道各发一条消息（后台发，不等）。超出每分钟上限时不发、记一笔（之后合并成一条）。返回飞书的消息 id。
+    /// `bot`：助理要的审批，只发飞书（通知渠道关了也发）
+    async fn send(&self, out: &Out, c: &Value, m: &Msg, bot: bool) -> Option<String> {
         if !self.budget() {
             self.dropped.fetch_add(1, Ordering::SeqCst);
             return None;
@@ -855,34 +814,15 @@ impl Notifier {
             }
             None => (c, m),
         };
-        for h in &out.hooks {
-            self.push(h.clone(), m.clone());
+        if !bot {
+            for h in &out.hooks {
+                self.push(h.clone(), m.clone());
+            }
         }
-        let (api, open_id) = out.feishu.as_ref()?;
+        let (api, open_id) = out.feishu.as_ref().filter(|_| bot || out.feishu_notify)?;
         // 发给同一个人每秒最多 5 条
         tokio::time::sleep(Duration::from_millis(220)).await;
-        let r = match to {
-            // 普通引用回复：私聊里跟着“当前会话”出在主界面；锚点在话题里（项目群）时飞书会留在话题里
-            Target::Reply(m, th) => api.reply(&m, "interactive", c, th).await,
-            Target::Dm => api.send_card(open_id, c).await,
-            // 这个会话在项目群里的第一张：开一个话题，之后的都回复到这个话题里；在话题里回复 = 跟这个会话说
-            Target::Topic { chat, inst } => match api.send_to_chat(&chat, "interactive", c).await {
-                Ok(id) => {
-                    lock(&self.topics).insert(inst.clone(), id.clone());
-                    self.agent.add_route(app, &id, &inst);
-                    Ok(id)
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, chat, "飞书：项目群里发不了，改发私聊");
-                    // 群解散了、机器人被移出去了：不再记着这个群，下次重建
-                    if matches!(feishu::code_of(&e), Some(230002 | 232009 | 232011)) {
-                        crate::feishu_agent::drop_project_group(app, &chat);
-                    }
-                    api.send_card(open_id, c).await
-                }
-            },
-        };
-        match r {
+        match api.send_card(open_id, c).await {
             Ok(id) => {
                 let mut s = lock(&self.status);
                 s.sent_at = Some(crate::util::system_ms());
@@ -928,11 +868,6 @@ impl Notifier {
         }
     }
 
-    /// 这条消息是发给哪个会话的通知卡片（在它下面回复 = 接着那个会话说）
-    pub(crate) fn inst_of_card(&self, msg: &str) -> Option<String> {
-        lock(&self.cards).iter().find(|s| s.msg.as_deref() == Some(msg)).map(|s| s.inst.clone())
-    }
-
     fn card_by_nonce(&self, n: &str) -> Option<Sent> {
         lock(&self.cards).iter().find(|s| s.nonce == n).cloned()
     }
@@ -946,9 +881,6 @@ impl Notifier {
     /// 在本机处理卡片上的操作。返回 (toast, 换上的卡片)
     pub async fn act(&self, app: &App, act: &Act, text: Option<&str>) -> Result<(String, Option<Value>), LocalError> {
         let en = load_rules(&app.store).lang.starts_with("en");
-        if act.a == crate::feishu_agent::STOP {
-            return self.agent.stop(app, act, en).await;
-        }
         let Some(sent) = self.card_by_nonce(&act.n).filter(|s| s.inst == act.inst) else {
             return Ok((tr(en, "这张卡片已经过期了，打开看看处理", "This card has expired. Open LookLook instead."), None));
         };
@@ -1044,11 +976,12 @@ impl Notifier {
             tracing::warn!(operator, "飞书：不是绑定的人点了卡片");
             return Some(toast("error", &tr(en, "不是绑定的飞书账号", "Not the bound Feishu account")));
         }
+        // 机器人的卡片（停止、飞书 CLI）：不受“只通知”管
+        if crate::feishu_bot::handles(&act.a) {
+            return Some(crate::feishu_bot::on_card(app, &act, ev).await);
+        }
         if !load_rules(&app.store).actions {
             return Some(toast("info", &tr(en, "已设置为只通知，打开看看处理", "Notify-only mode. Open LookLook to respond.")));
-        }
-        if crate::feishu_agent::handles(&act.a) {
-            return Some(crate::feishu_agent::on_card(app, &act, ev, operator).await);
         }
         let own = app.account.session().map(|s| s.device_id).unwrap_or_default();
         if act.dev == own {
@@ -1095,20 +1028,19 @@ impl Notifier {
         let Some(f) = load_feishu(&app.store) else { return };
         let msg = &ev["message"];
         let Some(open_id) = ev["sender"]["sender_id"]["open_id"].as_str() else { return };
-        // 群里：只有绑定的人 @ 机器人才算（docs/FEISHU_AGENT.md §2.5），别人的一律不理
-        // 群里：只认绑定的人；普通群要开了“群里 @ 机器人也能用”并 @ 了，项目群不用 @（feishu_agent 里判断）
+        // 群里：只有绑定的人 @ 机器人才算（docs/FEISHU_BOT.md），别人的一律不理，也不回话
         if msg["chat_type"] == "group" {
             if f.open_id.as_deref() == Some(open_id) {
-                crate::feishu_agent::on_message(app, &f, ev).await;
+                crate::feishu_bot::on_message(app, &f, ev).await;
             }
             return;
         }
         if msg["chat_type"] != "p2p" {
             return;
         }
-        // 绑定的人发来的（不是绑定码）：交给“在飞书里和 AI 对话”
-        if f.open_id.as_deref() == Some(open_id) && !pair_ok(&f, &crate::feishu_agent::message_text(msg), crate::util::system_ms()) {
-            crate::feishu_agent::on_message(app, &f, ev).await;
+        // 绑定的人发来的（不是绑定码）：交给机器人（助理）
+        if f.open_id.as_deref() == Some(open_id) && !pair_ok(&f, &crate::feishu_bot::message_text(msg), crate::util::system_ms()) {
+            crate::feishu_bot::on_message(app, &f, ev).await;
             return;
         }
         if msg["message_type"] != "text" {
@@ -1125,7 +1057,7 @@ impl Notifier {
             }
             self.reset();
             tracing::info!("飞书：绑定了新的账号");
-            tr(en, "已绑定。看看的通知会发到这里。", "Bound. LookLook notifications will arrive here.")
+            tr(en, "已绑定。看看的通知会发到这里，也可以直接在这里跟助理说话。", "Bound. LookLook notifications arrive here, and you can talk to the assistant here.")
         } else if text.len() == 6 && text.chars().all(|c| c.is_ascii_digit()) {
             tr(en, "绑定码不对或已过期，请在看看的设置页里看最新的码。", "Wrong or expired code. Check the latest code in LookLook settings.")
         } else {
@@ -1148,12 +1080,6 @@ impl Notifier {
         }
         match header["event_type"].as_str() {
             Some("card.action.trigger") => self.on_card(app, &v["event"]).await,
-            Some("application.bot.menu_v6") => {
-                let app = app.clone();
-                let ev = v["event"].clone();
-                tokio::spawn(async move { crate::feishu_agent::on_menu(&app, &ev).await });
-                None
-            }
             Some("im.message.receive_v1") => {
                 // 回复要发消息，不挡着这条事件的应答
                 let me = app.notify.clone();
@@ -1285,6 +1211,7 @@ impl Notifier {
                 open_id: id,
                 callback_ok: false,
                 home: app.account.session().map(|s| s.device_id).unwrap_or_default(),
+                no_notify: false,
             },
         };
         save_feishu(app, Some(&f))?;
@@ -1534,7 +1461,14 @@ mod tests {
         assert_eq!(r.lang, "zh-CN");
         // 旧版电脑存的规则没有这几项：用默认（不勿扰、逐条发、20 分钟卡住提醒）
         assert_eq!((r.quiet, r.done_batch, r.stall_min), (None, 0, 20));
-        assert!(r.fg_quiet && r.auto_groups && !r.agent_group_public);
+        assert!(r.fg_quiet);
+        // 旧的机器人选项（agent、auto_groups…）读到了也不认
+        let old: Rules = serde_json::from_value(json!({ "agent": true, "auto_groups": true, "done": true })).unwrap();
+        assert!(old.done);
+        // 飞书通知缺省是开的
+        let f: Feishu = serde_json::from_value(json!({ "app_id": "cli_a", "app_secret": "s" })).unwrap();
+        assert!(!f.no_notify);
+        assert!(serde_json::to_value(&f).unwrap().get("no_notify").is_none());
     }
 
     #[test]
@@ -1563,7 +1497,5 @@ mod tests {
     fn signed_message_binds_payload() {
         assert_ne!(message(ACTION_KIND, "a", "b", 1, "{}"), message(ACTION_KIND, "a", "b", 1, "{ }"));
         assert!(message(ACTION_KIND, "a", "b", 1, "{}").starts_with("looklook-notify-v1\na\nb\n1\n"));
-        // 飞书对话的请求签名不能拿来冒充卡片操作
-        assert_ne!(message(ACTION_KIND, "a", "b", 1, "{}"), message(crate::feishu_agent::RPC_KIND, "a", "b", 1, "{}"));
     }
 }

@@ -28,12 +28,8 @@ pub const SCOPES: &[&str] = &[
     "im:message.reactions:write_only",
     // 读合并转发、引用的消息
     "im:message:readonly",
-    // 项目群
-    "im:chat:create",
 ];
-/// 项目群里不 @ 也能收到消息：敏感权限，用到时（建项目群）再要，不放进扫码建应用里，免得企业管理员要审核
-pub const GROUP_MSG: &str = "im:message.group_msg";
-pub const EVENTS: &[&str] = &["im.message.receive_v1", "application.bot.menu_v6"];
+pub const EVENTS: &[&str] = &["im.message.receive_v1"];
 pub const CALLBACKS: &[&str] = &["card.action.trigger"];
 
 /// `addons` 参数：JSON → gzip → base64（URL 安全、去掉 `=`）。`extra`：再多要的权限。
@@ -124,7 +120,7 @@ mod tests {
 
     #[test]
     fn addons_round_trip() {
-        let s = addons(&[GROUP_MSG]);
+        let s = addons(&["im:message.group_msg"]);
         assert!(s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
         let gz = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&s).unwrap();
         let mut out = String::new();

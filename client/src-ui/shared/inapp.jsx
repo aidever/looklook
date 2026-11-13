@@ -1,4 +1,4 @@
-// 看看开着时的提醒（docs/FEISHU_AGENT.md §12）：页面在前台时每 20 秒告诉各台电脑一声，电脑就先不发飞书和其它渠道的通知
+// 看看开着时的提醒（docs/TASK_BOARD.md §6、规则 fg_quiet）：页面在前台时每 20 秒告诉各台电脑一声，电脑就先不发飞书和其它渠道的通知
 // （规则 fg_quiet，notify.rs），改成这里弹提醒：别的会话在等你处理、做完了、出错了。正开着的那个会话不提醒。
 import { BellRing, CheckCircle2, X, XCircle } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';

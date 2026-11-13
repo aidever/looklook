@@ -181,14 +181,6 @@ impl Api {
         d["message_id"].as_str().map(String::from).ok_or_else(|| anyhow!("没有 message_id"))
     }
 
-    /// 发一条消息给某人（私聊），返回 (消息 id, 私聊的 chat_id)
-    pub async fn send_to_user(&self, open_id: &str, msg_type: &str, content: &Value) -> Result<(String, String)> {
-        let body = json!({ "receive_id": open_id, "msg_type": msg_type, "content": content.to_string() });
-        let d = self.call(reqwest::Method::POST, "/open-apis/im/v1/messages?receive_id_type=open_id", &body).await?;
-        let id = d["message_id"].as_str().ok_or_else(|| anyhow!("没有 message_id"))?;
-        Ok((id.into(), d["chat_id"].as_str().unwrap_or_default().into()))
-    }
-
     /// 发一句文字给某人（绑定成功的回复）
     pub async fn send_text(&self, open_id: &str, text: &str) -> Result<()> {
         let body = json!({ "receive_id": open_id, "msg_type": "text", "content": json!({ "text": text }).to_string() });
@@ -232,20 +224,6 @@ impl Api {
     pub async fn get_message(&self, message_id: &str) -> Result<Vec<Value>> {
         let mut d = self.call(reqwest::Method::GET, &format!("/open-apis/im/v1/messages/{message_id}"), &Value::Null).await?;
         Ok(d["items"].as_array_mut().map(std::mem::take).unwrap_or_default())
-    }
-
-    /// 建一个话题模式的群，群主是 `owner`（机器人当管理员），返回 chat_id
-    pub async fn create_group(&self, name: &str, desc: &str, owner: &str) -> Result<String> {
-        let body = json!({ "name": name, "description": desc, "owner_id": owner, "user_id_list": [owner], "group_message_type": "thread", "chat_type": "private" });
-        let d = self.call(reqwest::Method::POST, "/open-apis/im/v1/chats?user_id_type=open_id&set_bot_manager=true", &body).await?;
-        d["chat_id"].as_str().map(String::from).ok_or_else(|| anyhow!("没有 chat_id"))
-    }
-
-    /// 发一条消息到一个会话（私聊或群），返回消息 id
-    pub async fn send_to_chat(&self, chat_id: &str, msg_type: &str, content: &Value) -> Result<String> {
-        let body = json!({ "receive_id": chat_id, "msg_type": msg_type, "content": content.to_string() });
-        let d = self.call(reqwest::Method::POST, "/open-apis/im/v1/messages?receive_id_type=chat_id", &body).await?;
-        d["message_id"].as_str().map(String::from).ok_or_else(|| anyhow!("没有 message_id"))
     }
 
     /// 机器人自己的 open_id（群里认“@ 的是不是我”）

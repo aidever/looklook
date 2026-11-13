@@ -512,7 +512,7 @@ pub(crate) async fn tell_brain_push(app: &App, text: String, push: bool) {
         return;
     }
     if let (Some(link), Some(base)) = (link, base) {
-        crate::feishu_agent::push_assistant(app, &brain, &link.msg, base as usize, since);
+        crate::feishu_bot::push_assistant(app, &brain, &link, base as usize, since);
     }
 }
 
@@ -624,8 +624,13 @@ pub async fn state(State(app): State<App>) -> R<Json<Value>> {
         "brain": brain,
         "settings": core::settings(&app.store),
         "engines": engines,
-        // 飞书配好了没有、私聊里能不能用飞书跟 AI 对话（没开时“交给助理”的开关不显示）
-        "feishu": { "configured": crate::notify::load_feishu(&app.store).is_some(), "agent": crate::notify::load_rules(&app.store).agent },
+        // 飞书机器人：飞书应用配好、绑定了没有；飞书 CLI 到哪一步了（feishu_bot.rs、lark_cli.rs）
+        "feishu": {
+            "configured": crate::notify::load_feishu(&app.store).is_some(),
+            "bound": crate::notify::load_feishu(&app.store).is_some_and(|f| f.open_id.is_some()),
+            "connected": app.notify.status().connected,
+        },
+        "lark": crate::lark_cli::status(app.instances.shell(), false).await,
         "tasks": tasks,
         "dispatches": recent,
         "agreements": core::agreements(&app.paths),
@@ -750,4 +755,14 @@ pub async fn unwatch(State(app): State<App>, Path(session): Path<String>) -> Sta
         m.remove(&session);
     });
     StatusCode::NO_CONTENT
+}
+
+/// `GET /api/assistant/lark`：飞书 CLI 现在到哪一步（`fresh` 不用缓存）
+pub async fn lark(State(app): State<App>) -> Json<crate::lark_cli::Status> {
+    Json(crate::lark_cli::status(app.instances.shell(), true).await)
+}
+
+/// `POST /api/assistant/lark`：走飞书 CLI 的下一步（装 / 建应用 / 登录），有链接时带着链接
+pub async fn lark_next(State(app): State<App>) -> R<Json<crate::lark_cli::Status>> {
+    Ok(Json(crate::lark_cli::next(app.instances.shell(), |_| {}).await?))
 }

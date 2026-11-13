@@ -113,18 +113,20 @@ fn own_dir(app: &App, dir: &str) -> bool {
     FsPath::new(dir).starts_with(app.paths.home.join("assistant"))
 }
 
-/// 已知的项目：现有会话的目录 + 以前聊过的目录（新到旧）
+/// 已知的项目：现有会话的目录 + 以前聊过的目录（新到旧）。每个带上它是不是 git 仓库、远端地址；
+/// 不是仓库的文件夹（一个目录下放几个仓库很常见）列出里面的仓库，助理才不会因为“这不是 git 仓库”就停下
 async fn projects(app: &App) -> Vec<Value> {
     let rows: Vec<_> = app.store.instances().unwrap_or_default().into_iter().filter(|r| !core::is_brain(&app.store, &r.id)).collect();
     let mut out: Vec<Value> = vec![];
     let mut seen: Vec<String> = vec![];
-    for f in crate::history::folders(1, |_| true).await {
+    for f in crate::history::folders(3, |_| true).await {
         if own_dir(app, &f.workdir) || !FsPath::new(&f.workdir).is_dir() {
             continue;
         }
         let key = crate::history::dir_key(&f.workdir);
         let open = rows.iter().filter(|r| crate::history::dir_key(&r.workdir) == key).count();
-        out.push(json!({ "name": base_name(&f.workdir), "path": f.workdir, "last_used": f.updated_at, "past_conversations": f.total, "open_sessions": open, "last_topic": f.items.first().map(|c| &c.title) }));
+        let topics: Vec<&str> = f.items.iter().map(|c| c.title.as_str()).filter(|t| !t.is_empty()).collect();
+        out.push(json!({ "name": base_name(&f.workdir), "path": f.workdir, "last_used": f.updated_at, "past_conversations": f.total, "open_sessions": open, "recent_topics": topics }));
         seen.push(key);
     }
     for r in &rows {
@@ -137,7 +139,82 @@ async fn projects(app: &App) -> Vec<Value> {
         seen.push(key);
     }
     out.truncate(60);
-    out
+    tokio::task::spawn_blocking(move || {
+        for p in &mut out {
+            if let Some(dir) = p["path"].as_str().map(String::from) {
+                repo_info(FsPath::new(&dir), p);
+            }
+        }
+        out
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// 每个项目里最多列几个仓库
+const REPOS_MAX: usize = 20;
+
+/// 目录是不是 git 仓库（`.git` 是目录或者 worktree 的文件）
+fn is_repo(dir: &FsPath) -> bool {
+    dir.join(".git").exists()
+}
+
+/// 仓库的 origin 地址（读 `.git/config`，不起 git 进程）
+fn origin_url(dir: &FsPath) -> Option<String> {
+    let cfg = std::fs::read_to_string(dir.join(".git").join("config")).ok()?;
+    let mut in_origin = false;
+    for line in cfg.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_origin = line == "[remote \"origin\"]";
+        } else if in_origin {
+            if let Some(u) = line.strip_prefix("url").map(str::trim_start).and_then(|l| l.strip_prefix('=')) {
+                return Some(u.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 项目的仓库信息写进 `p`：是仓库就写 `git`、`remote`；不是就往下找两层，列出里面的仓库
+fn repo_info(dir: &FsPath, p: &mut Value) {
+    if is_repo(dir) {
+        p["git"] = json!(true);
+        if let Some(u) = origin_url(dir) {
+            p["remote"] = json!(u);
+        }
+        return;
+    }
+    p["git"] = json!(false);
+    let mut repos = vec![];
+    let mut walk = vec![(dir.to_path_buf(), 0)];
+    while let Some((d, depth)) = walk.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        let mut subs: Vec<_> = rd.flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_dir())).map(|e| e.path()).collect();
+        subs.sort();
+        for sub in subs.into_iter().rev() {
+            let name = sub.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            if name.starts_with('.') || matches!(name.as_str(), "node_modules" | "target" | "dist" | "build" | "vendor") {
+                continue;
+            }
+            if is_repo(&sub) {
+                repos.push((sub.clone(), origin_url(&sub)));
+            } else if depth < 1 {
+                walk.push((sub, depth + 1));
+            }
+        }
+    }
+    repos.sort();
+    if !repos.is_empty() {
+        let n = repos.len();
+        p["repos_inside"] = json!(repos
+            .into_iter()
+            .take(REPOS_MAX)
+            .map(|(r, u)| json!({ "path": r.display().to_string(), "remote": u }))
+            .collect::<Vec<_>>());
+        if n > REPOS_MAX {
+            p["repos_more"] = json!(n - REPOS_MAX);
+        }
+    }
 }
 
 /// 项目可以写路径，也可以写名字（目录名，对得上唯一一个才算）
@@ -390,7 +467,7 @@ async fn call_tool(app: &App, name: &str, a: &Value) -> Option<Result<Value, Str
 fn tool_defs() -> Value {
     let obj = |props: Value, required: &[&str]| json!({ "type": "object", "properties": props, "required": required, "additionalProperties": false });
     json!([
-        { "name": "projects_list", "description": "The projects on this computer that Looklook knows about (folders with open sessions or past AI conversations), newest first.", "inputSchema": obj(json!({}), &[]) },
+        { "name": "projects_list", "description": "The projects on this computer that Looklook knows about (folders with open sessions or past AI conversations), newest first. Each has recent conversation topics, whether it is a git repo and its remote; a folder that is not a repo lists the git repos inside it (repos_inside) — a project is often a folder holding several repos.", "inputSchema": obj(json!({}), &[]) },
         { "name": "sessions_list", "description": "The AI coding sessions (Claude Code / Codex) currently open in Looklook, including the ones the user opened by hand. Call this before deciding between session_start and session_send. state: working | waiting_for_user | turn_finished | idle | stopped | not_started.",
           "inputSchema": obj(json!({ "project": { "type": "string", "description": "Only sessions in this project (name or path). Omit for all." } }), &[]) },
         { "name": "session_start", "description": "Start a NEW coding session for a piece of work. The user's own words are attached verbatim by Looklook; `brief` is only your added background. If another session is working in the same project this is queued behind it by default.",
@@ -765,4 +842,40 @@ pub async fn lark(State(app): State<App>) -> Json<crate::lark_cli::Status> {
 /// `POST /api/assistant/lark`：走飞书 CLI 的下一步（装 / 建应用 / 登录），有链接时带着链接
 pub async fn lark_next(State(app): State<App>) -> R<Json<crate::lark_cli::Status>> {
     Ok(Json(crate::lark_cli::next(app.instances.shell(), |_| {}).await?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repos_in_project() {
+        let d = tempfile::tempdir().unwrap();
+        let git = |p: &FsPath, url: Option<&str>| {
+            std::fs::create_dir_all(p.join(".git")).unwrap();
+            if let Some(u) = url {
+                std::fs::write(p.join(".git/config"), format!("[core]\n\tbare = false\n[remote \"origin\"]\n\turl = {u}\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n")).unwrap();
+            }
+        };
+        // 一个仓库
+        let one = d.path().join("app");
+        git(&one, Some("git@github.com:a/app.git"));
+        let mut p = json!({});
+        repo_info(&one, &mut p);
+        assert_eq!(p, json!({ "git": true, "remote": "git@github.com:a/app.git" }));
+        // 文件夹里放几个仓库（第二层也算），node_modules、隐藏目录不看
+        let ws = d.path().join("Mintegral-prd");
+        git(&ws.join("ViralForge"), Some("https://g.example/vf.git"));
+        git(&ws.join("svc/api"), None);
+        git(&ws.join("node_modules/x"), None);
+        git(&ws.join(".cache/y"), None);
+        std::fs::create_dir_all(ws.join("a/b/deep")).unwrap();
+        git(&ws.join("a/b/deep"), None);
+        let mut p = json!({});
+        repo_info(&ws, &mut p);
+        assert_eq!(p["git"], false);
+        let paths: Vec<String> = p["repos_inside"].as_array().unwrap().iter().map(|r| r["path"].as_str().unwrap().strip_prefix(&ws.display().to_string()).unwrap().to_string()).collect();
+        assert_eq!(paths, ["/ViralForge", "/svc/api"]);
+        assert_eq!(p["repos_inside"][0]["remote"], "https://g.example/vf.git");
+    }
 }

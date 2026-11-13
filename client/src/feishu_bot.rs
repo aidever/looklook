@@ -181,7 +181,22 @@ pub fn message_text(msg: &Value) -> String {
         Some("interactive") => card_text(&c),
         _ => String::new(),
     };
-    s.trim().to_string()
+    un_html(s.trim()).trim().to_string()
+}
+
+/// 有的消息（别的机器人、某些客户端发的）文字是 `<p>…</p>` 这种 HTML：去掉段落标签，换成换行。不像 HTML 的原样留着（别动代码里的 `<`）
+fn un_html(s: &str) -> String {
+    if !(s.contains("</p>") || s.contains("<br")) {
+        return s.to_string();
+    }
+    let mut t = s.to_string();
+    for (a, b) in [("</p><p>", "\n"), ("<br/>", "\n"), ("<br />", "\n"), ("<br>", "\n"), ("<p>", ""), ("</p>", "\n")] {
+        t = t.replace(a, b);
+    }
+    for (a, b) in [("&nbsp;", " "), ("&lt;", "<"), ("&gt;", ">"), ("&quot;", "\""), ("&#39;", "'"), ("&amp;", "&")] {
+        t = t.replace(a, b);
+    }
+    t
 }
 
 /// 卡片消息里的文字（开放接口取回的简化格式，或事件里的完整卡片 JSON）
@@ -1077,7 +1092,7 @@ async fn stream_turn(app: &App, inst: &str, reply_to: &str, base: usize, since: 
     };
     resnap(app, inst, base, &mut items).await;
     let body = body_of(&items, BODY_BYTES, en);
-    let done = card::stream_done(&info, outcome, if body == "…" { "" } else { &body }, &steps_of(&items), &thinking_of(&items), took);
+    let done = card::stream_done(&info, outcome, if body == "…" { "" } else { &body }, &steps_of(&items), &process_of(&items), took);
     let r = s.finish(&done).await;
     send_outputs(app, &api, &msg, inst, &items, since).await;
     r
@@ -1205,9 +1220,30 @@ fn assistant_texts(items: &BTreeMap<usize, Value>) -> Vec<&str> {
         .collect()
 }
 
-/// 这一轮 AI 说的话；太长只留最后的
+/// 这一轮 AI 说的话分成两段：(过程中说的, 最后那段)。最后那段 = 最后一次调工具之后说的话；
+/// “我先查一下”“需要 fetch 一下”这类是过程，飞书里不当回复发（放进折叠的过程里）
+fn split_texts(items: &BTreeMap<usize, Value>) -> (Vec<&str>, Vec<&str>) {
+    let mut process: Vec<&str> = vec![];
+    let mut last: Vec<&str> = vec![];
+    for b in items.values().filter(|it| it["k"] == "assistant").flat_map(|it| it["blocks"].as_array().into_iter().flatten()) {
+        if b["t"] == "tool_use" {
+            process.append(&mut last);
+        } else if let Some(t) = b["text"].as_str().map(str::trim).filter(|t| !t.is_empty() && b["t"] == "text") {
+            last.push(t);
+        }
+    }
+    // 这一轮以调工具结束（没有最后那段）：用过程里最后一句
+    if last.is_empty() {
+        if let Some(t) = process.pop() {
+            last.push(t);
+        }
+    }
+    (process, last)
+}
+
+/// 这一轮给用户的回复（最后那段）；太长只留最后的
 fn body_of(items: &BTreeMap<usize, Value>, max: usize, en: bool) -> String {
-    let text = assistant_texts(items).join("\n\n");
+    let text = split_texts(items).1.join("\n\n");
     if text.is_empty() {
         return "…".into();
     }
@@ -1221,6 +1257,21 @@ fn body_of(items: &BTreeMap<usize, Value>, max: usize, en: bool) -> String {
         text
     };
     card::body_markdown(&text)
+}
+
+/// 折叠起来的过程：思考 + 过程中说的话
+fn process_of(items: &BTreeMap<usize, Value>) -> String {
+    let said = split_texts(items).0.join("\n\n");
+    let thinking = thinking_of(items);
+    let text = [thinking.as_str(), said.as_str()].iter().filter(|t| !t.is_empty()).copied().collect::<Vec<_>>().join("\n\n");
+    if text.len() <= THINK_BYTES * 2 {
+        return text;
+    }
+    let mut cut = THINK_BYTES * 2;
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}…", &text[..cut])
 }
 
 fn thinking_of(items: &BTreeMap<usize, Value>) -> String {
@@ -1318,6 +1369,31 @@ mod tests {
         assert_eq!(message_text(&msg("image", json!({ "image_key": "k" }))), "");
         let c = json!({ "title": "做完了", "elements": [[{ "tag": "text", "text": "改了 2 个文件" }]] });
         assert_eq!(card_text(&c), "做完了\n改了 2 个文件");
+        // 有的消息文字是 HTML 段落
+        let html = "<p>@胡挺 已经推到 QA，可以联调了。</p><p>文档：https://x.feishu.cn/wiki/a?b=1&amp;c=2</p>";
+        assert_eq!(message_text(&msg("text", json!({ "text": html }))), "@胡挺 已经推到 QA，可以联调了。\n文档：https://x.feishu.cn/wiki/a?b=1&c=2");
+        assert_eq!(un_html("if a<b && c>d {}"), "if a<b && c>d {}");
+    }
+
+    #[test]
+    fn reply_is_last_part() {
+        let it = |blocks: Value| json!({ "k": "assistant", "blocks": blocks });
+        let items: BTreeMap<usize, Value> = [
+            it(json!([{ "t": "text", "text": "我先查一下仓库。" }, { "t": "tool_use", "id": "1", "name": "Bash", "input": {} }])),
+            json!({ "k": "tool_result", "tool_use_id": "1" }),
+            it(json!([{ "t": "text", "text": "本地没拉到，需要 fetch 一下。" }, { "t": "tool_use", "id": "2", "name": "Bash", "input": {} }])),
+            it(json!([{ "t": "thinking", "text": "找到了" }, { "t": "text", "text": "找到了：在 QA 分支上。" }, { "t": "text", "text": "可以联调。" }])),
+        ]
+        .into_iter()
+        .enumerate()
+        .collect();
+        assert_eq!(body_of(&items, 9999, false), "找到了：在 QA 分支上。\n\n可以联调。");
+        let p = process_of(&items);
+        assert!(p.contains("找到了") && p.contains("我先查一下仓库。") && p.contains("需要 fetch") && !p.contains("可以联调"), "{p}");
+        // 以调工具结束：用过程里最后一句
+        let items: BTreeMap<usize, Value> = [it(json!([{ "t": "text", "text": "交给会话去做了。" }, { "t": "tool_use", "id": "3", "name": "session_start", "input": {} }]))].into_iter().enumerate().collect();
+        assert_eq!(body_of(&items, 9999, false), "交给会话去做了。");
+        assert_eq!(body_of(&BTreeMap::new(), 9999, false), "…");
     }
 
     #[test]

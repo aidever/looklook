@@ -79,7 +79,7 @@ static USER_ENV: Mutex<Option<Vec<(String, String)>>> = Mutex::new(None);
 
 /// 用户平时打开终端时的 PATH：从程序坞打开的客户端（和 launchd 起的后台）只有系统默认的 PATH，
 /// Homebrew、npm、nvm / fnm 加的目录常只写在 `~/.zshrc` 里，只问登录 shell 也拿不到。
-pub(super) async fn user_path(shell: &str) -> Option<String> {
+pub(crate) async fn user_path(shell: &str) -> Option<String> {
     user_env(shell).await?.into_iter().rev().find(|(k, _)| k == "PATH").map(|(_, v)| v).filter(|p| !p.is_empty())
 }
 

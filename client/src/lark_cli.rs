@@ -50,6 +50,9 @@ struct Step {
 }
 
 static STEP: Mutex<Option<Step>> = Mutex::new(None);
+/// 找到的 lark-cli 的完整路径（`tools::detect` 用的是交互式登录 shell，读 `.zshrc`；跑命令的 `-lc` 不读，
+/// npm / nvm 的 PATH 写在 `.zshrc` 里时直接写 `lark-cli` 会 command not found）
+static BIN: Mutex<Option<String>> = Mutex::new(None);
 /// 状态缓存（每句飞书消息都要看一眼，别每次都起进程）
 static CACHE: Mutex<Option<(Instant, State, bool)>> = Mutex::new(None);
 const CACHE_FOR: Duration = Duration::from_secs(60);
@@ -60,7 +63,33 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn command(shell: &str, line: &str) -> Command {
+/// 单引号包起来给 sh / zsh
+fn quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// `lark-cli …` → 用找到的完整路径跑；PATH 换成用户平时终端里的（它是 `#!/usr/bin/env node` 的脚本，要找得到 node），
+/// 它所在的目录放最前面
+fn resolve(line: &str, bin: Option<&str>, user_path: Option<&str>) -> String {
+    if cfg!(windows) {
+        return line.to_string();
+    }
+    let mut path: Vec<String> = bin.and_then(|b| std::path::Path::new(b).parent()).map(|d| d.display().to_string()).into_iter().collect();
+    path.extend(user_path.map(str::to_string));
+    let line = match (line.strip_prefix("lark-cli "), bin) {
+        (Some(rest), Some(bin)) => format!("{} {rest}", quote(bin)),
+        _ => line.to_string(),
+    };
+    if path.is_empty() {
+        return line;
+    }
+    format!("PATH={}:\"$PATH\" {line}", quote(&path.join(":")))
+}
+
+async fn command(shell: &str, line: &str) -> Command {
+    let user_path = crate::chat::codex_app::user_path(shell).await;
+    let bin = lock(&BIN).clone();
+    let line = &resolve(line, bin.as_deref(), user_path.as_deref());
     if cfg!(windows) {
         #[cfg_attr(not(windows), allow(unused_mut))]
         let mut c = Command::new("cmd.exe");
@@ -79,7 +108,7 @@ fn command(shell: &str, line: &str) -> Command {
 
 /// 跑一条，等它结束：(成功没有, stdout, stderr)
 async fn run(shell: &str, line: &str, wait: Duration) -> Option<(bool, String, String)> {
-    let mut c = command(shell, line);
+    let mut c = command(shell, line).await;
     c.stdin(Stdio::null()).env("NO_COLOR", "1").kill_on_drop(true);
     let out = tokio::time::timeout(wait, c.output()).await.ok()?.ok()?;
     Some((out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned()))
@@ -110,7 +139,10 @@ fn find_str<'a>(v: &'a Value, keys: &[&str]) -> Option<&'a str> {
 
 /// `auth status --json` 的输出 → 状态（1.0.100 实测：没配 = `error.subtype = not_configured`）
 fn parse_status(out: &str) -> State {
-    let Some(v) = json_of(out) else { return State::NeedConfig };
+    let Some(v) = json_of(out) else {
+        // 找不到命令（不该发生：用的是检测到的完整路径）：当没装，别显示成“建应用”那一步
+        return if out.contains("command not found") || out.contains("No such file") { State::Missing } else { State::NeedConfig };
+    };
     if find_str(&v, &["subtype", "type"]).is_some_and(|s| s == "not_configured") {
         return State::NeedConfig;
     }
@@ -137,6 +169,7 @@ pub async fn status(shell: &str, fresh: bool) -> Status {
         Some((at, s, npm)) if !fresh && at.elapsed() < CACHE_FOR => (s, npm),
         _ => {
             let tools = crate::tools::detect(shell).await;
+            *lock(&BIN) = tools.lark.clone();
             let s = if tools.lark.is_none() {
                 State::Missing
             } else {
@@ -234,7 +267,7 @@ fn tail(s: &str) -> String {
 
 /// 在后台跑一步（阻塞到用户点完链接的那种命令）。`url` 已知时直接用，不知道时从输出里找（最多等 30 秒）
 async fn start_step(shell: &str, kind: &'static str, line: &str, url: Option<String>, done: impl FnOnce(Result<(), String>) + Send + 'static) -> Result<Status, LocalError> {
-    let mut c = command(shell, &format!("{line} 2>&1"));
+    let mut c = command(shell, &format!("{line} 2>&1")).await;
     c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).env("NO_COLOR", "1").kill_on_drop(true);
     let mut child = c.spawn().map_err(|e| LocalError::from(anyhow::Error::from(e)))?;
     *lock(&STEP) = Some(Step { kind, url: url.clone(), started: Instant::now(), done: None });
@@ -299,5 +332,15 @@ mod tests {
         assert_eq!(url_in("Open https://open.feishu.cn/page/cli?code=ab12 to continue"), Some("https://open.feishu.cn/page/cli?code=ab12".into()));
         assert_eq!(url_in("no link"), None);
         assert_eq!(tail("a\n\nb\nc\nd\ne\n"), "b\nc\nd\ne");
+        assert_eq!(parse_status("zsh:1: command not found: lark-cli"), State::Missing);
+    }
+
+    #[test]
+    fn resolve_path() {
+        // .zshrc 里加的 npm 目录：用完整路径跑，PATH 带上它的目录和用户终端里的 PATH
+        let l = resolve("lark-cli auth status --json", Some("/Users/a/.npm-global/bin/lark-cli"), Some("/opt/homebrew/bin:/usr/bin"));
+        assert_eq!(l, "PATH='/Users/a/.npm-global/bin:/opt/homebrew/bin:/usr/bin':\"$PATH\" '/Users/a/.npm-global/bin/lark-cli' auth status --json");
+        assert_eq!(resolve("lark-cli x", Some("/it's/lark-cli"), None), "PATH='/it'\\''s':\"$PATH\" '/it'\\''s/lark-cli' x");
+        assert_eq!(resolve("lark-cli x", None, None), "lark-cli x");
     }
 }

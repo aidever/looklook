@@ -18,6 +18,7 @@ mod chat_mux;
 mod dsh;
 mod input_tap;
 mod notify;
+pub mod assistant;
 pub mod mcp;
 mod proxy;
 pub mod remote;
@@ -145,6 +146,8 @@ pub fn router(app: App) -> Router {
         .route("/w/{id}/{*rest}", any(dsh::web))
         .route(looklook_protocol::rtc::OFFER_PATH, axum::routing::post(crate::rtc::offer))
         .route(mcp::PATH, axum::routing::post(mcp::handle).get(mcp::not_allowed).delete(mcp::not_allowed))
+        // 助理的大脑用的工具（只认它的令牌，见 assistant.rs）
+        .route(assistant::MCP_PATH, axum::routing::post(assistant::mcp).get(assistant::mcp_not_allowed).delete(assistant::mcp_not_allowed))
         .route(crate::chat::hooks::PATH, axum::routing::post(chat::hook))
         .route("/fonts/{*path}", get(assets::font))
         .route("/static/term.js", get(assets::term_js))

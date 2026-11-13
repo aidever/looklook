@@ -559,7 +559,10 @@ impl Transcript {
             }
             Some("popAll" | "clear") => self.queue.clear(),
             _ => {
-                if let Some(n) = text.and_then(|t| self.queue.iter().position(|q| same_queued(q, t))) {
+                // 带图片的消息 `enqueue` 不带内容（content 缺），`remove` 才带文字：按内容对不上就取走最前面那条没内容的，
+                // 否则它一直留在队列里，后面的 `dequeue`（取最前面那条）取错，真正排着的反而删不掉、旧消息也冒出来
+                let at = text.and_then(|t| self.queue.iter().position(|q| same_queued(q, t))).or_else(|| text.and_then(|_| self.queue.iter().position(|q| q.is_empty())));
+                if let Some(n) = at {
                     self.queue.remove(n);
                 }
             }
@@ -955,6 +958,13 @@ mod tests {
         t.feed(line(json!({"type":"queue-operation","operation":"enqueue","content":"x"})).as_bytes());
         t.feed(line(json!({"type":"queue-operation","operation":"popAll"})).as_bytes());
         assert!(t.queued.is_empty());
+        // 带图片的消息：enqueue 不带内容、remove 带文字。对不上也要取走，不然空条目留着，后面的 dequeue 取错
+        t.feed(line(json!({"type":"queue-operation","operation":"enqueue"})).as_bytes());
+        t.feed(line(json!({"type":"queue-operation","operation":"remove","content":"看图","reason":"absorbed_mid_turn"})).as_bytes());
+        t.feed(line(json!({"type":"queue-operation","operation":"enqueue","content":"这个分支发到 dev2"})).as_bytes());
+        assert_eq!(t.queued, ["这个分支发到 dev2"]);
+        t.feed(line(json!({"type":"queue-operation","operation":"dequeue"})).as_bytes());
+        assert!(t.queued.is_empty(), "dequeue 取走的是这条，不是图片消息留下的空条目");
     }
 
     /// 跑到一半转到后台的命令（运行中发来消息、Ctrl+B、超时）也算后台命令

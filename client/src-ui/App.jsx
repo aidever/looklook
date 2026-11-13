@@ -4,13 +4,14 @@
 // 本机 App 和浏览器远程打开是同一个界面，差别只在顶栏的连接胶囊（ConnChip）。
 // 首页 / 是开始页（手机上是会话列表），/s/{id} 在右边打开会话；整页终端 /t/{id} 占满整个窗口（手机、新窗口）。
 // 界面不出现“ttyd、tmux、隧道、端口转发”等术语。
-import { Activity, BookOpen, Bot, Bug, CalendarClock, Compass, FolderOpen, Github, Globe, History, House, Keyboard, Languages, Laptop, Link2, ListTodo, LogIn, LogOut, MessageSquare, Plus, Server, Settings as SettingsIcon, ShieldCheck, UserRound, Wrench } from 'lucide-react';
+import { Activity, BookOpen, Bot, Bug, CalendarClock, Compass, FolderOpen, Github, Globe, History, House, Keyboard, Languages, Laptop, Link2, ListTodo, LogIn, LogOut, MessageSquare, Plus, Server, Settings as SettingsIcon, ShieldCheck, Sparkles, UserRound, Wrench } from 'lucide-react';
 import { createContext, Fragment, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import Account from './pages/Account.jsx';
 import Board, { useAttnCount } from './pages/Board.jsx';
 import AiPage from './pages/Ai.jsx';
+import Assistant from './pages/Assistant.jsx';
 import Computers from './pages/Computers.jsx';
 import Files from './pages/Files.jsx';
 import Login from './pages/Login.jsx';
@@ -109,7 +110,7 @@ const TOOLS = [
   { to: '/settings', icon: SettingsIcon, key: 'nav.settings', short: 'nav.short.settings', config: true },
 ];
 // 按电脑的页面：多台电脑时顶栏显示电脑切换（会话合并显示所有电脑，账户页不分电脑）
-const DEVICE_PAGES = ['/files', '/ssh', '/pages', '/ai', '/system', '/settings'];
+const DEVICE_PAGES = ['/assistant', '/files', '/ssh', '/pages', '/ai', '/system', '/settings'];
 const TERM = /^\/t\/([a-z2-7]{8})$/;
 const SESS = /^\/s\/([a-z2-7]{8})$/;
 // 用户菜单里的账户页面
@@ -117,12 +118,12 @@ const ACCOUNT_PAGES = ['/devices', '/membership', '/account'];
 // 从右边滑出来的抽屉（地址照旧，链接、刷新都能直接打开）：盖在会话上面，不换掉它。文件、SSH 这类要干活的工具还是整页
 const DRAWER_PAGES = { '/settings': 'nav.settings', '/devices': 'acct.computers', '/account': 'acct.account', '/membership': 'acct.membership' };
 const isDrawer = (p) => Object.hasOwn(DRAWER_PAGES, p);
-const PAGES = ['/', '/new', '/tasks', '/history', '/project', ...ACCOUNT_PAGES, ...TOOLS.map((x) => x.to)];
+const PAGES = ['/', '/new', '/assistant', '/tasks', '/history', '/project', ...ACCOUNT_PAGES, ...TOOLS.map((x) => x.to)];
 // 开源仓库（客户端 AGPL-3.0-or-later）
 export const SOURCE_URL = 'https://github.com/aidever/looklook';
 const isKnown = (p) => PAGES.includes(p) || TERM.test(p) || SESS.test(p);
 // 会话相关的页面铺满主区域（不限宽度）
-const isWide = (p) => p === '/' || p === '/new' || p === '/tasks' || p === '/history' || SESS.test(p);
+const isWide = (p) => p === '/' || p === '/new' || p === '/assistant' || p === '/tasks' || p === '/history' || SESS.test(p);
 const RAIL_KEY = 'looklook.rail';
 
 function readFlag(key, fallback) {
@@ -391,6 +392,8 @@ function NavRail({ path, paneOpen, onPane }) {
       <Link to="/" className="rail-brand" aria-label={t('nav.start')} title={t('nav.start')}>
         <BrandMark size={30} />
       </Link>
+      {/* 助理：一个入口说话，它自己派活（docs/ASSISTANT.md） */}
+      <RailItem to="/assistant" icon={Sparkles} label={t('asst.title')} short={t('nav.short.assistant')} active={path === '/assistant'} />
       <RailItem onClick={() => ui.newSession()} icon={Plus} label={t('sess.new')} short={t('nav.short.new')} hint={keyLabel('mod+shift+O')} className="rail-new" disabled={!status.account.allowed} />
       <RailItem onClick={openSessions} icon={MessageSquare} label={t(!area ? 'sess.title' : paneOpen ? 'sess.collapse_side' : 'sess.expand_side')} short={t('nav.short.sessions')} hint={keyLabel('mod+shift+S')} active={area} />
       <RailItem to="/tasks" icon={ListTodo} label={n > 0 ? t('board.nav_count', { count: n }) : t('board.title')} short={t('nav.short.tasks')} active={path === '/tasks'} count={n} />
@@ -455,7 +458,7 @@ function SessionPane({ path, width, onWidth, onCollapse }) {
 }
 
 /**
- * 手机底部的标签栏：会话 · 任务 · ＋新建 · 工具 · 我的。工具和“我的”从底部弹出菜单。
+ * 手机底部的标签栏：会话 · 助理 · 任务 · ＋新建 · 工具 · 我的。工具和“我的”从底部弹出菜单。
  */
 function MobileTabs({ path }) {
   const { t } = useTranslation();
@@ -473,6 +476,10 @@ function MobileTabs({ path }) {
       <Link to="/" className={`mtab ${isSessionArea(path) ? 'active' : ''}`}>
         <MessageSquare size={21} aria-hidden="true" />
         <span>{t('sess.title')}</span>
+      </Link>
+      <Link to="/assistant" className={`mtab ${path === '/assistant' ? 'active' : ''}`}>
+        <Sparkles size={21} aria-hidden="true" />
+        <span>{t('nav.short.assistant')}</span>
       </Link>
       <Link to="/tasks" className={`mtab ${path === '/tasks' ? 'active' : ''}`}>
         <ListTodo size={21} aria-hidden="true" />
@@ -577,7 +584,7 @@ function ConsoleLayout({ path, stale, children }) {
           <ConnChip />
         </span>
       </header>
-      <div className={`console ${pane ? 'console-pane' : ''} ${sess ? 'console-sess' : ''}`} style={{ '--pane-w': `${width}px` }}>
+      <div className={`console ${pane ? 'console-pane' : ''} ${sess ? 'console-sess' : ''} ${path === '/assistant' ? 'console-full' : ''}`} style={{ '--pane-w': `${width}px` }}>
         <NavRail path={path} paneOpen={paneOpen} onPane={setPane} />
         {pane && <SessionPane path={path} width={width} onWidth={onWidth} onCollapse={() => setPane(false)} />}
         <div className="console-col">
@@ -815,7 +822,7 @@ function Shell() {
     // 多台电脑时状态来自选中的那台，换电脑不能换 key；本机 App 用自己的设备 id（列表的 default）。
     const login = rtcMode ? 'remote' : devices.multi ? `local:${devices.def}` : (status.account.session?.device_id ?? 'guest');
     const home = opensInPage() ? <DraftPane key={`start:${login}`} /> : <SessionHome />;
-    const page = SESS.test(path) ? null : { '/': home, '/new': <DraftPane key={`start:${login}`} />, '/tasks': <Board />, '/history': <HistoryPage />, '/project': <ProjectPage />, '/files': <Files />, '/ssh': <SshHosts />, '/pages': <Pages />, '/ai': <AiPage />, '/system': <System /> }[path];
+    const page = SESS.test(path) ? null : { '/': home, '/new': <DraftPane key={`start:${login}`} />, '/assistant': <Assistant />, '/tasks': <Board />, '/history': <HistoryPage />, '/project': <ProjectPage />, '/files': <Files />, '/ssh': <SshHosts />, '/pages': <Pages />, '/ai': <AiPage />, '/system': <System /> }[path];
     const guest = !status.account.logged_in;
     const drawerPage = route.drawer && { '/settings': <Settings />, '/account': guest ? <Login drawer /> : <Account />, '/devices': guest ? <Login drawer /> : <Computers />, '/membership': guest ? <Login drawer /> : <Membership /> }[route.drawer];
     body = (

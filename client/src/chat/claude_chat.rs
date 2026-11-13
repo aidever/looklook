@@ -265,7 +265,12 @@ impl Chat {
                 args.extend(["--resume-session-at".into(), at]);
             }
         }
-        if let Some(m) = model {
+        // 助理的大脑（assistant.rs）：带上规矩和只给它的工具；没选过模型时用好的
+        let brain = crate::assistant::is_brain(&self.store, id);
+        if brain {
+            args.extend(crate::assistant::brain_args(&self.paths));
+        }
+        if let Some(m) = model.or_else(|| brain.then(|| crate::assistant::DEFAULT_MODEL.to_string())) {
             args.extend(["--model".into(), m]);
         }
         if let Some(e) = effort {

@@ -389,7 +389,11 @@ impl Instances {
     // ---------------- 查询 ----------------
 
     pub async fn list(&self) -> Result<Vec<View>, LocalError> {
-        let rows = self.store.instances()?;
+        let mut rows = self.store.instances()?;
+        // 助理的大脑是个会话，但不列出来（在助理页上用）
+        if let Some(brain) = crate::assistant::brain_id(&self.store) {
+            rows.retain(|r| r.id != brain);
+        }
         let sessions = self.tmux_sessions().await;
         let mut views: Vec<View> = rows.into_iter().map(|r| self.view(r, sessions.as_ref())).collect();
         let stale = lock(&self.titles).at.is_none_or(|at| at.elapsed() >= TITLE_TTL);

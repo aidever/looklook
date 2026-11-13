@@ -45,7 +45,8 @@
       "pages": "Pages",
       "system": "System",
       "ai": "AI",
-      "settings": "Settings"
+      "settings": "Settings",
+      "assistant": "Assistant"
     },
     "main": "Main navigation",
     "terminals": "Sessions",
@@ -3950,5 +3951,62 @@
     "retry": "Retry",
     "empty_title": "No skills installed on this computer yet",
     "empty_body": "Skills are instructions AI tools read when needed. Installed ones show up here — you can ask the AI to install one in a chat."
+  },
+  "asst": {
+    "title": "Assistant",
+    "side": "Dispatch log",
+    "no_tasks": "Nothing dispatched yet. Just say what you need — it picks the project and starts a new session or continues an existing one.",
+    "unwatch": "Stop tracking",
+    "state": {
+      "working": "working",
+      "waiting_for_user": "needs you",
+      "turn_finished": "done",
+      "idle": "idle",
+      "stopped": "stopped",
+      "not_started": "not started"
+    },
+    "intro_title": "One place to ask",
+    "intro_1": "Say what you want done. It works out the project, decides whether to start a new session or continue one, and briefs Claude Code / Codex.",
+    "intro_2": "Every dispatch shows where it went and why; tap \"Wrong\" to redirect it.",
+    "intro_3": "Small things like checking status or running a read-only command it does itself; project code changes always go to a session, and risky actions ask you first.",
+    "intro_4": "It tells you when work is done or a session is waiting on you, and keeps standing instructions (\"don't touch payments yet\") in mind.",
+    "enable": "Turn on assistant",
+    "enable_note": "Uses Claude Code on this computer (chat mode), Opus by default; usage counts against your Claude account as usual and shows up in usage stats.",
+    "unavailable": "The assistant can't run on this computer: it needs Claude Code installed with chat mode available (not yet on Windows).",
+    "fixed": "Redirected — the assistant will follow this next time",
+    "route": {
+      "new": "Started a new session",
+      "into": "Sent to",
+      "queued": "Queued (another session is busy in this project):",
+      "wrong": "Wrong",
+      "ok": "Looks right",
+      "why": "Why: {{reason}}",
+      "to_new": "Start a new one instead",
+      "to_this": "Send there",
+      "pick": "Pick a session",
+      "fixed_new": "Redirected to a new session",
+      "fixed_into": "Redirected to another session",
+      "fix_note_start": "The session it started will be stopped.",
+      "fix_note_send": "That session is told to ignore the message; if it already acted on it, take a look."
+    },
+    "agreements": "Standing instructions",
+    "agreements_empty": "None yet. Say things like \"from now on…\" or \"don't … yet\" and the assistant keeps them in every turn.",
+    "agreement_done": "Forget this",
+    "until": "until {{until}}",
+    "routes": "Where things went",
+    "routes_empty": "Nothing dispatched yet.",
+    "stats": "You redirected {{fixed}} of the last {{of}}",
+    "foot": "The assistant dispatches and reports; the working session checks its own work. Default model: {{model}}.",
+    "evt": {
+      "turn_end_done": "Done:",
+      "turn_end_failed": "Stopped with an error:",
+      "turn_end_interrupted": "Interrupted:",
+      "question": "Asking you:",
+      "started": "Queued work started:",
+      "start_failed": "Queued work failed to start:",
+      "rerouted": "Redirected:",
+      "show": "Show message",
+      "hide": "Hide"
+    }
   }
 }

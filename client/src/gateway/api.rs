@@ -41,6 +41,12 @@ pub fn routes(app: App) -> Router<App> {
         .route("/rtc/net", get(crate::rtc::net::get_net).put(crate::rtc::net::put_net))
         .route("/rtc/net/detect", post(crate::rtc::net::post_detect))
         .route("/platform/{*rest}", get(platform_web).post(platform_web).put(platform_web).patch(platform_web).delete(platform_web))
+        // 助理（assistant.rs）
+        .route("/assistant", get(super::assistant::state))
+        .route("/assistant/enable", post(super::assistant::enable))
+        .route("/assistant/dispatches/{id}/fix", post(super::assistant::fix))
+        .route("/assistant/agreements/remove", post(super::assistant::agreement_remove))
+        .route("/assistant/watch/{session}", delete(super::assistant::unwatch))
         .route("/instances", get(list_instances).post(create_instance))
         .route("/instances/idle", get(list_idle).post(stop_idle))
         // 项目的运行按钮（▶，run_actions.rs）

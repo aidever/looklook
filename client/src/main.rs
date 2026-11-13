@@ -25,6 +25,7 @@
 mod account;
 mod agent_update;
 mod agents;
+mod assistant;
 mod chat;
 mod checkpoint;
 mod claude_profiles;
@@ -712,6 +713,7 @@ async fn run(home: Option<PathBuf>, listen: Option<SocketAddr>, server: Option<S
         tokio::spawn(rtc::signal::run(app.clone(), shutdown.clone())),
         tokio::spawn(app.sync.clone().run(app.clone(), shutdown.clone())),
         tokio::spawn(chat.clone().background()),
+        tokio::spawn(gateway::assistant::run(app.clone())),
         tokio::spawn(idle_stop::run(store.clone(), instances.clone(), chat.clone())),
         tokio::spawn(agent_update::run(store.clone(), instances.clone(), chat.clone())),
         tokio::spawn(pricing::run(paths.home.clone())),

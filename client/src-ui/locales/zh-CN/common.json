@@ -45,7 +45,8 @@
       "pages": "网页",
       "system": "系统",
       "ai": "AI",
-      "settings": "设置"
+      "settings": "设置",
+      "assistant": "助理"
     },
     "main": "主导航",
     "terminals": "会话",
@@ -3950,5 +3951,62 @@
     "retry": "重试",
     "empty_title": "这台电脑上还没有装技能",
     "empty_body": "技能是 AI 工具按需读取的说明书，装好后会出现在这里。可以在对话里让 AI 帮你装一个。"
+  },
+  "asst": {
+    "title": "助理",
+    "side": "派活记录",
+    "no_tasks": "还没有派出去的活。直接说要干什么，它会自己找项目、开会话或者接着原来的。",
+    "unwatch": "不用再盯着",
+    "state": {
+      "working": "在干",
+      "waiting_for_user": "在等你",
+      "turn_finished": "做完了",
+      "idle": "空着",
+      "stopped": "停了",
+      "not_started": "没开"
+    },
+    "intro_title": "一个入口，说一句就行",
+    "intro_1": "随便说要干什么：它判断是哪个项目，新开会话还是接着原来那个，再把活交代给 Claude Code / Codex。",
+    "intro_2": "每次派到哪、为什么都会写出来；派错了点「不对」就能改。",
+    "intro_3": "看个状态、跑条只读命令这类小事它自己做；改项目代码一律派出去，有风险的操作先问你。",
+    "intro_4": "活做完了、在等你回答，它会告诉你。你说过的约定（比如「先别动支付」）它会一直记着。",
+    "enable": "开启助理",
+    "enable_note": "用这台电脑上的 Claude Code（对话模式），默认用 Opus；花费照常算在你的 Claude 账号里，在用量统计里能看到。",
+    "unavailable": "这台电脑上用不了助理：需要装好 Claude Code，并且能用对话模式（Windows 版暂不支持）。",
+    "fixed": "改好了，助理下次会照着来",
+    "route": {
+      "new": "新开了会话",
+      "into": "接着发给了",
+      "queued": "排队等着开（同一个项目里有会话在干）：",
+      "wrong": "不对",
+      "ok": "没问题",
+      "why": "原因：{{reason}}",
+      "to_new": "改成新开一个",
+      "to_this": "改发给它",
+      "pick": "选一个会话",
+      "fixed_new": "已改成新开会话",
+      "fixed_into": "已改发给别的会话",
+      "fix_note_start": "改了之后，原来新开的那个会话会被停下。",
+      "fix_note_send": "原来那个会话会收到「这条不是给你的，别管它」；它要是已经动手了，去看一眼。"
+    },
+    "agreements": "口头约定",
+    "agreements_empty": "还没有。说「以后都…」「先别…」这类话，助理会记下来，每次都带着。",
+    "agreement_done": "不用再记",
+    "until": "到 {{until}}",
+    "routes": "去向",
+    "routes_empty": "还没派过活。",
+    "stats": "最近 {{of}} 次里你改了 {{fixed}} 次",
+    "foot": "助理只派活、转述结果；做没做对由干活的会话自己验收。默认模型 {{model}}。",
+    "evt": {
+      "turn_end_done": "做完了：",
+      "turn_end_failed": "出错停下了：",
+      "turn_end_interrupted": "被打断了：",
+      "question": "在问你：",
+      "started": "排队的活开始了：",
+      "start_failed": "排队的活没开起来：",
+      "rerouted": "去向改了：",
+      "show": "看原文",
+      "hide": "收起"
+    }
   }
 }

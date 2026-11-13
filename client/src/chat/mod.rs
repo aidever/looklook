@@ -780,6 +780,23 @@ impl Chat {
         if name == "UserPromptSubmit" {
             self.checkpoint_turn(id, ev["prompt"].as_str().unwrap_or_default(), true).await;
         }
+        // 助理的大脑（assistant.rs）：每一轮带上环境、约定、在干的活；用工具先过闸门
+        if crate::assistant::is_brain(&self.store, id) {
+            if name == "UserPromptSubmit" {
+                crate::assistant::note_said(&self.store, ev["prompt"].as_str().unwrap_or_default());
+                let ctx = crate::assistant::turn_context(&self.paths, &self.assistant_doing());
+                return json!({ "hookSpecificOutput": { "hookEventName": "UserPromptSubmit", "additionalContext": ctx } }).to_string();
+            }
+            if name == "PreToolUse" {
+                let busy = |p: &std::path::Path| self.project_busy(p, id);
+                match crate::assistant::gate(&self.paths, tool.as_deref().unwrap_or(""), &ev["tool_input"], &busy) {
+                    crate::assistant::Verdict::Allow => return pre_tool_use("allow", "Allowed by Looklook."),
+                    crate::assistant::Verdict::Deny(why) => return pre_tool_use("deny", &why),
+                    crate::assistant::Verdict::Ask => return pre_tool_use("ask", "Looklook asks the user to confirm this."),
+                    crate::assistant::Verdict::Pass => {}
+                }
+            }
+        }
         if name == "PreToolUse" && tool.as_deref() == Some("Bash") {
             let hit = ev["tool_input"]["command"].as_str().and_then(|c| crate::guard::check(&crate::guard::load(&self.store), c));
             if let Some(hit) = hit {
@@ -787,6 +804,53 @@ impl Chat {
             }
         }
         String::new()
+    }
+
+    /// 助理盯着的会话现在怎么样了（每一轮告诉大脑）
+    fn assistant_doing(&self) -> Vec<crate::assistant::Doing> {
+        crate::assistant::watches(&self.store)
+            .into_keys()
+            .filter_map(|sid| {
+                let row = self.store.instance(&sid).ok().flatten()?;
+                let b = self.brief(&sid).unwrap_or_default();
+                let state = match b["board"].as_str() {
+                    Some("working") => "在干活",
+                    Some("attn") => "等用户处理（审批或提问）",
+                    Some("ended") => "这一轮做完了",
+                    Some("stopped") => "停了",
+                    _ => "空闲",
+                };
+                Some(crate::assistant::Doing { session: sid, title: if row.name.is_empty() { b["title"].as_str().map(String::from).unwrap_or_default() } else { row.name }, project: row.workdir, state: state.to_string() })
+            })
+            .collect()
+    }
+
+    /// 这个路径所在的项目里，有没有别的会话（`except` 以外）正在干活
+    pub fn project_busy(&self, path: &std::path::Path, except: &str) -> bool {
+        self.busy_session(path, except).is_some()
+    }
+
+    /// 同上，返回正在干活的那个会话
+    pub fn busy_session(&self, path: &std::path::Path, except: &str) -> Option<String> {
+        let root = crate::assistant::project_root(path);
+        self.store.instances().unwrap_or_default().into_iter().find_map(|r| {
+            if r.id == except || crate::assistant::is_brain(&self.store, &r.id) {
+                return None;
+            }
+            let dir = std::path::Path::new(&r.workdir);
+            if crate::assistant::project_root(dir) != root && !path.starts_with(dir) {
+                return None;
+            }
+            let b = self.brief(&r.id)?;
+            matches!(b["board"].as_str(), Some("working" | "attn")).then_some(r.id)
+        })
+    }
+
+    /// 上下文用了多少（会话清单里给助理看）
+    pub fn context(&self, id: &str) -> Option<Value> {
+        let inst = lock(&self.insts).get(id).cloned()?;
+        let st = lock(&inst.st);
+        serde_json::to_value(&st.context).ok().filter(|v| !v.is_null())
     }
 
     /// hook 带来的会话和 transcript 路径（`/clear`、`/resume` 会换）。换了返回 true。

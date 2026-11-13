@@ -68,6 +68,10 @@ import {
   MessageCircle,
   UserRound,
   FolderSearch,
+  CircleCheck,
+  Play,
+  ArrowRightLeft,
+  Info,
 } from 'lucide-react';
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -1112,6 +1116,51 @@ function UserText({ id, text }) {
 const LONG_CHARS = 800;
 const LONG_LINES = 12;
 
+// 助理（docs/ASSISTANT.md）：看看把派出去的会话的消息（做完、在问、排队的开了、去向改了）按这个格式送进助理的对话
+const EVENT_OPEN = '<looklook-event';
+const EVENT_ICON = { turn_end: CircleCheck, question: MessageCircleQuestion, started: Play, start_failed: TriangleAlert, rerouted: ArrowRightLeft };
+
+export function parseAssistantEvent(text) {
+  const m = text.match(/^<looklook-event\s([^>]*)>\n?([\s\S]*?)\n?<\/looklook-event>\s*$/);
+  if (!m) return null;
+  const attrs = {};
+  for (const [, k, v] of m[1].matchAll(/(\w+)="([^"]*)"/g)) attrs[k] = v;
+  return { ...attrs, body: m[2] };
+}
+
+function AssistantEvent({ text }) {
+  const { t } = useTranslation();
+  const { navigate } = useRouter();
+  const [open, setOpen] = useState(false);
+  const ev = parseAssistantEvent(text);
+  if (!ev) return <p className="chat-event">{text.slice(0, 200)}</p>;
+  const Icon = EVENT_ICON[ev.type] ?? Info;
+  const kind = ev.type === 'turn_end' ? `turn_end_${ev.outcome === 'failed' || ev.outcome === 'interrupted' ? ev.outcome : 'done'}` : ev.type;
+  return (
+    <div className="chat-aevt" data-kind={kind}>
+      <div className="chat-aevt-line">
+        <Icon size={14} aria-hidden="true" />
+        <span className="chat-aevt-text">
+          {t(`asst.evt.${kind}`, { defaultValue: ev.type })}{' '}
+          {ev.session ? (
+            <button type="button" className="link-btn asst-link" onClick={() => navigate(`/s/${ev.session}`)}>
+              {ev.title || ev.session}
+            </button>
+          ) : (
+            <strong>{ev.title}</strong>
+          )}
+        </span>
+        {ev.body && (
+          <button type="button" className="chat-aevt-more" onClick={() => setOpen(!open)} aria-expanded={open} aria-label={t(open ? 'asst.evt.hide' : 'asst.evt.show')} title={t(open ? 'asst.evt.hide' : 'asst.evt.show')}>
+            {open ? <ChevronUp size={14} aria-hidden="true" /> : <ChevronDown size={14} aria-hidden="true" />}
+          </button>
+        )}
+      </div>
+      {open && <pre className="chat-aevt-body">{ev.body}</pre>}
+    </div>
+  );
+}
+
 function UserItem({ id, item, thumbs, editable = false }) {
   const { t } = useT();
   const edit = useContext(EditCtx);
@@ -1470,6 +1519,8 @@ function Item({ id, item, editable = false }) {
   const thumbs = item.images > 0 && (agent === 'claude' || caps?.user_images === true);
   switch (item.k) {
     case 'user':
+      // 助理收到的通知（看看代码送进去的，不是用户说的）：画成一张小卡片
+      if (item.text.startsWith(EVENT_OPEN)) return <AssistantEvent text={item.text} />;
       return <UserItem id={id} item={item} thumbs={thumbs} editable={editable && caps?.edit === true && !item.mid && !item.truncated} />;
     case 'task':
       return (
@@ -5225,7 +5276,7 @@ function ChatFresh({ kind, title, agent }) {
   );
 }
 
-export default function ChatView({ id, launch, active, touch, offline = false, onTab, onDraftBack }) {
+export default function ChatView({ id, launch, active, touch, offline = false, onTab, onDraftBack, label }) {
   const router = useRouter();
   const chat = useChat(id, active);
   const { status, items: allItems } = chat;
@@ -5255,7 +5306,8 @@ export default function ChatView({ id, launch, active, touch, offline = false, o
   const echo = useSentEcho(id, items, chat.status?.phase ?? 'detached');
   // 状态还没取到（刚切过来、连不上）时按终端的启动类型，不能先显示成 Claude Code
   const agentId = status?.agent ?? (AGENT_NAMES[launch] ? launch : 'claude');
-  const agentName = AGENT_NAMES[agentId] ?? AGENT_NAMES.claude;
+  // label：界面上怎么称呼它（助理页传“助理”），默认是工具名
+  const agentName = label ?? AGENT_NAMES[agentId] ?? AGENT_NAMES.claude;
   const { t } = useT(agentName);
   const caps = status?.caps;
   const agentCtx = useMemo(() => ({ id: agentId, name: agentName, caps: caps ?? {} }), [agentId, agentName, caps]);

@@ -1,7 +1,7 @@
 //! 飞书机器人 = 助理的另一个输入框（docs/FEISHU_BOT.md）。
 //!
 //! - **收**：绑定的人私聊机器人、或在群里 @ 机器人 → 拼成一句话交给助理（`assistant`），跟在助理页上说的一样；
-//!   别人发的、别人 @ 机器人的一律不理。引用的那条（谁说的、说了什么）、合并转发的聊天记录、图片和文件一起带上；
+//!   别人 @ 机器人：对得上助理在等的事（[`assistant::Wait`]）就叫醒助理，对不上就私聊转给用户（[`on_other`]）。引用的那条（谁说的、说了什么）、合并转发的聊天记录、图片和文件一起带上；
 //!   1 秒内连发的几条合成一句；收到就加“正在输入”表情，这一轮结束去掉。
 //! - **回**：私聊里每一轮一张流式卡片，回复用户那条；群里等这一轮说完，发一条 post 回复用户那条，开头 @ 相关的人（§3）：
 //!   被引用的那条的发送人、用户这条里 @ 的人；引用的是机器人自己的回复时，沿用那次 @ 过的人。
@@ -113,6 +113,8 @@ pub struct Bot {
     live: Mutex<HashMap<String, String>>,
     /// 机器人自己的 open_id（应用 id → open_id）
     bot: Mutex<Option<(String, String)>>,
+    /// 别人 @ 机器人转给用户：上次转的时间（按人，防刷屏）
+    relayed: Mutex<HashMap<String, Instant>>,
 }
 
 impl Bot {
@@ -467,6 +469,138 @@ async fn quoted(app: &App, api: &Api, f: &Feishu, id: &str, en: bool) -> Option<
     }
 }
 
+// ---------------- 认人 ----------------
+
+/// 看看见过的人（别人的消息里只有 open_id，名字只能从 @ 里认）：用户 @ 过的、引用过的
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Person {
+    id: String,
+    name: String,
+    #[serde(default)]
+    chat: String,
+    t: i64,
+}
+
+const PEOPLE_KEY: &str = "feishu_bot.people";
+const PEOPLE_MAX: usize = 300;
+/// 别人 @ 机器人、没在等他：同一个人多久最多转给用户一条
+const RELAY_GAP: Duration = Duration::from_secs(300);
+
+fn people(store: &crate::store::Store) -> Vec<Person> {
+    store.get(PEOPLE_KEY).ok().flatten().unwrap_or_default()
+}
+
+fn note_people(store: &crate::store::Store, list: &[Who], chat: &str) {
+    let list: Vec<&Who> = list.iter().filter(|w| w.id.starts_with("ou_") && !w.name.trim().is_empty()).collect();
+    if list.is_empty() {
+        return;
+    }
+    let now = crate::util::system_ms();
+    let mut all = people(store);
+    for w in list {
+        all.retain(|p| !(p.id == w.id && p.chat == chat));
+        all.push(Person { id: w.id.clone(), name: w.name.trim().to_string(), chat: chat.to_string(), t: now });
+    }
+    if all.len() > PEOPLE_MAX {
+        all.drain(..all.len() - PEOPLE_MAX);
+    }
+    let _ = store.set(PEOPLE_KEY, &all);
+}
+
+/// 按名字认人（同名的优先这个群里见过的、再最近见过的）
+pub fn person(store: &crate::store::Store, name: &str, chat: Option<&str>) -> Option<Who> {
+    let want = name.trim().trim_start_matches('@').trim().to_lowercase();
+    if want.is_empty() {
+        return None;
+    }
+    people(store).into_iter().filter(|p| p.name.to_lowercase() == want).max_by_key(|p| (chat.is_some_and(|c| c == p.chat), p.t)).map(|p| Who { id: p.id, name: p.name })
+}
+
+fn person_name(store: &crate::store::Store, id: &str) -> Option<String> {
+    people(store).into_iter().rev().find(|p| p.id == id).map(|p| p.name)
+}
+
+/// 别人（不是绑定的人）在群里发了一条。只看 @ 了机器人的：对得上在等的事 → 叫醒助理；对不上 → 私聊转给用户。
+/// 别人的话只是信号：不进助理当指令，不在群里替用户回答（docs/FEISHU_BOT.md「别人 @ 机器人」）
+pub async fn on_other(app: &App, f: &Feishu, ev: &Value, sender: &str) {
+    let msg = &ev["message"];
+    let (Some(id), Some(me)) = (msg["message_id"].as_str(), f.open_id.clone()) else { return };
+    if !enabled(app) || sender == me {
+        return;
+    }
+    let api = app.notify.api(f);
+    let Some(bot) = app.notify.bot.bot_id(f, &api).await else { return };
+    if !mentions_bot(msg, &bot) {
+        return;
+    }
+    let en = load_rules(&app.store).lang.starts_with("en");
+    let chat = msg["chat_id"].as_str().unwrap_or_default().to_string();
+    note_people(&app.store, &mentioned(msg, &bot, &me), &chat);
+    let mut text = clean_mentions(&message_text(msg), &msg["mentions"], &bot);
+    if !attachments(msg).is_empty() {
+        text.push_str(&tr(en, "\n（附了图片 / 文件，在群里看）", "\n(with images / files; see the group)"));
+    }
+    let text: String = text.chars().take(2000).collect();
+    let name = person_name(&app.store, sender).unwrap_or_default();
+    let label = if name.is_empty() { tr(en, "群里有人", "Someone in a group") } else { name.clone() };
+    let who = Who { id: sender.to_string(), name: name.clone() };
+    let mut cands = assistant::waits_for(&assistant::waits(&app.store), &chat, sender);
+    cands.sort_by_key(|(_, sure)| !*sure);
+    if let Some((w, sure)) = cands.into_iter().next() {
+        tracing::info!(wait = %w.id, sure, "飞书：别人 @ 机器人，对上了在等的事");
+        let unsure = if sure { String::new() } else { tr(en, &format!("（看看认不出是不是{}本人）", w.who.as_ref().map(|x| x.name.as_str()).unwrap_or("")), " (Looklook can't tell whether it's really them)") };
+        let source = format!("{label}在飞书群里 @ 了你{unsure}：\n{}", quote_lines(&text));
+        let head = tr(en, &format!("「{}」有动静了：{label}说「{}」", w.label(), text.chars().take(200).collect::<String>()), &format!("“{}” has news: {label} said “{}”", w.label(), text.chars().take(200).collect::<String>()));
+        let woke = if w.go {
+            let notice = format!("{head}\n{}", tr(en, "助理在处理，会在群里回他。", "The assistant is on it and will reply in the group."));
+            if let Err(e) = api.send_text(&me, &notice).await {
+                tracing::warn!(error = %e, "飞书：在等的事有动静，没能私聊告诉用户");
+            }
+            let link = FeishuLink { chat: chat.clone(), msg: id.to_string(), at: crate::util::system_ms(), group: true, mentions: vec![who] };
+            crate::gateway::assistant::wait_signal(app, &w.id, &source, Some(link), "你这一轮最后一段会回到群里那条消息下面并 @ 他：一句话（比如“收到，开始接了”“好，弄好了再 @ 我”），不讲过程、不客套。").await
+        } else {
+            match api.send_text_id(&me, &head).await {
+                Ok(notice) => {
+                    let link = FeishuLink { chat: String::new(), msg: notice, at: crate::util::system_ms(), group: false, mentions: vec![] };
+                    let woke = crate::gateway::assistant::wait_signal(app, &w.id, &source, Some(link), "你这一轮最后一段会私聊发给用户（回复看看刚发给他的那条提醒）：一句话问要不要现在做，不讲过程。").await;
+                    if woke {
+                        reply(&api, id, &tr(en, "收到，已转告。", "Got it, passed on.")).await;
+                    }
+                    woke
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "飞书：在等的事有动静，没能私聊告诉用户");
+                    false
+                }
+            }
+        };
+        if !woke {
+            let more = tr(en, "（这件事已经叫醒助理好几次了，之后只转给你；不用等了就在助理页删掉。）", "(This has woken the assistant several times; from now on it's only passed to you. Remove it on the assistant page if no longer needed.)");
+            if let Err(e) = api.send_text(&me, &format!("{head}\n{more}")).await {
+                tracing::warn!(error = %e, "飞书：没能转给用户");
+            }
+        }
+        return;
+    }
+    // 没在等他：转给用户（同一个人 5 分钟最多一条），不进助理、不在群里回
+    {
+        let mut g = lock(&app.notify.bot.relayed);
+        g.retain(|_, t| t.elapsed() < RELAY_GAP);
+        if g.contains_key(sender) {
+            return;
+        }
+        g.insert(sender.to_string(), Instant::now());
+    }
+    let body = tr(
+        en,
+        &format!("{label}在群里 @ 了助理：\n{}\n\n助理没在等这个人，所以没处理，也没在群里回。要助理处理，就引用这条跟它说。", quote_lines(&text)),
+        &format!("{label} @-ed the assistant in a group:\n{}\n\nThe assistant wasn't waiting on them, so it did nothing and didn't reply there. Quote this message to ask the assistant to handle it.", quote_lines(&text)),
+    );
+    if let Err(e) = api.send_text(&me, &body).await {
+        tracing::warn!(error = %e, "飞书：别人 @ 机器人，没能转给用户");
+    }
+}
+
 // ---------------- 记下的回复 ----------------
 
 fn replies(app: &App) -> Vec<Reply> {
@@ -587,6 +721,8 @@ pub async fn on_message(app: &App, f: &Feishu, ev: &Value) {
         }
         text = clean_mentions(&text, &msg["mentions"], &bot);
         mentions = mentioned(msg, &bot, &me);
+        // 记下用户 @ 过的人：之后“等张三…”能认出张三
+        note_people(&app.store, &mentions, &chat);
     }
     if !enabled(app) {
         return reply(&api, id, &tr(en, "飞书机器人没有打开：到看看的助理页打开「飞书机器人」。", "The Feishu bot is off. Turn it on in LookLook → Assistant.")).await;
@@ -633,6 +769,7 @@ pub async fn on_message(app: &App, f: &Feishu, ev: &Value) {
                 match (&q.user, q.mine) {
                     (Some(u), _) if *u != me => {
                         let w = Who { id: u.clone(), name };
+                        note_people(&app.store, std::slice::from_ref(&w), &chat);
                         // 被引用的人排第一个
                         mentions.retain(|x| x.id != w.id);
                         mentions.insert(0, w);
@@ -1579,11 +1716,14 @@ mod tests {
         tokio::time::sleep(END_SETTLE * 2).await;
         println!("1. 私聊 ok");
 
-        // 2. 群里：别人 @ 机器人不理；用户引用张三的话再 @ 机器人 → 助理收到引用，回复是 post，@ 张三
+        // 2. 群里：别人 @ 机器人（没在等他）→ 私聊转给用户，不在群里回、不进助理；用户引用张三的话再 @ 机器人 → 助理收到引用，回复是 post，@ 张三
         let before = fake.reqs().len();
         fake.push("event", msg_ev("om_x1", "group", "ou_other", "@_user_1 你好", None, at_bot.clone())).await;
+        fake.wait_after(before, "别人 @ 机器人转给用户", 30, |r| r.method == "POST" && r.path.contains("receive_id_type=open_id") && r.text().contains("在群里 @ 了助理") && r.text().contains("你好")).await;
+        assert!(fake.reqs().iter().skip(before).all(|r| !r.path.contains("om_x1")), "别人 @ 机器人不在群里回");
+        fake.push("event", msg_ev("om_x2", "group", "ou_other", "@_user_1 还在吗", None, at_bot.clone())).await;
         tokio::time::sleep(Duration::from_secs(3)).await;
-        assert!(fake.reqs().iter().skip(before).all(|r| !r.path.contains("om_x1")), "别人 @ 机器人不该理");
+        assert!(fake.reqs().iter().skip(before).all(|r| !r.text().contains("还在吗")), "同一个人 5 分钟只转一条");
         fake.push("event", msg_ev("om_g1", "group", "ou_me", "@_user_1 只回复三个字：在这里。不要用任何工具。", Some("om_q"), at_bot.clone())).await;
         let post = fake.wait_after(before, "群里的回复（post）", 240, |r| r.path.contains("/om_g1/reply") && r.json()["msg_type"] == "post").await;
         let c = post.content();
@@ -1616,6 +1756,26 @@ mod tests {
         assert_eq!(post.content()["zh_cn"]["content"][0][0]["tag"], "md", "说了别 @ 就不 @");
         tokio::time::sleep(END_SETTLE * 2).await;
         println!("4. 追问 / 别 @ ok");
+
+        // 4b. 等着的事：用户在群里交代“等张三做好登录接口就接”（@ 了张三，看看认得他）→ 助理 wait_add；
+        //     张三 @ 机器人说好了 → 私聊告诉用户有动静，助理这一轮回到张三那条下面并 @ 他
+        let before = fake.reqs().len();
+        let at_bot_zhang = json!([{ "key": "@_user_1", "id": { "open_id": "ou_bot" }, "name": "看看" }, { "key": "@_user_2", "id": { "open_id": "ou_zhang" }, "name": "张三" }]);
+        fake.push("event", msg_ev("om_w1", "group", "ou_me", "@_user_1 等 @_user_2 把登录接口做好，好了你就直接接上（测试：到时候只在群里回一句“收到”，别开会话）。现在用 wait_add 记下来，回我一个字：好。", None, at_bot_zhang)).await;
+        fake.wait_after(before, "交代等着的事的回复", 240, |r| r.path.contains("/om_w1/reply") && r.json()["msg_type"] == "post").await;
+        let w = crate::assistant::waits(&store).into_iter().next().expect("助理记下了等着的事");
+        assert_eq!(w.who.as_ref().map(|x| x.id.as_str()), Some("ou_zhang"), "{w:?}");
+        assert_eq!(w.chat.as_deref(), Some("oc_group"));
+        tokio::time::sleep(END_SETTLE * 2).await;
+        let before = fake.reqs().len();
+        fake.push("event", msg_ev("om_w2", "group", "ou_zhang", "@_user_1 登录接口好了，在 /api/login", None, at_bot.clone())).await;
+        fake.wait_after(before, "私聊告诉用户有动静", 30, |r| r.method == "POST" && r.path.contains("receive_id_type=open_id") && r.text().contains("有动静了")).await;
+        let post = fake.wait_after(before, "助理回到张三那条下面", 240, |r| r.path.contains("/om_w2/reply") && r.json()["msg_type"] == "post").await;
+        assert_eq!(post.content()["zh_cn"]["content"][0][0]["user_id"], "ou_zhang");
+        let t = said_text(&chat, &brain, "登录接口好了").await;
+        assert!(t.starts_with("<looklook-event type=\"wait\"") && t.contains("张三在飞书群里 @ 了你"), "{t}");
+        tokio::time::sleep(END_SETTLE * 2).await;
+        println!("4b. 等着的事 ok");
 
         // 5. 帮助卡片；关掉机器人后只回一句怎么打开
         let before = fake.reqs().len();

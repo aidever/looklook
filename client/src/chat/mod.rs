@@ -829,7 +829,7 @@ impl Chat {
     /// 大脑每一轮带上的话（两种引擎共用）
     pub(super) fn assistant_context(&self) -> String {
         let (errands, doing): (Vec<_>, Vec<_>) = self.assistant_doing().into_iter().partition(|d| crate::assistant::is_errand(&self.store, &d.session));
-        crate::assistant::turn_context(&self.paths, crate::assistant::settings(&self.store).mode, &doing, &errands)
+        crate::assistant::turn_context(&self.paths, crate::assistant::settings(&self.store).mode, &doing, &errands, &crate::assistant::waits(&self.store))
     }
 
     /// 大脑要用工具：按助理的权限模式过闸门（Claude Code 的 PreToolUse、Codex 的审批请求都走这里）
@@ -845,14 +845,8 @@ impl Chat {
             .filter_map(|sid| {
                 let row = self.store.instance(&sid).ok().flatten()?;
                 let b = self.brief(&sid).unwrap_or_default();
-                let state = match b["board"].as_str() {
-                    Some("working") => "在干活",
-                    Some("attn") => "等用户处理（审批或提问）",
-                    Some("ended") => "这一轮做完了",
-                    Some("stopped") => "停了",
-                    _ => "空闲",
-                };
-                Some(crate::assistant::Doing { session: sid, title: if row.name.is_empty() { b["title"].as_str().map(String::from).unwrap_or_default() } else { row.name }, project: row.workdir, state: state.to_string() })
+                let state = crate::assistant::doing_state(&b, crate::util::system_ms());
+                Some(crate::assistant::Doing { session: sid, title: if row.name.is_empty() { b["title"].as_str().map(String::from).unwrap_or_default() } else { row.name }, project: row.workdir, state })
             })
             .collect()
     }

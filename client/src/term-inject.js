@@ -960,7 +960,7 @@
   // 手机上：终端连不上、正在连接时，从顶部往下拉刷新整个页面（让管理台刷新）；终端正常时下拉是翻看终端，不处理。
   function setupPullRefresh() {
     if (!touch) return;
-    var start = null, ind = null, dist = 0;
+    var start = null, sx = 0, locked = false, ind = null, dist = 0;
     var LIMIT = 72;
     function render() {
       if (!ind) {
@@ -976,14 +976,25 @@
     document.addEventListener('touchstart', function (e) {
       if (connOk || e.touches.length !== 1) return reset();
       start = e.touches[0].clientY;
+      sx = e.touches[0].clientX;
+      locked = false;
     }, { capture: true, passive: true });
     document.addEventListener('touchmove', function (e) {
       if (start === null) return;
-      dist = Math.max(0, e.touches[0].clientY - start);
+      if (e.touches.length !== 1) return reset();
+      var dy = e.touches[0].clientY - start, dx = e.touches[0].clientX - sx;
+      if (!locked) {
+        // 先动 10px 再判断方向：往上划、横着划都不算下拉
+        if (Math.abs(dx) + Math.abs(dy) < 10) return;
+        if (dy <= 0 || Math.abs(dx) > dy) return reset();
+        locked = true;
+        start += 10;
+      }
+      dist = Math.max(0, (e.touches[0].clientY - start) * 0.55);
       if (dist > 8) render();
     }, { capture: true, passive: true });
     document.addEventListener('touchend', function () {
-      var go = start !== null && dist >= LIMIT;
+      var go = start !== null && locked && dist >= LIMIT;
       reset();
       if (!go) return;
       if (window.parent !== window) {

@@ -2864,7 +2864,8 @@
   },
   "pull": {
     "pull": "下拉刷新",
-    "release": "松开刷新"
+    "release": "松开刷新",
+    "refreshing": "正在刷新…"
   },
   "sync": {
     "title": "设置同步",
@@ -3988,7 +3989,12 @@
       "rerouted": "去向改了：",
       "show": "看原文",
       "hide": "收起",
-      "handoff": "带过来的对话："
+      "handoff": "带过来的对话：",
+      "wait": "在等的事有动静了：",
+      "wait_overdue": "在等的事到期限了：",
+      "note": "干活的会话找你：",
+      "waiting_approval": "审批等了很久：",
+      "stalled": "很久没动静："
     },
     "engine": "底下用",
     "engine_hint": "助理用哪个工具来想事情、派活。界面、工具、规矩都一样；派出去干活的会话两种都能用。",
@@ -4046,7 +4052,8 @@
     "group": {
       "waiting": "等你",
       "working": "在干",
-      "done": "做完了"
+      "done": "做完了",
+      "waits": "在等"
     },
     "activity_empty": "现在没有派出去的活。跟助理说要干什么，它派出去的会话和后台跑腿都会出现在这里。",
     "back_activity": "回到活动",
@@ -4065,6 +4072,15 @@
     "from": "助理派来的",
     "from_errand": "助理的后台跑腿",
     "back": "回到助理",
-    "clear_done": "清掉"
+    "clear_done": "清掉",
+    "wait": {
+      "then_go": "好了直接：{{then}}",
+      "then_ask": "好了先问你：{{then}}",
+      "then_tell": "好了告诉你",
+      "overdue": "过期限了",
+      "exhausted": "之后只转给你",
+      "session": "接着的会话",
+      "remove": "不用等了"
+    }
   }
 }

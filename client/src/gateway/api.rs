@@ -49,6 +49,7 @@ pub fn routes(app: App) -> Router<App> {
         .route("/assistant/of/{id}", get(super::assistant::of_session))
         .route("/assistant/dispatches/{id}/fix", post(super::assistant::fix))
         .route("/assistant/agreements/remove", post(super::assistant::agreement_remove))
+        .route("/assistant/waits/remove", post(super::assistant::wait_remove))
         .route("/assistant/watch/{session}", delete(super::assistant::unwatch))
         .route("/assistant/lark", get(super::assistant::lark).post(super::assistant::lark_next))
         .route("/instances", get(list_instances).post(create_instance))

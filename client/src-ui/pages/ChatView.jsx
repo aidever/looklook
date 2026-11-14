@@ -37,6 +37,7 @@ import {
   GitFork,
   Globe,
   History,
+  Hand,
   Hourglass,
   Image as ImageIcon,
   Download,
@@ -1119,7 +1120,7 @@ const LONG_LINES = 12;
 
 // 助理（docs/ASSISTANT.md）：看看把派出去的会话的消息（做完、在问、排队的开了、去向改了）按这个格式送进助理的对话
 const EVENT_OPEN = '<looklook-event';
-const EVENT_ICON = { turn_end: CircleCheck, question: MessageCircleQuestion, started: Play, start_failed: TriangleAlert, rerouted: ArrowRightLeft };
+const EVENT_ICON = { turn_end: CircleCheck, question: MessageCircleQuestion, started: Play, start_failed: TriangleAlert, rerouted: ArrowRightLeft, wait: Hourglass, wait_overdue: Hourglass, note: Info, waiting_approval: Hand, stalled: TriangleAlert };
 
 export function parseAssistantEvent(text) {
   const m = text.match(/^<looklook-event\s([^>]*)>\n?([\s\S]*?)\n?<\/looklook-event>\s*$/);

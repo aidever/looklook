@@ -2,7 +2,7 @@
 // 新开会话还是接着原来的，把活派给 Claude Code / Codex；小事自己做。这一页 = 和助理的对话 + 它派出去在干的活 + 每次派到哪、为什么（去向条，能改）
 // + 口头约定。助理不绑定某个工具：底下用 Claude Code 还是 Codex（引擎）、它自己动手时怎么管（权限模式）都在页头选，
 // 两种引擎各是这台电脑上一个藏起来的对话模式会话（不在会话列表里），对话直接用 ChatView。
-import { Activity, ArrowLeft, ArrowRightLeft, Bot, Check, ChevronRight, ExternalLink, Eye, Hand, ListChecks, Loader2, MessageCircleQuestion, RotateCcw, Search, Send, Settings2, Sparkles, Square, X, Zap } from 'lucide-react';
+import { Activity, ArrowLeft, ArrowRightLeft, Bot, Check, ChevronRight, ExternalLink, Eye, Hand, Hourglass, ListChecks, Loader2, MessageCircleQuestion, RotateCcw, Search, Send, Settings2, Sparkles, Square, X, Zap } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -426,7 +426,8 @@ function ActivityTab({ state, onOpen, onChange }) {
   return (
     <>
       <InheritSwitch state={state} onChange={onChange} />
-      {groups.length === 0 ? (
+      <Waits waits={state.waits ?? []} onOpen={onOpen} onChange={onChange} />
+      {groups.length === 0 ? (state.waits ?? []).length > 0 ? null : (
         <p className="muted asst-small asst-empty">{t('asst.activity_empty')}</p>
       ) : (
         groups.map(([k, list]) => (
@@ -465,6 +466,50 @@ function ActivityTab({ state, onOpen, onChange }) {
         )}
       </section>
     </>
+  );
+}
+
+/** 在等的事（docs/ASSISTANT.md「等着的事」）：等谁、等什么、好了做什么；对上了助理会被叫醒。不用等了点 × */
+function Waits({ waits, onOpen, onChange }) {
+  const { t } = useTranslation();
+  const toast = useToast();
+  if (waits.length === 0) return null;
+  const drop = (id) => api.post('/assistant/waits/remove', { id }).then(onChange, (e) => toast(errorText(t, e), 'error'));
+  return (
+    <section>
+      <h3 className="asst-h asst-h-sm">
+        {t('asst.group.waits')} <span className="muted">{waits.length}</span>
+      </h3>
+      <ul className="asst-agree">
+        {waits.map((w) => (
+          <li key={w.id}>
+            <Hourglass size={14} aria-hidden="true" className="asst-agree-ico" />
+            <span>
+              {w.who?.name && <strong>{w.who.name} · </strong>}
+              {w.git?.ref && <code className="asst-wait-ref">{w.git.ref}</code>}
+              {w.git?.ref && ' · '}
+              {w.what}
+              <span className="muted asst-wait-sub">
+                {w.then ? t(w.go ? 'asst.wait.then_go' : 'asst.wait.then_ask', { then: w.then }) : t('asst.wait.then_tell')}
+                {w.overdue_told && <> · {t('asst.wait.overdue')}</>}
+                {w.signals >= 5 && <> · {t('asst.wait.exhausted')}</>}
+                {w.session && (
+                  <>
+                    {' · '}
+                    <button type="button" className="link-btn asst-link" onClick={() => onOpen(w.session)}>
+                      {t('asst.wait.session')}
+                    </button>
+                  </>
+                )}
+              </span>
+            </span>
+            <button type="button" className="btn btn-plain btn-icon btn-sm" onClick={() => drop(w.id)} aria-label={t('asst.wait.remove')} title={t('asst.wait.remove')}>
+              <X size={14} aria-hidden="true" />
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 

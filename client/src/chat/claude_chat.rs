@@ -276,6 +276,9 @@ impl Chat {
             args.extend(crate::assistant::brain_args(&self.paths));
         } else if gated {
             args.extend(crate::assistant::errand_args());
+        } else if crate::assistant::is_worker(&self.store, id) {
+            // 助理开的会话：多一个找助理的工具（assistant_note）
+            args.extend(crate::assistant::worker_args(&self.paths, id));
         }
         if let Some(m) = model.or_else(|| brain.then(|| crate::assistant::DEFAULT_MODEL.to_string())) {
             args.extend(["--model".into(), m]);

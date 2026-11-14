@@ -183,8 +183,14 @@ impl Api {
 
     /// 发一句文字给某人（绑定成功的回复）
     pub async fn send_text(&self, open_id: &str, text: &str) -> Result<()> {
+        self.send_text_id(open_id, text).await.map(drop)
+    }
+
+    /// 同上，返回消息 id（之后要回复它）
+    pub async fn send_text_id(&self, open_id: &str, text: &str) -> Result<String> {
         let body = json!({ "receive_id": open_id, "msg_type": "text", "content": json!({ "text": text }).to_string() });
-        self.call(reqwest::Method::POST, "/open-apis/im/v1/messages?receive_id_type=open_id", &body).await.map(drop)
+        let d = self.call(reqwest::Method::POST, "/open-apis/im/v1/messages?receive_id_type=open_id", &body).await?;
+        d["message_id"].as_str().map(String::from).ok_or_else(|| anyhow!("没有 message_id"))
     }
 
     /// 更新已发的卡片（14 天内，卡片要带 `update_multi: true`）

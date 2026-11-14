@@ -2488,6 +2488,8 @@ button.chat-task-head.chat-task-main { flex-direction: row; align-items: center;
 }
 .pull-arrow { display: inline-block; transition: transform .15s; color: var(--brand); font-weight: 700; }
 .pull-arrow.ready { transform: rotate(180deg); }
+.pull-arrow.pull-spin { animation: pull-spin .8s linear infinite; }
+@keyframes pull-spin { to { transform: rotate(360deg); } }
 @media (hover: none) and (pointer: coarse) { html, body { overscroll-behavior-y: none; } }
 /* 不用浏览器的滚动锚定（Android Chrome 等）：系统页的占用排行、任务看板、会话列表、电脑列表都会定时刷新、换位置，
    浏览器拿其中一项当锚点，那一项一挪整页就跟着上下跳（手机上滑动时“抽搐”）。整页、抽屉、会话栏的滚动区域都关掉 */
@@ -4049,6 +4051,8 @@ button.link-badge:hover { filter: brightness(1.15); }
 .asst-h-act { margin-left: auto; min-height: 26px; padding: 0 8px; font-weight: 400; }
 .asst-inherit { padding: 10px 12px 2px; border-radius: 10px; background: var(--bg); }
 .asst-agree-ico { flex: none; margin-top: 5px; color: var(--muted); }
+.asst-wait-sub { display: block; margin-top: 2px; font-size: 12px; }
+.asst-wait-ref { font-size: 12px; overflow-wrap: anywhere; }
 .asst-pane { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .asst-pane-head { gap: 4px; padding: 0 4px; }
 .asst-pane-title { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; font-size: 14px; }

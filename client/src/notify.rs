@@ -1029,10 +1029,13 @@ impl Notifier {
         let Some(f) = load_feishu(&app.store) else { return };
         let msg = &ev["message"];
         let Some(open_id) = ev["sender"]["sender_id"]["open_id"].as_str() else { return };
-        // 群里：只有绑定的人 @ 机器人才算（docs/FEISHU_BOT.md），别人的一律不理，也不回话
+        // 群里：绑定的人 @ 机器人 = 跟助理说话；别人 @ 机器人只是信号（docs/FEISHU_BOT.md）
         if msg["chat_type"] == "group" {
             if f.open_id.as_deref() == Some(open_id) {
                 crate::feishu_bot::on_message(app, &f, ev).await;
+            } else {
+                // 别人 @ 机器人：对上在等的事叫醒助理，对不上私聊转给用户
+                crate::feishu_bot::on_other(app, &f, ev, open_id).await;
             }
             return;
         }

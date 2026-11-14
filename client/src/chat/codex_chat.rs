@@ -468,14 +468,21 @@ impl Chat {
         if crate::assistant::is_errand(&self.store, id) {
             return crate::assistant::codex_errand_thread();
         }
-        if let Some(perm) = lock(&self.inst(id).st).codex.perm.clone() {
+        let mut v = if let Some(perm) = lock(&self.inst(id).st).codex.perm.clone() {
             let (approval, sandbox, _) = perm_params(&perm);
             json!({ "approvalPolicy": approval, "sandbox": sandbox })
         } else if self.instances.opts(id).full_access {
             json!({ "approvalPolicy": "never", "sandbox": "danger-full-access" })
         } else {
             json!({})
+        };
+        // 助理开的会话：多一个找助理的工具（assistant_note）
+        if let Some(addr) = *lock(&self.addr) {
+            if let Some(cfg) = crate::assistant::codex_worker_config(&self.store, id, addr) {
+                v["config"] = cfg;
+            }
         }
+        v
     }
 
     /// `thread/start`、`thread/resume`、`thread/fork` 的参数：权限，加上这个会话的 Codex 配置选的服务商和模型

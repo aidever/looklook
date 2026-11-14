@@ -2864,7 +2864,8 @@
   },
   "pull": {
     "pull": "Pull to refresh",
-    "release": "Release to refresh"
+    "release": "Release to refresh",
+    "refreshing": "Refreshing…"
   },
   "sync": {
     "title": "Settings sync",
@@ -3988,7 +3989,12 @@
       "rerouted": "Redirected:",
       "show": "Show message",
       "hide": "Hide",
-      "handoff": "Conversation carried over from"
+      "handoff": "Conversation carried over from",
+      "wait": "Something you were waiting for happened:",
+      "wait_overdue": "Waiting past the deadline:",
+      "note": "A session reached out:",
+      "waiting_approval": "Approval waiting a long time:",
+      "stalled": "No progress for a while:"
     },
     "engine": "Runs on",
     "engine_hint": "Which tool the assistant uses to think and dispatch. The page, tools and rules are the same; dispatched sessions can use either.",
@@ -4046,7 +4052,8 @@
     "group": {
       "waiting": "Needs you",
       "working": "Working",
-      "done": "Done"
+      "done": "Done",
+      "waits": "Waiting for"
     },
     "activity_empty": "Nothing handed off right now. Sessions the assistant starts and its background errands show up here.",
     "back_activity": "Back to activity",
@@ -4065,6 +4072,15 @@
     "from": "Started by the assistant",
     "from_errand": "Assistant's background errand",
     "back": "Back to assistant",
-    "clear_done": "Clear"
+    "clear_done": "Clear",
+    "wait": {
+      "then_go": "Then, without asking: {{then}}",
+      "then_ask": "Then ask you first: {{then}}",
+      "then_tell": "Then tell you",
+      "overdue": "Past the deadline",
+      "exhausted": "Now only passed to you",
+      "session": "Session to continue",
+      "remove": "Stop waiting"
+    }
   }
 }
